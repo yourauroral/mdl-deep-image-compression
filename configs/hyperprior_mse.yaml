@@ -1,0 +1,6 @@
+exp_name: "v0.0.1_scaffold"
+dataset:
+  name: "vimeo90k"
+  root: "/root/autodl-tmp/datasets/vimeo90k"
+trainer:
+  out_dir: "/root/autodl-tmp/experiments/mdlic"
