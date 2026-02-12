@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+.env
+.ipynb_checkpoints/
+
+# Experiments / outputs (DO NOT COMMIT)
+experiments/
+outputs/
+checkpoints/
+runs/
+wandb/
+*.pth
+*.pt
+
+# Datasets (DO NOT COMMIT)
+datasets/
+data/raw/
+data/processed/
+
+# OS/Editor
+.DS_Store
+.vscode/
