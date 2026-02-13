@@ -24,3 +24,6 @@ data/processed/
 # OS/Editor
 .DS_Store
 .vscode/
+
+# Test images (DO NOT COMMIT)
+assets/
