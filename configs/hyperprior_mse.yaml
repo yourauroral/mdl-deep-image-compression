@@ -1,6 +1,33 @@
-exp_name: "v0.0.1_scaffold"
+cat > configs/hyperprior_mse.yaml << 'EOF'
+# ============================================
+# Hyperprior MSE Configuration
+# ============================================
+# 基于 MSE 失真度量的 Scale Hyperprior 模型配置
+#
+# 参考:
+#   [2] Ballé et al., ICLR 2018
+
+exp_name: "hyperprior_mse"
+
+model:
+  name: "hyperprior"
+  N: 128
+  M: 192
+
 dataset:
-  name: "vimeo90k"
-  root: "/root/autodl-tmp/datasets/vimeo90k"
+  name: "div2k"
+  train_dir: "datasets/div2k/train"
+  valid_dir: "datasets/div2k/valid"
+  test:
+    kodak: "datasets/kodak/test"
+    clic: "datasets/clic2020/professional"
+    tecnick: "datasets/tecnick/sampling"
+  patch_size: 256
+
 trainer:
-  out_dir: "/root/autodl-tmp/experiments/mdlic"
+  epochs: 300
+  batch_size: 8
+  lr: 1.0e-4
+  lmbda: 0.01
+  clip_max_norm: 1.0
+  out_dir: "outputs/hyperprior_mse"
