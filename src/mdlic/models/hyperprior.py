@@ -29,6 +29,7 @@ Scale Hyperprior Model
 
 import torch 
 import torch.nn as nn 
+import torch.nn.functional as F
 
 from .layers import conv, deconv, ResidualBlock
 from ..entropy import FactorizedPrior, GaussianConditional
@@ -114,8 +115,13 @@ class HyperpriorModel(nn.Module):
 
         # 由 z_hat 生成 y 的条件分布参数 [2][3]
         y_params = self.h_s(z_hat)
+        if y_params.shape[2:] != y.shape[2:]:
+            y_params = F.interpolate(y_params, size=y.shape[2:], mode='bilinear', align_corners=False)
+        
         means, scales = y_params.chunk(2, dim=1)  # 前 M 通道是 mean，后 M 通道是 scale
-
+        scales = F.softplus(scales) + 1e-4
+        # print(f"scales: min {scales.min().item():.4f}, max {scales.max().item():.4f}, mean {scales.mean().item():.4f}")
+        
         # ---- y的量化 & 估计似然 ---- [2][3]
         y_hat, y_likelihoods = self.gaussian_conditional(y, scales, means)
 
