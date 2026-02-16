@@ -39,7 +39,7 @@ class GaussianConditional(nn.Module):
         likelihoods: 每个元素的条件概率质量
     """
 
-    SCALE_MIN = 0.11
+    SCALE_MIN = 0.5
     """
     scale 下界，防止标准差过小导致数值不稳定。
     参考 [2] 中对 σ 的 clamp 处理。

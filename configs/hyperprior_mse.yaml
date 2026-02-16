@@ -1,33 +1,35 @@
-cat > configs/hyperprior_mse.yaml << 'EOF'
-# ============================================
-# Hyperprior MSE Configuration
-# ============================================
-# 基于 MSE 失真度量的 Scale Hyperprior 模型配置
-#
-# 参考:
-#   [2] Ballé et al., ICLR 2018
-
 exp_name: "hyperprior_mse"
 
 model:
-  name: "hyperprior"
   N: 128
   M: 192
 
-dataset:
-  name: "div2k"
-  train_dir: "datasets/div2k/train"
-  valid_dir: "datasets/div2k/valid"
+data:
+  train: "datasets/div2k/train"
+  valid: "datasets/div2k/valid"
   test:
     kodak: "datasets/kodak/test"
     clic: "datasets/clic2020/professional"
     tecnick: "datasets/tecnick/sampling"
   patch_size: 256
+  num_workers: 4
 
-trainer:
-  epochs: 300
+train:
+  epochs: 100
   batch_size: 8
   lr: 1.0e-4
-  lmbda: 0.01
+  lmbda: 1
+  loss: "mse"
   clip_max_norm: 1.0
-  out_dir: "outputs/hyperprior_mse"
+  seed: 42
+  lr_milestones: [200, 260]
+  lr_gamma: 0.1
+  log_freq: 100
+  save_freq: 10
+  log_dir: "experiments/hyperprior_mse/logs"  
+eval:
+  interval: 10
+
+checkpoint:
+  save_dir: "experiments/hyperprior_mse/checkpoints" 
+  save_interval: 10
