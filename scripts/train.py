@@ -83,28 +83,6 @@ def rate_distortion_loss(x, x_hat, likelihoods, num_pixels, lmbda, distortion_ty
     loss = bpp + lmbda * distortion
     return loss, bpp, distortion
 
-@torch.no_grad()
-def validate_igpt(model, loader, device):
-    model.eval()
-    total_bpp = 0
-    count = 0
-    for batch in loader:
-        if isinstance(batch, (list, tuple)):
-            x = batch[0]
-        else:
-            x = batch
-        x = x.to(device)
-        out = model(x)
-        loss = out["loss"]
-        seq_len = model.seq_len
-        total_nats = loss * (seq_len - 1) * x.shape[0]
-        total_bits = total_nats / math.log(2)
-        num_pixels = x.shape[0] * seq_len
-        bpp = total_bits / num_pixels
-        total_bpp += bpp.item()
-        count += 1
-    return total_bpp / count
-
 # ==================== Training ====================
 def train_one_epoch(model, loader, optimizer, scaler, lmbda, device,
                     epoch, log_freq, writer, clip_max_norm, model_type):
@@ -128,11 +106,14 @@ def train_one_epoch(model, loader, optimizer, scaler, lmbda, device,
 
         if scaler is not None:
             with autocast():
-                if config["model"]["type"] == "igpt":
-                    out = model(x) 
+                out = model(x)
+                if model_type == "igpt":
                     loss = out["loss"] 
+                    seq_len = model.seq_len
+                    total_nats = loss * (seq_len - 1) * B 
+                    bpp = (total_nats / math.log(2)) / num_pixels
+                    mse = torch.tensor(0.0, device=device)
                 else:
-                    out = model(x)
                     loss, bpp, mse = rate_distortion_loss(
                         x, out['x_hat'], out['likelihoods'],
                         num_pixels, lmbda, 'mse'
@@ -144,9 +125,12 @@ def train_one_epoch(model, loader, optimizer, scaler, lmbda, device,
             scaler.update()
         else:
             out = model(x)
-
-            if config["model"]["type"] == "igpt":
-                return validate_igpt(model, loader, device) 
+            if model_type == "igpt":
+                loss = out["loss"]
+                seq_len = model.seq_len
+                total_nats = loss * (seq_len - 1) * B
+                bpp = (total_nats / math.log(2)) / num_pixels
+                mse = torch.tensor(0.0, device=device)
             else:
                 loss, bpp, mse = rate_distortion_loss(
                     x, out['x_hat'], out['likelihoods'],
@@ -177,39 +161,66 @@ def train_one_epoch(model, loader, optimizer, scaler, lmbda, device,
 
 # ==================== Validation ====================
 @torch.no_grad()
-def validate(model, loader, device):
+def validate(model, loader, device, model_type="hyperprior"):
     model.eval()
-    total_psnr = 0
-    total_ssim = 0
-    total_bpp = 0
-    count = 0
-    for x in loader:
-        x = x.to(device)
-        _, _, h, w = x.shape
+    if model_type == "igpt":
+        total_bpp = 0
+        total_loss = 0
+        count = 0
+        for batch in loader:
+            if isinstance(batch, (list, tuple)):
+                x = batch[0]
+            else:
+                x = batch
+            x = x.to(device)
+            out = model(x) 
+            loss = out["loss"] 
+            seq_len = model.seq_len
+            total_nats = loss * (seq_len - 1) * x.shape[0]
+            total_bits = total_nats / math.log(2)
+            num_pixels = x.shape[0] * seq_len
+            bpp = total_bits / num_pixels
+            total_bpp += bpp
+            total_loss += loss.item()
+            count += 1
+        avg_bpp = total_bpp / count
+        avg_loss = total_loss / count
 
-        # Pad to multiples of 16 (required by model)
-        pad_h = (16 - h % 16) % 16
-        pad_w = (16 - w % 16) % 16
-        if pad_h > 0 or pad_w > 0:
-            x_pad = F.pad(x, (0, pad_w, 0, pad_h), mode='reflect')
-        else:
-            x_pad = x
+        return 0.0, 0.0, avg_bpp, avg_loss
+    else:
+        total_psnr = 0
+        total_ssim = 0
+        total_bpp = 0
+        count = 0
+        for x in loader:
+            if isinstance(x, (list, tuple)):
+                x = x[0]
+            x = x.to(device)
+            _, _, h, w = x.shape
 
-        out = model(x_pad)
+            # Pad to multiples of 16 (required by model)
+            pad_h = (16 - h % 16) % 16
+            pad_w = (16 - w % 16) % 16
+            if pad_h > 0 or pad_w > 0:
+                x_pad = F.pad(x, (0, pad_w, 0, pad_h), mode='reflect')
+            else:
+                x_pad = x
 
-        # Crop back to original size
-        if pad_h > 0 or pad_w > 0:
-            out['x_hat'] = out['x_hat'][:, :, :h, :w]
+            out = model(x_pad)
 
-        num_pixels = h * w * x.shape[0]  # original pixel count
-        bpp = compute_bpp(out['likelihoods'], num_pixels)
-        psnr_val = psnr(x, out['x_hat'])
-        ssim_val = compute_ssim(x, out['x_hat'])
-        total_psnr += psnr_val
-        total_ssim += ssim_val
-        total_bpp += bpp
-        count += 1
-    return total_psnr / count, total_ssim / count, total_bpp / count
+            # Crop back to original size
+            if pad_h > 0 or pad_w > 0:
+                out['x_hat'] = out['x_hat'][:, :, :h, :w]
+
+            num_pixels = h * w * x.shape[0]  # original pixel count
+            bpp = compute_bpp(out['likelihoods'], num_pixels)
+            psnr_val = psnr(x, out['x_hat'])
+            ssim_val = compute_ssim(x, out['x_hat'])
+            total_psnr += psnr_val
+            total_ssim += ssim_val
+            total_bpp += bpp
+            count += 1
+        return total_psnr / count, total_ssim / count, total_bpp / count, 0.0
 
 # ==================== Main ====================
 def main():
@@ -374,28 +385,40 @@ def main():
 
         # Validation
         if epoch % config['eval']['interval'] == 0:
-            psnr_avg, ssim_avg, bpp_avg = validate(model, valid_loader, device)
-            if rank == 0:
-                print(f"Validation: PSNR {psnr_avg:.2f} dB, SSIM {ssim_avg:.4f}, Bpp {bpp_avg:.4f}")
-                if writer:
-                    writer.add_scalar('val/psnr', psnr_avg, epoch)
-                    writer.add_scalar('val/ssim', ssim_avg, epoch)
-                    writer.add_scalar('val/bpp', bpp_avg, epoch)
+            model_type = config["model"]["type"]
+            if model_type == "igpt":
+                # igpt return (psnr = 0.0, ssim = 0.0 , bpp, loss)
+                _, _, bpp_avg, loss_avg = validate(model, valid_loader, device, model_type) 
+                psnr_avg, ssim_avg = 0.0, 0.0
+                if rank == 0:
+                    print(f"Validation: Loss {loss_avg:.4f}, Bpp {bpp_avg:.4f}")
+                    if writer:
+                        writer.add_scalar('val/loss', loss_avg, epoch) 
+                        writer.add_scalar('val/bpp', bpp_avg, epoch) 
+            else: 
+                psnr_avg, ssim_avg, bpp_avg, _ = validate(model, valid_loader, device, model_type)
+                if rank == 0:
+                    print(f"Validation: PSNR {psnr_avg:.2f} dB, SSIM {ssim_avg:.4f}, Bpp {bpp_avg:.4f}")
+                    if writer:
+                        writer.add_scalar('val/psnr', psnr_avg, epoch)
+                        writer.add_scalar('val/ssim', ssim_avg, epoch)
+                        writer.add_scalar('val/bpp', bpp_avg, epoch)
 
-                # Save best model
-                if psnr_avg > best_psnr:
+            # Save best model
+            if model_type != "igpt" and psnr_avg > best_psnr:
                     best_psnr = psnr_avg
                     torch.save(model.state_dict(), os.path.join(checkpoint_dir, 'best.pth'))
 
-            # Test datasets
-            for name, loader in test_loaders.items():
-                psnr_test, ssim_test, bpp_test = validate(model, loader, device)
-                if rank == 0:
-                    print(f"Test {name}: PSNR {psnr_test:.2f} dB, SSIM {ssim_test:.4f}, Bpp {bpp_test:.4f}")
-                    if writer:
-                        writer.add_scalar(f'test/{name}_psnr', psnr_test, epoch)
-                        writer.add_scalar(f'test/{name}_ssim', ssim_test, epoch)
-                        writer.add_scalar(f'test/{name}_bpp', bpp_test, epoch)
+            # Test Datasets
+            if model_type != "igpt":
+                for name, loader in test_loaders.items():
+                    psnr_test, ssim_test, bpp_test, _ = validate(model, loader, device, model_type)
+                    if rank == 0:
+                        print(f"Test {name}: PSNR {psnr_test:.2f} dB, SSIM {ssim_test:.4f}, Bpp {bpp_test:.4f}")
+                        if writer:
+                            writer.add_scalar(f'test/{name}_psnr', psnr_test, epoch)
+                            writer.add_scalar(f'test/{name}_ssim', ssim_test, epoch)
+                            writer.add_scalar(f'test/{name}_bpp', bpp_test, epoch)
 
         # Step scheduler
         if scheduler is not None:
