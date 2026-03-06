@@ -1,6 +1,7 @@
 exp_name: "hyperprior_mse"
 
 model:
+  type: hyperprior
   N: 128
   M: 192
 
