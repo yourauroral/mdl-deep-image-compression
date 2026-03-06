@@ -1,0 +1,32 @@
+exp_name: "igpt_experiment"
+
+model:
+  type: igpt
+  image_size: 32
+  in_channels: 3
+  vocab_size: 256
+  d_model: 128
+  N: 2
+  h: 4
+  d_ff: 512
+  dropout: 0.1
+
+data:
+  train: datasets/
+  valid: datasets/
+  patch_size: null
+  num_workers: 4
+
+train:
+  batch_size: 64
+  lr: 3e-4
+  epochs: 30
+  log_freq: 50
+  clip_max_norm: 1.0
+  lmbda: 0.01
+
+eval:
+  interval: 1
+
+checkpoint:
+  save_interval: 5

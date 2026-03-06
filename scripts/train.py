@@ -60,7 +60,6 @@ class ImageFolderDataset(Dataset):
         x = self.transform(img)
         return x
 
-
 # ==================== Loss ====================
 def rate_distortion_loss(x, x_hat, likelihoods, num_pixels, lmbda, distortion_type='mse'):
     total_bits = 0
@@ -84,29 +83,60 @@ def rate_distortion_loss(x, x_hat, likelihoods, num_pixels, lmbda, distortion_ty
     loss = bpp + lmbda * distortion
     return loss, bpp, distortion
 
+@torch.no_grad()
+def validate_igpt(model, loader, device):
+    model.eval()
+    total_bpp = 0
+    count = 0
+    for batch in loader:
+        if isinstance(batch, (list, tuple)):
+            x = batch[0]
+        else:
+            x = batch
+        x = x.to(device)
+        out = model(x)
+        loss = out["loss"]
+        seq_len = model.seq_len
+        total_nats = loss * (seq_len - 1) * x.shape[0]
+        total_bits = total_nats / math.log(2)
+        num_pixels = x.shape[0] * seq_len
+        bpp = total_bits / num_pixels
+        total_bpp += bpp.item()
+        count += 1
+    return total_bpp / count
 
 # ==================== Training ====================
 def train_one_epoch(model, loader, optimizer, scaler, lmbda, device,
-                    epoch, log_freq, writer, clip_max_norm):
+                    epoch, log_freq, writer, clip_max_norm, model_type):
     model.train()
     total_loss = 0
     total_bpp = 0
     total_mse = 0
     steps = len(loader)
 
-    for i, x in enumerate(loader):
+    for i, batch in enumerate(loader):
+        if isinstance(batch, (list, tuple)):
+            x = batch[0]
+        else:
+            x = batch 
+        
         x = x.to(device)
-        num_pixels = x.shape[2] * x.shape[3] * x.shape[0]  # batch * H * W
+        B, C, H, W = x.shape
+        num_pixels = B * H * W 
 
         optimizer.zero_grad()
 
         if scaler is not None:
             with autocast():
-                out = model(x)
-                loss, bpp, mse = rate_distortion_loss(
-                    x, out['x_hat'], out['likelihoods'],
-                    num_pixels, lmbda, 'mse'
-                )
+                if config["model"]["type"] == "igpt":
+                    out = model(x) 
+                    loss = out["loss"] 
+                else:
+                    out = model(x)
+                    loss, bpp, mse = rate_distortion_loss(
+                        x, out['x_hat'], out['likelihoods'],
+                        num_pixels, lmbda, 'mse'
+                    )
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), clip_max_norm)
@@ -114,10 +144,14 @@ def train_one_epoch(model, loader, optimizer, scaler, lmbda, device,
             scaler.update()
         else:
             out = model(x)
-            loss, bpp, mse = rate_distortion_loss(
-                x, out['x_hat'], out['likelihoods'],
-                num_pixels, lmbda, 'mse'
-            )
+
+            if config["model"]["type"] == "igpt":
+                return validate_igpt(model, loader, device) 
+            else:
+                loss, bpp, mse = rate_distortion_loss(
+                    x, out['x_hat'], out['likelihoods'],
+                    num_pixels, lmbda, 'mse'
+                )
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), clip_max_norm)
             optimizer.step()
@@ -218,10 +252,35 @@ def main():
         writer = None
 
     # Datasets
-    train_dataset = ImageFolderDataset(
-        root=config['data']['train'],
-        patch_size=config['data']['patch_size']
-    )
+    from torchvision.datasets import CIFAR100
+    from torchvision import transforms
+    if config["model"]["type"] == "igpt": 
+        transform = transforms.ToTensor()
+        train_dataset = CIFAR100(
+            root=config["data"]["train"],
+            train=True,
+            download=False,
+            transform=transform
+        )
+        valid_dataset = CIFAR100(
+            root=config["data"]["valid"],
+            train=False,
+            download=False,
+            transform=transform
+        )
+        test_loaders = {} 
+    else:
+        # Hyperprior / compression models 
+        train_dataset = ImageFolderDataset(
+            root=config['data']['train'],
+            patch_size=config['data']['patch_size']
+        )
+        valid_dataset = ImageFolderDataset(
+            root=config['data']['valid'],
+            patch_size=None 
+        )
+        test_loaders = {} 
+
     if distributed:
         train_sampler = DistributedSampler(train_dataset, shuffle=True)
         shuffle = False
@@ -238,10 +297,6 @@ def main():
         drop_last=True
     )
 
-    valid_dataset = ImageFolderDataset(
-        root=config['data']['valid'],
-        patch_size=None
-    )
     valid_loader = DataLoader(
         valid_dataset,
         batch_size=1,
@@ -258,7 +313,23 @@ def main():
             test_loaders[name] = DataLoader(test_dataset, batch_size=1, shuffle=False, num_workers=1)
 
     # Model
-    model = HyperpriorModel(N=config['model']['N'], M=config['model']['M'])
+    from src.mdlic.models.igpt import IGPT 
+    if config["model"]["type"] == "hyperprior":
+        model = HyperpriorModel(
+            N=config['model']['N'], 
+            M=config['model']['M']
+        )
+    elif config["model"]["type"] == "igpt":
+        model = IGPT(
+            image_size=config["model"]["image_size"],
+            in_channels=config["model"]["in_channels"],
+            vocab_size=config["model"]["vocab_size"],
+            d_model=config["model"]["d_model"],
+            N=config["model"]["N"],
+            h=config["model"]["h"],
+            d_ff=config["model"]["d_ff"],
+            dropout=config["model"]["dropout"]
+        )  
     model = model.to(device)
     if distributed:
         model = torch.nn.parallel.DistributedDataParallel(
@@ -266,14 +337,14 @@ def main():
         )
 
     # Optimizer
-    optimizer = optim.Adam(model.parameters(), lr=config['train']['lr'])
+    optimizer = optim.Adam(model.parameters(), lr=float(config["train"]["lr"]))
 
     # Learning rate scheduler
-    if 'lr_milestones' in config['train']:
+    if "lr_milestones" in config["train"]:
         scheduler = optim.lr_scheduler.MultiStepLR(
             optimizer,
-            milestones=config['train']['lr_milestones'],
-            gamma=config['train'].get('lr_gamma', 0.1)
+            milestones=config["train"]["lr_milestones"],
+            gamma=config["train"].get("lr_gamma", 0.1)
         )
     else:
         scheduler = None
@@ -289,12 +360,13 @@ def main():
 
         loss, bpp, mse = train_one_epoch(
             model, train_loader, optimizer, scaler,
-            lmbda=config['train']['lmbda'],
+            lmbda=config["train"]["lmbda"],
             device=device,
             epoch=epoch,
             log_freq=config['train']['log_freq'],
             writer=writer,
-            clip_max_norm=config['train']['clip_max_norm']
+            clip_max_norm=config['train']['clip_max_norm'],
+            model_type=config["model"]["type"]
         )
 
         if rank == 0:
