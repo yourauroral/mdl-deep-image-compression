@@ -3,7 +3,7 @@
 Training script for Scale Hyperprior image compression model.
 
 Usage:
-    python scripts/train.py --config configs/hyperprior_mse.yaml
+    python scripts/train.py --config configs/igpt_small.yaml
 """
 
 import os
@@ -102,16 +102,14 @@ def train_one_epoch(model, loader, optimizer, scaler, lmbda, device,
         B, C, H, W = x.shape
         num_pixels = B * H * W 
 
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
 
         if scaler is not None:
             with autocast():
                 out = model(x)
                 if model_type == "igpt":
                     loss = out["loss"] 
-                    seq_len = model.seq_len
-                    total_nats = loss * (seq_len - 1) * B 
-                    bpp = (total_nats / math.log(2)) / num_pixels
+                    bpp = loss / math.log(2) 
                     mse = torch.tensor(0.0, device=device)
                 else:
                     loss, bpp, mse = rate_distortion_loss(
@@ -127,9 +125,7 @@ def train_one_epoch(model, loader, optimizer, scaler, lmbda, device,
             out = model(x)
             if model_type == "igpt":
                 loss = out["loss"]
-                seq_len = model.seq_len
-                total_nats = loss * (seq_len - 1) * B
-                bpp = (total_nats / math.log(2)) / num_pixels
+                bpp = loss / math.log(2) 
                 mse = torch.tensor(0.0, device=device)
             else:
                 loss, bpp, mse = rate_distortion_loss(
@@ -175,11 +171,7 @@ def validate(model, loader, device, model_type="hyperprior"):
             x = x.to(device)
             out = model(x) 
             loss = out["loss"] 
-            seq_len = model.seq_len
-            total_nats = loss * (seq_len - 1) * x.shape[0]
-            total_bits = total_nats / math.log(2)
-            num_pixels = x.shape[0] * seq_len
-            bpp = total_bits / num_pixels
+            bpp = loss / math.log(2) 
             total_bpp += bpp
             total_loss += loss.item()
             count += 1

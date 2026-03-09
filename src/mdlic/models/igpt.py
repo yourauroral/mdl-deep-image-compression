@@ -36,28 +36,31 @@ class IGPT(nn.Module):
     self.head = nn.Linear(d_model, vocab_size) 
   
   def forward(self, x):
+    x = x.clamp(0, 1)
     B = x.size(0) 
 
     x = (x * 255).long() 
-    x = x.view(B, -1) 
+    x = x.reshape(B, -1) 
 
     input_tokens = x[:, :-1] 
     target_tokens = x[:, 1:]
 
     x = self.token_embed(input_tokens)
-    x = x + self.pos_embed[:, :-1, :] 
+    x = x + self.pos_embed[:, :input_tokens.size(1), :] 
 
-    mask = generate_causal_mask(input_tokens.size(1), x.device) 
+    # mask = generate_causal_mask(input_tokens.size(1), x.device) 
 
     for block in self.blocks:
-      x = block(x, mask) 
+      x = block(x, mask=None) 
     
     x = self.norm(x) 
-    logits = self.head(x) 
+    logits = self.head(x).float() 
+    logits = torch.clamp(logits, min=-20, max=20) #防止极端值
 
     loss = F.cross_entropy(
       logits.reshape(-1, self.vocab_size),
-      target_tokens.reshape(-1) 
+      target_tokens.reshape(-1),
+      reduction="mean"  
     )
 
     return {
