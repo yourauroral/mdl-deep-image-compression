@@ -1,4 +1,4 @@
-exp_name: "hyperprior_mse"
+exp_name: "hyperprior_mse_lmbda0.01"  
 
 model:
   type: hyperprior
@@ -19,18 +19,18 @@ train:
   epochs: 100
   batch_size: 8
   lr: 1.0e-4
-  lmbda: 1
+  lmbda: 0.01            
   loss: "mse"
   clip_max_norm: 1.0
   seed: 42
-  lr_milestones: [200, 260]
+  lr_milestones: [60, 85]  
   lr_gamma: 0.1
   log_freq: 100
-  save_freq: 10
-  log_dir: "experiments/hyperprior_mse/logs"  
+ 
+
 eval:
   interval: 10
 
 checkpoint:
-  save_dir: "experiments/hyperprior_mse/checkpoints" 
+  save_dir: "experiments/hyperprior_mse_lmbda0.01/checkpoints"
   save_interval: 10
