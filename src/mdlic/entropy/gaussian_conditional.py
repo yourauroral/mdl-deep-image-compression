@@ -62,7 +62,7 @@ class GaussianConditional(nn.Module):
       self, 
       y: torch.Tensor,
       scales: torch.Tensor,
-      means: torch.Tensor = None,
+      means: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
       """
       前向传播。
@@ -83,7 +83,9 @@ class GaussianConditional(nn.Module):
         # 推理时：先减去mean，round，再加回mean
         y_hat = torch.round(y - means) + means
       
-      # 中心化：以mean为中心计算偏移[3]
+      # 训练时 y_hat = y + noise
+      # centered = (y + noise) - means，即噪声扰动后相对 mean 的偏移
+      # [1] Section 3 连续松弛
       centered = y_hat - means
 
       # 似然 = Φ((centered + 0.5) / σ) - Φ((centered - 0.5) / σ)  [2] 

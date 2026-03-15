@@ -90,7 +90,7 @@ class FactorizedPrior(nn.Module):
             # w: (C, out_dim, in_dim), logits: (B, C, in_dim, HW)
             # -> (B, C, out_dim, HW)
             logits = torch.einsum("coi,bcin->bcon", w, logits)
-            logits = logits + bias.unsqueeze(0)  # broadcast bias
+            logits = logits + bias  # (C, out_dim, 1) 直接 broadcast 到 (B, C, out_dim, HW)
 
             # 中间层：加非线性 [1] Appendix C
             if i < len(self._factors):

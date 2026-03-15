@@ -31,4 +31,4 @@ def ste_round(x: torch.Tensor) -> torch.Tensor:
   """
   Straight-Through Estimator (STE): 前向round,反向直通梯度。
   """
-  return x + (touch.round(x)-x).detach() 
+  return x + (torch.round(x)-x).detach() 
