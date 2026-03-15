@@ -109,7 +109,7 @@ def train_one_epoch(model, loader, optimizer, scaler, lmbda, device,
                 out = model(x)
                 if model_type == "igpt":
                     loss = out["loss"] 
-                    bpp = loss / math.log(2) 
+                    bpp = (loss / math.log(2)) * (H * W * C) / (H * W) 
                     mse = torch.tensor(0.0, device=device)
                 else:
                     loss, bpp, mse = rate_distortion_loss(
@@ -172,7 +172,7 @@ def validate(model, loader, device, model_type="hyperprior"):
             out = model(x) 
             loss = out["loss"] 
             bpp = loss / math.log(2) 
-            total_bpp += bpp
+            total_bpp += bpp.item()
             total_loss += loss.item()
             count += 1
         avg_bpp = total_bpp / count
@@ -355,7 +355,8 @@ def main():
     # Mixed precision
     scaler = GradScaler() if torch.cuda.is_available() else None
 
-    best_psnr = 0
+    best_psnr = 0.0
+    best_bpp = float('inf') 
 
     for epoch in range(1, config['train']['epochs'] + 1):
         if distributed:
@@ -397,9 +398,14 @@ def main():
                         writer.add_scalar('val/bpp', bpp_avg, epoch)
 
             # Save best model
-            if model_type != "igpt" and psnr_avg > best_psnr:
-                    best_psnr = psnr_avg
-                    torch.save(model.state_dict(), os.path.join(checkpoint_dir, 'best.pth'))
+            if model_type != "igpt":
+                if bpp_avg < best_bpp:
+                    best_bpp = bpp_avg
+                    torch.save(model.state_dict(), os.path.join(checkpoint_dir, 'best_igpt.pth'))
+                else:
+                    if psnr_avg > best_psnr:
+                        best_psnr = psnr_avg
+                        torch.save(model_state_dict(), os.path.join(checkpoint_dir, 'best.pth'))     
 
             # Test Datasets
             if model_type != "igpt":

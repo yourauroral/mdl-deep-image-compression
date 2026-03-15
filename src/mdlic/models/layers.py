@@ -3,6 +3,18 @@ import torch.nn as nn
 import torch.nn.functional as F 
 import math 
 
+class RotaryEmbedding(nn.Module):
+  def __init__(self, dim: int):
+    super().__init__()
+    # dim is d_k (head dimension), must be even
+    assert dim % 2 == 0
+    # precompute the inverse frequencies 
+    # shape: (dim // 2, ) 
+    inv_freq = 1.0 / (10000 ** (torch.arange(0, dim, 2).float() / dim)) 
+    self.register_buffer('inv_freq', inv_freq)
+  
+  def forwar(self, )
+
 class LayerNormalization(nn.Module):
   def __init__(self, features: int, eps:float=10**-6) -> None:
       super().__init__()

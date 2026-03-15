@@ -582,7 +582,8 @@ class TritonAttention(torch.autograd.Function):
 
         dO = dO.contiguous()
         assert dO.is_contiguous()
-        assert Q.stride() == K.stride() == V.stride() == O.stride() == dO.stride()
+        # assert Q.stride() == K.stride() == V.stride() == O.stride() == dO.stride()
+        assert Q.is_contiguous() and K.is_contiguous() and V.is_contiguous() 
         dQ = torch.empty_like(Q)
         dK = torch.empty_like(K)
         dV = torch.empty_like(V)
