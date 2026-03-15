@@ -354,8 +354,27 @@ def main():
         )
 
     # Optimizer
-    optimizer = optim.Adam(model.parameters(), lr=float(config["train"]["lr"]))
+    def get_param_groups(model, weight_decay=0.1):
+        """Embeddings 和 bias/norm 不加 weight decay"""
+        no_decay = set()
+        for name, _ in model.named_parameters():
+            if any(nd in name for nd in ['token_embed', 'norm', 'bias']):
+                no_decay.add(name)
 
+        params_decay = [p for n, p in model.named_parameters() if n not in no_decay]
+        params_no_decay = [p for n, p in model.named_parameters() if n in no_decay]
+
+        return [
+            {"params": params_decay,    "weight_decay": weight_decay},
+            {"params": params_no_decay, "weight_decay": 0.0},
+        ]
+
+    optimizer = optim.AdamW(
+        get_param_groups(model),
+        lr=float(config["train"]["lr"]),
+        betas=(0.9, 0.95),
+        eps=float(config["train"].get("eps", 1e-8)),
+    )
     # Learning rate scheduler
     if "lr_milestones" in config["train"]:
         scheduler = optim.lr_scheduler.MultiStepLR(

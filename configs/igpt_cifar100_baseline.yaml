@@ -12,8 +12,8 @@ model:
   dropout: 0.1
 
 data:
-  use_cifar: true
-  cifar_root: datasets/
+  train: datasets/
+  valid: datasets/
   patch_size: null
   num_workers: 4
 
@@ -22,6 +22,7 @@ train:
   batch_size: 64 # 4090: 64; H800/H20: 256
   grad_accum_steps: 8 
   lr: 3e-4
+  eps: 1e-8
   epochs: 100
   log_freq: 100
   clip_max_norm: 1.0

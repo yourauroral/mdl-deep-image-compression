@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F 
 import math 
 
-from .layers import LayerNormalization, GPTBlock
+from .layers import LayerNormalization, GPTBlock, RMSNorm
 
 def generate_causal_mask(seq_len, device):
   mask = torch.tril(torch.ones(seq_len, seq_len, device=device)) 
@@ -31,9 +31,20 @@ class IGPT(nn.Module):
       for _ in range(N) 
     ])
 
-    self.norm = LayerNormalization(d_model) 
+    self.norm = RMSNorm(d_model) 
     self.head = nn.Linear(d_model, vocab_size) 
+
+    self._init_weights()
   
+  def _init_weights(self):
+    for module in self.modules():
+      if isinstance(module, nn.Linear):
+        nn.init.normal_(module.weight, mean=0.0, std=0.02)
+        if module.bias is not None:
+          nn.init.zeros_(module.bias)
+      elif isinstance(module, nn.Embedding):
+        nn.init.normal_(module.weight, mean=0.0, std=0.02) 
+
   def forward(self, x):
     x = x.clamp(0, 1)
     B = x.size(0) 
@@ -53,13 +64,18 @@ class IGPT(nn.Module):
     
     x = self.norm(x) 
     logits = self.head(x).float() 
-    logits = torch.clamp(logits, min=-20, max=20) #防止极端值
 
-    loss = F.cross_entropy(
+    ce_loss = F.cross_entropy(
       logits.reshape(-1, self.vocab_size),
       target_tokens.reshape(-1),
       reduction="mean"  
     )
+
+    log_z = torch.logsumexp(logits, dim=-1) 
+    z_loss = (log_z ** 2).mean()
+    z_loss_weight = 1e-4
+
+    loss = ce_loss + z_loss_weight * z_loss
 
     return {
       "loss": loss,
