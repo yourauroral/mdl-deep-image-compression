@@ -1,32 +1,30 @@
 # MDL Deep Image Compression
 
-基于最小描述长度（MDL）原则的深度学习图像压缩系统。  
-实现超先验（Hyperprior）和 iGPT 两种模型，支持训练、验证与测试。
+基于最小描述长度（MDL）原则的深度图像压缩，支持 Hyperprior 与 iGPT 两种模型。
 
-## 快速开始
+## 安装
 
-1. **安装依赖**  
-   ```bash
-   pip install torch torchvision pyyaml numpy pillow tensorboard
-   ```
+```bash
+pip install torch torchvision pyyaml numpy pillow tensorboard
+```
 
-2. **准备数据**  
-   - 超先验：图像文件夹（如 `datasets/div2k/train`）  
-   - iGPT：CIFAR-100（指向 `datasets/`）
+## 使用
 
-3. **修改配置**  
-   `configs/` 下已有示例（`hyperprior_mse.yaml`、`igpt_small.yaml`）
+```bash
+python scripts/train.py --config configs/igpt_cifar100_baseline.yaml
 
-4. **训练**  
-   ```bash
-   python scripts/train.py --config configs/你的配置.yaml
-   ```
+python scripts/train.py --config configs/hyperprior_mse.yaml
+```
 
-## 主要特点
-- 超先验 + iGPT 模型  
-- 模块化设计，配置文件驱动  
-- 支持混合精度、分布式训练  
-- 自动日志（TensorBoard）和指标（PSNR/SSIM/BPP）
+配置文件示例见 `configs/`，数据集放置于 `datasets/`。
 
-## 项目状态
-持续开发中，基础训练流程已跑通。欢迎 Issue 或 PR。
+## 特性
+
+- Hyperprior / iGPT 双模型支持
+- 混合精度训练（fp16 / bf16）与多 GPU 分布式
+- TensorBoard 日志 + PSNR / SSIM / BPP 指标
+- 配置文件驱动，零代码改动切换实验
+
+## 状态
+
+基础训练流程已验证，持续迭代中。欢迎 Issue 或 PR。
