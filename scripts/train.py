@@ -85,12 +85,14 @@ def rate_distortion_loss(x, x_hat, likelihoods, num_pixels, lmbda, distortion_ty
 
 # ==================== Training ====================
 def train_one_epoch(model, loader, optimizer, scaler, lmbda, device,
-                    epoch, log_freq, writer, clip_max_norm, model_type):
+                    epoch, log_freq, writer, clip_max_norm, model_type, amp_dtype=torch.float16, grad_accum_steps=1):
     model.train()
     total_loss = 0
     total_bpp = 0
     total_mse = 0
     steps = len(loader)
+
+    optimizer.zero_grad(set_to_none=True) 
 
     for i, batch in enumerate(loader):
         if isinstance(batch, (list, tuple)):
@@ -102,39 +104,45 @@ def train_one_epoch(model, loader, optimizer, scaler, lmbda, device,
         B, C, H, W = x.shape
         num_pixels = B * H * W 
 
-        optimizer.zero_grad(set_to_none=True)
-
         if scaler is not None:
-            with autocast():
+            with autocast(dtype=amp_dtype):
                 out = model(x)
                 if model_type == "igpt":
                     loss = out["loss"] 
-                    bpp = (loss / math.log(2)) * (H * W * C) / (H * W) 
+                    bpp = (loss / math.log(2)) * C
                     mse = torch.tensor(0.0, device=device)
                 else:
                     loss, bpp, mse = rate_distortion_loss(
                         x, out['x_hat'], out['likelihoods'],
                         num_pixels, lmbda, 'mse'
                     )
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), clip_max_norm)
-            scaler.step(optimizer)
-            scaler.update()
+            loss_scaled = loss / grad_accum_steps
+            scaler.scale(loss_scaled).backward()
         else:
             out = model(x)
             if model_type == "igpt":
                 loss = out["loss"]
-                bpp = loss / math.log(2) 
+                bpp = (loss / math.log(2)) * C
                 mse = torch.tensor(0.0, device=device)
             else:
                 loss, bpp, mse = rate_distortion_loss(
                     x, out['x_hat'], out['likelihoods'],
                     num_pixels, lmbda, 'mse'
                 )
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), clip_max_norm)
-            optimizer.step()
+            loss_scaled = loss / grad_accum_steps
+            loss_scaled.backward()
+        
+        if (i + 1) % grad_accum_steps == 0:
+            if scaler is not None:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), clip_max_norm) 
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), clip_max_norm)
+                optimizer.step()
+            
+            optimizer.zero_grad(set_to_none=True) 
 
         total_loss += loss.item()
         total_bpp += bpp.item()
@@ -171,7 +179,8 @@ def validate(model, loader, device, model_type="hyperprior"):
             x = x.to(device)
             out = model(x) 
             loss = out["loss"] 
-            bpp = loss / math.log(2) 
+            _, C, _, _ = x.shape 
+            bpp = (loss / math.log(2)) * C
             total_bpp += bpp.item()
             total_loss += loss.item()
             count += 1
@@ -224,6 +233,11 @@ def main():
     # Load config
     with open(args.config, 'r') as f:
         config = yaml.safe_load(f)
+
+    seed = config["train"].get("seed", 42)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
 
     exp_name = config['exp_name']
     out_dir = os.path.join('experiments', exp_name)
@@ -353,7 +367,9 @@ def main():
         scheduler = None
 
     # Mixed precision
-    scaler = GradScaler() if torch.cuda.is_available() else None
+    amp_dtype = torch.float16 if config["train"].get("amp_dtype", "fp16") == "fp16" else torch.bfloat16
+    scaler = GradScaler() if amp_dtype == torch.float16 else None  
+    grad_accum_steps = config["train"].get("grad_accum_steps", 1)
 
     best_psnr = 0.0
     best_bpp = float('inf') 
@@ -370,7 +386,9 @@ def main():
             log_freq=config['train']['log_freq'],
             writer=writer,
             clip_max_norm=config['train']['clip_max_norm'],
-            model_type=config["model"]["type"]
+            model_type=config["model"]["type"],
+            amp_dtype=amp_dtype,
+            grad_accum_steps=grad_accum_steps
         )
 
         if rank == 0:
@@ -398,14 +416,14 @@ def main():
                         writer.add_scalar('val/bpp', bpp_avg, epoch)
 
             # Save best model
-            if model_type != "igpt":
+            if model_type == "igpt":
                 if bpp_avg < best_bpp:
                     best_bpp = bpp_avg
                     torch.save(model.state_dict(), os.path.join(checkpoint_dir, 'best_igpt.pth'))
-                else:
-                    if psnr_avg > best_psnr:
-                        best_psnr = psnr_avg
-                        torch.save(model_state_dict(), os.path.join(checkpoint_dir, 'best.pth'))     
+            else:
+                if psnr_avg > best_psnr:
+                    best_psnr = psnr_avg
+                    torch.save(model.state_dict(), os.path.join(checkpoint_dir, 'best.pth'))     
 
             # Test Datasets
             if model_type != "igpt":
