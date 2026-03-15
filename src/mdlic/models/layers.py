@@ -13,7 +13,31 @@ class RotaryEmbedding(nn.Module):
     inv_freq = 1.0 / (10000 ** (torch.arange(0, dim, 2).float() / dim)) 
     self.register_buffer('inv_freq', inv_freq)
   
-  def forwar(self, )
+  def forwar(self, seq_len: int, device: torch.device):
+    #positions: (seq_len, ) 
+    t = torch.arange(seq_len, device=device).float()
+    # outer product: (seq_len , dim // 2) 
+    freqs = torch.outer(t, self.inv_freq)
+    # concat to (seq_len, dim) 
+    emb = torch.cat([freqs, freqs], dim=-1)
+    return emb.cos(), emb.sin()
+
+def rotate_half(x):
+  # x:(..., dim) 
+  # split into two halves and rotate 
+  x1 = x[..., :x.shape[-1] // 2] 
+  x2 = x[..., x.shape[-1] // 2 :] 
+  return torch.cat([-x2, x1], dim=-1)
+
+def apply_rotary_emb(q, k, cos, sin):
+  # q, k: (batch, heads, seq_len, d_k) 
+  # cos, sin: (seq_len, d_k) 
+  cos = cos.unsqueeze(0).unsqueeze(0) # (1, 1, seq_len, d_k) 
+  sin = sin.unsqueeze(0).unsqueeze(0) 
+
+  q = (q * cos) + (rotate_half(q) * sin) 
+  k = (k * cos) + (rotate_half(k) * sin) 
+  return q, k
 
 class LayerNormalization(nn.Module):
   def __init__(self, features: int, eps:float=10**-6) -> None:
@@ -79,6 +103,7 @@ class MultiHeadAttentionBlock(nn.Module):
       self.w_v = nn.Linear(d_model, d_model, bias=False) # Wv
       self.w_o = nn.Linear(d_model, d_model, bias=False) # Wo
       self.dropout = nn.Dropout(dropout)
+      self.rope = RotaryEmbedding(self.d_k) 
 
   # @staticmethod
   # def attention(query, key, value, mask, dropout: nn.Dropout):
@@ -120,14 +145,13 @@ class MultiHeadAttentionBlock(nn.Module):
   def forward(self, q, k, v, mask=None):
     batch_size, seq_len, _ = q.shape
     
-    query = self.w_q(q)
-    key = self.w_k(k)
-    value = self.w_v(v)
+    query = self.w_q(q).view(batch_size, seq_len, self.h, self.d_k).transpose(1, 2).contiguous()
+    key   = self.w_k(k).view(batch_size, seq_len, self.h, self.d_k).transpose(1, 2).contiguous()
+    value = self.w_v(v).view(batch_size, seq_len, self.h, self.d_k).transpose(1, 2).contiguous()
 
-    query = query.view(batch_size, seq_len, self.h, self.d_k).transpose(1, 2).contiguous()
-    key = key.view(batch_size, seq_len, self.h, self.d_k).transpose(1, 2).contiguous()
-    value = value.view(batch_size, seq_len, self.h, self.d_k).transpose(1, 2).contiguous()
-
+    cos, sin = self.rope(seq_len, q.device) 
+    query, key = apply_rotary_emb(query, key, cos, sin) 
+    
     causal = True 
     softmax_scale = 1.0 / (self.d_k ** 0.5)
     

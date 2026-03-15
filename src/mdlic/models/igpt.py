@@ -25,7 +25,6 @@ class IGPT(nn.Module):
     self.seq_len = image_size * image_size * in_channels
     self.vocab_size = vocab_size 
     self.token_embed = nn.Embedding(vocab_size, d_model) 
-    self.pos_embed = nn.Parameter(torch.zeros(1, self.seq_len, d_model))
 
     self.blocks = nn.ModuleList([
       GPTBlock(d_model, h, d_ff, dropout)
@@ -46,7 +45,6 @@ class IGPT(nn.Module):
     target_tokens = x[:, 1:]
 
     x = self.token_embed(input_tokens)
-    x = x + self.pos_embed[:, :input_tokens.size(1), :] 
 
     # mask = generate_causal_mask(input_tokens.size(1), x.device) 
 
