@@ -108,7 +108,7 @@ class HyperpriorModel(nn.Module):
         """
         # ---- encode ---- 
         y = self.g_a(x) 
-        z = self.h_a(torch.abs(y))  # [2]: h_a 输入是 |y|
+        z = self.h_a(y)  # [2]: h_a 输入是 |y|
 
         # ---- z的量化 & 估计似然 ---- [1][2] 
         z_hat, z_likelihoods = self.factorized_prior(z)

@@ -13,7 +13,7 @@ class RotaryEmbedding(nn.Module):
     inv_freq = 1.0 / (10000 ** (torch.arange(0, dim, 2).float() / dim)) 
     self.register_buffer('inv_freq', inv_freq)
   
-  def forwar(self, seq_len: int, device: torch.device):
+  def forward(self, seq_len: int, device: torch.device):
     #positions: (seq_len, ) 
     t = torch.arange(seq_len, device=device).float()
     # outer product: (seq_len , dim // 2) 

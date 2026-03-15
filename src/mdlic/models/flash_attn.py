@@ -66,8 +66,10 @@ def _attn_fwd_inner(
         l_i = l_i * alpha + l_ij
 
         V_block = tl.load(V_block_ptr)
-        V_block = V_block.to(tl.float16) # added 
-        P_block = P_block.to(tl.float16)
+        # V_block = V_block.to(tl.float16) # added 
+        # P_block = P_block.to(tl.float16)
+        V_block = V_block.to(Q.type.element_ty)
+        P_block = P_block.to(Q.type.element_ty) 
         # This computes the following: O_new = P x V + O_old * alpha
         O_block = O_block * alpha[:, None]
         O_block = tl.dot(P_block, V_block, O_block)
