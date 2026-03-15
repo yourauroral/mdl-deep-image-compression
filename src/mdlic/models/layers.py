@@ -39,6 +39,16 @@ def apply_rotary_emb(q, k, cos, sin):
   k = (k * cos) + (rotate_half(k) * sin) 
   return q, k
 
+class RMSNorm(nn.Module):
+  def __init__(self, features: int, eps: float = 1e-10):
+    super().__init__()
+    self.eps = eps 
+    self.weight = nn.Parameter(torch.ones(features))
+  
+  def forward(self, x):
+    rms = x.pow(2).mean(dim=-1, keepdim=True).add(self.eps).sqrt()
+    return self.weight * (x / rms)
+
 class LayerNormalization(nn.Module):
   def __init__(self, features: int, eps:float=10**-6) -> None:
       super().__init__()
@@ -103,6 +113,8 @@ class MultiHeadAttentionBlock(nn.Module):
       self.w_v = nn.Linear(d_model, d_model, bias=False) # Wv
       self.w_o = nn.Linear(d_model, d_model, bias=False) # Wo
       self.dropout = nn.Dropout(dropout)
+      self.q_norm = RMSNorm(self.d_k)
+      self.k_norm = RMSNorm(self.d_k)
       self.rope = RotaryEmbedding(self.d_k) 
 
   # @staticmethod
@@ -149,6 +161,9 @@ class MultiHeadAttentionBlock(nn.Module):
     key   = self.w_k(k).view(batch_size, seq_len, self.h, self.d_k).transpose(1, 2).contiguous()
     value = self.w_v(v).view(batch_size, seq_len, self.h, self.d_k).transpose(1, 2).contiguous()
 
+    query = self.q_norm(query)
+    key = self.k_norm(key)
+
     cos, sin = self.rope(seq_len, q.device) 
     query, key = apply_rotary_emb(query, key, cos, sin) 
     
@@ -166,19 +181,23 @@ class MultiHeadAttentionBlock(nn.Module):
 class GPTBlock(nn.Module):
   def __init__(self, d_model, h, d_ff, dropout):
     super().__init__()
-    self.norm1 = LayerNormalization(d_model)
-    self.norm2 = LayerNormalization(d_model)
+    self.norm1 = RMSNorm(d_model)
+    self.norm2 = RMSNorm(d_model)
     self.attn = MultiHeadAttentionBlock(d_model, h, dropout) 
     self.ff = FeedForwardBlock(d_model, d_ff, dropout)
   
   def forward(self, x, mask=None):
-    residual = x 
-    x = self.norm1(x) 
-    x = self.attn(x, x, x, mask) 
-    x = residual + x
+    # residual = x 
+    # x = self.norm1(x) 
+    # x = self.attn(x, x, x, mask) 
+    # x = residual + x
 
-    residual = x 
-    x = self.norm2(x)
-    x = self.ff(x) 
-    x = residual + x 
+    # residual = x 
+    # x = self.norm2(x)
+    # x = self.ff(x) 
+    # x = residual + x 
+    # OLMo 2: h := x + RMSNorm(Attention(x))
+    x = x + self.norm1(self.attn(x, x, x, mask))
+    # hout := h + RMSNorm(MLP(h))
+    x = x + self.norm2(self.ff(x)) 
     return x 
