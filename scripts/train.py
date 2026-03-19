@@ -85,7 +85,9 @@ def rate_distortion_loss(x, x_hat, likelihoods, num_pixels, lmbda, distortion_ty
 
 # ==================== Training ====================
 def train_one_epoch(model, loader, optimizer, scaler, lmbda, device,
-                    epoch, log_freq, writer, clip_max_norm, model_type, amp_dtype=torch.float16, grad_accum_steps=1):
+                    epoch, log_freq, writer, clip_max_norm, model_type,
+                    amp_dtype=torch.float16, grad_accum_steps=1,
+                    z_loss_weight=1e-4, mtp_weight=0.1):
     model.train()
     total_loss = 0
     total_bpp = 0
@@ -106,9 +108,11 @@ def train_one_epoch(model, loader, optimizer, scaler, lmbda, device,
 
         if scaler is not None:
             with autocast(dtype=amp_dtype):
-                out = model(x)
+                out = model(x) if model_type != "igpt" else model(
+                    x, z_loss_weight=z_loss_weight, mtp_weight=mtp_weight
+                )
                 if model_type == "igpt":
-                    loss = out["loss"] 
+                    loss = out["loss"]
                     bpp = (loss / math.log(2)) * C
                     mse = torch.tensor(0.0, device=device)
                 else:
@@ -116,10 +120,10 @@ def train_one_epoch(model, loader, optimizer, scaler, lmbda, device,
                         x, out['x_hat'], out['likelihoods'],
                         num_pixels, lmbda, 'mse'
                     )
-            loss_scaled = loss / grad_accum_steps
-            scaler.scale(loss_scaled).backward()
         else:
-            out = model(x)
+            out = model(x) if model_type != "igpt" else model(
+                x, z_loss_weight=z_loss_weight, mtp_weight=mtp_weight
+            )
             if model_type == "igpt":
                 loss = out["loss"]
                 bpp = (loss / math.log(2)) * C
@@ -178,26 +182,24 @@ def train_one_epoch(model, loader, optimizer, scaler, lmbda, device,
 def validate(model, loader, device, model_type="hyperprior"):
     model.eval()
     if model_type == "igpt":
-        total_bpp = 0
+        bpp_list = []
         total_loss = 0
-        count = 0
         for batch in loader:
             if isinstance(batch, (list, tuple)):
                 x = batch[0]
             else:
                 x = batch
             x = x.to(device)
-            out = model(x) 
-            loss = out["loss"] 
-            _, C, _, _ = x.shape 
+            out = model(x)
+            loss = out["loss"]
+            _, C, _, _ = x.shape
             bpp = (loss / math.log(2)) * C
-            total_bpp += bpp.item()
+            bpp_list.append(bpp.item())
             total_loss += loss.item()
-            count += 1
-        avg_bpp = total_bpp / count
-        avg_loss = total_loss / count
-
-        return 0.0, 0.0, avg_bpp, avg_loss
+        avg_bpp = float(np.mean(bpp_list))
+        std_bpp = float(np.std(bpp_list))
+        avg_loss = total_loss / len(bpp_list)
+        return 0.0, 0.0, avg_bpp, avg_loss, std_bpp
     else:
         total_psnr = 0
         total_ssim = 0
@@ -231,13 +233,14 @@ def validate(model, loader, device, model_type="hyperprior"):
             total_ssim += ssim_val
             total_bpp += bpp
             count += 1
-        return total_psnr / count, total_ssim / count, total_bpp / count, 0.0
+        return total_psnr / count, total_ssim / count, total_bpp / count, 0.0, 0.0
 
 # ==================== Main ====================
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, required=True, help='Path to config yaml')
     parser.add_argument('--local_rank', type=int, default=-1, help='For distributed training')
+    parser.add_argument('--resume', type=str, default=None, help='Path to checkpoint to resume from')
     args = parser.parse_args()
 
     # Load config
@@ -355,16 +358,16 @@ def main():
             N=config["model"]["N"],
             h=config["model"]["h"],
             d_ff=config["model"]["d_ff"],
-            dropout=config["model"]["dropout"]
-        )  
+            dropout=config["model"]["dropout"],
+            use_mtp=config["model"].get("use_mtp", False),
+        )
     model = model.to(device)
     if distributed:
         model = torch.nn.parallel.DistributedDataParallel(
             model, device_ids=[args.local_rank], output_device=args.local_rank
         )
 
-    # Optimizer
-    def get_param_groups(model, weight_decay=0.1):
+    # Optimizer    def get_param_groups(model, weight_decay=0.1):
         """Embeddings 和 bias/norm 不加 weight decay"""
         no_decay = set()
         for name, _ in model.named_parameters():
@@ -386,7 +389,36 @@ def main():
         eps=float(config["train"].get("eps", 1e-8)),
     )
     # Learning rate scheduler
-    if "lr_milestones" in config["train"]:
+    #
+    # Cosine decay with linear warmup（默认）:
+    #   参考:
+    #     [1] OLMo 2 Tech Report, arXiv:2501.00656, 2025, Section 3.3.
+    #         采用 warmup + cosine cooldown 调度，强调 cooldown 阶段对最终
+    #         模型质量的决定性影响。
+    #     [2] Loshchilov & Hutter, "SGDR: Stochastic Gradient Descent with
+    #         Warm Restarts," arXiv:1608.03983, 2016. Cosine annealing 原始论文。
+    #     [3] CS336 "Language Models from Scratch," Stanford, Spring 2024.
+    #         推荐 cosine decay + warmup 作为 transformer 训练的默认调度。
+    #
+    # 相比 MultiStepLR 的优势：
+    #   - 无需手动调 milestone，LR 平滑下降，训练末期细粒度更新；
+    #   - warmup 阶段防止大 LR 在训练初期破坏随机初始化的参数。
+    #
+    # 保留 MultiStepLR 作为 fallback，通过 config lr_schedule 字段切换。
+    lr_schedule = config["train"].get("lr_schedule", "cosine")
+    if lr_schedule == "cosine":
+        warmup_epochs = config["train"].get("warmup_epochs", 5)
+        total_epochs  = config["train"]["epochs"]
+        def lr_lambda(epoch):
+            # 线性 warmup: epoch 0 → warmup_epochs
+            if epoch < warmup_epochs:
+                return float(epoch + 1) / float(max(1, warmup_epochs))
+            # Cosine decay: warmup_epochs → total_epochs  [2]
+            progress = float(epoch - warmup_epochs) / float(max(1, total_epochs - warmup_epochs))
+            return 0.5 * (1.0 + math.cos(math.pi * progress))
+        scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+    elif lr_schedule == "multistep":
+        # 保留旧行为，通过 lr_milestones / lr_gamma 配置
         scheduler = optim.lr_scheduler.MultiStepLR(
             optimizer,
             milestones=config["train"]["lr_milestones"],
@@ -401,9 +433,18 @@ def main():
     grad_accum_steps = config["train"].get("grad_accum_steps", 1)
 
     best_psnr = 0.0
-    best_bpp = float('inf') 
+    best_bpp = float('inf')
 
-    for epoch in range(1, config['train']['epochs'] + 1):
+    start_epoch = 1
+    if args.resume:
+        ckpt = torch.load(args.resume, map_location=device)
+        model.load_state_dict(ckpt['model_state_dict'])
+        optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+        start_epoch = ckpt['epoch'] + 1
+        if rank == 0:
+            print(f"Resumed from checkpoint '{args.resume}' (epoch {ckpt['epoch']})")
+
+    for epoch in range(start_epoch, config['train']['epochs'] + 1):
         if distributed:
             train_sampler.set_epoch(epoch)
 
@@ -417,7 +458,9 @@ def main():
             clip_max_norm=config['train']['clip_max_norm'],
             model_type=config["model"]["type"],
             amp_dtype=amp_dtype,
-            grad_accum_steps=grad_accum_steps
+            grad_accum_steps=grad_accum_steps,
+            z_loss_weight=config["train"].get("z_loss_weight", 1e-4),
+            mtp_weight=config["train"].get("mtp_weight", 0.1),
         )
 
         if rank == 0:
@@ -428,15 +471,16 @@ def main():
             model_type = config["model"]["type"]
             if model_type == "igpt":
                 # igpt return (psnr = 0.0, ssim = 0.0 , bpp, loss)
-                _, _, bpp_avg, loss_avg = validate(model, valid_loader, device, model_type) 
+                _, _, bpp_avg, loss_avg, std_bpp = validate(model, valid_loader, device, model_type)
                 psnr_avg, ssim_avg = 0.0, 0.0
                 if rank == 0:
-                    print(f"Validation: Loss {loss_avg:.4f}, Bpp {bpp_avg:.4f}")
+                    print(f"Validation: Loss {loss_avg:.4f}, BPP {bpp_avg:.4f} ± {std_bpp:.4f}")
                     if writer:
-                        writer.add_scalar('val/loss', loss_avg, epoch) 
-                        writer.add_scalar('val/bpp', bpp_avg, epoch) 
+                        writer.add_scalar('val/loss', loss_avg, epoch)
+                        writer.add_scalar('val/bpp', bpp_avg, epoch)
+                        writer.add_scalar('val/bpp_std', std_bpp, epoch)
             else: 
-                psnr_avg, ssim_avg, bpp_avg, _ = validate(model, valid_loader, device, model_type)
+                psnr_avg, ssim_avg, bpp_avg, _, _ = validate(model, valid_loader, device, model_type)
                 if rank == 0:
                     print(f"Validation: PSNR {psnr_avg:.2f} dB, SSIM {ssim_avg:.4f}, Bpp {bpp_avg:.4f}")
                     if writer:
@@ -457,7 +501,7 @@ def main():
             # Test Datasets
             if model_type != "igpt":
                 for name, loader in test_loaders.items():
-                    psnr_test, ssim_test, bpp_test, _ = validate(model, loader, device, model_type)
+                    psnr_test, ssim_test, bpp_test, _, _ = validate(model, loader, device, model_type)
                     if rank == 0:
                         print(f"Test {name}: PSNR {psnr_test:.2f} dB, SSIM {ssim_test:.4f}, Bpp {bpp_test:.4f}")
                         if writer:

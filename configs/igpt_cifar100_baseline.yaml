@@ -8,8 +8,14 @@ model:
   d_model: 128
   N: 2
   h: 4
-  d_ff: 512
+  d_ff: 384       # SwiGLU hidden dim: (8/3)*d_model=341, 向上取整到64的倍数=384
+                  # 原 ReLU FFN d_ff=512(4x)，SwiGLU 3矩阵等参数量需 (2/3)*512≈341
+                  # Ref: Shazeer arXiv:2002.05202; LLaMA arXiv:2302.13971; CS336
   dropout: 0.1
+  # MTP 辅助预测头：预测 t+2 token，提供更密集的梯度信号
+  # Ref: DeepSeek-V3 arXiv:2412.19437 Section 2.3
+  # 设为 false 可禁用，训练时建议先跑 baseline（false），再对比开启效果
+  use_mtp: false
 
 data:
   train: datasets/
@@ -27,8 +33,19 @@ train:
   log_freq: 100
   clip_max_norm: 1000.0
   lmbda: 0.01
-  lr_milestones: [60, 90]
-  lr_gamma: 0.1
+  # z-loss 权重：惩罚 log-partition function 过大，防止 logits 发散
+  # Ref: PaLM arXiv:2204.02311 Section 5; OLMo 2 arXiv:2501.00656
+  z_loss_weight: 1e-4
+  # MTP 辅助 loss 权重，use_mtp=true 时生效
+  # Ref: DeepSeek-V3 arXiv:2412.19437 建议从 0.1 开始实验
+  mtp_weight: 0.1
+  # LR 调度：cosine decay with linear warmup
+  # Ref: OLMo 2 arXiv:2501.00656; Loshchilov & Hutter arXiv:1608.03983; CS336
+  lr_schedule: "cosine"
+  warmup_epochs: 5      # 线性 warmup epoch 数，之后进入 cosine decay
+  # 旧 MultiStepLR 字段已废弃，切换回旧行为请设 lr_schedule: "multistep"
+  # lr_milestones: [60, 90]
+  # lr_gamma: 0.1
 
 eval:
   interval: 5

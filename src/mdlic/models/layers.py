@@ -4,39 +4,56 @@ import torch.nn.functional as F
 import math 
 
 class RotaryEmbedding(nn.Module):
-  def __init__(self, dim: int):
+  """
+  Rotary Position Embedding (RoPE).
+
+  参考:
+    [1] Su et al., "RoFormer: Enhanced Transformer with Rotary Position
+        Embedding," arXiv:2104.09864, 2021. 原始 RoPE，base=10000.
+    [2] Meta, "LLaMA 3 Tech Report," 2024.
+        将 base frequency 从 10000 提升至 500000，改善长序列位置分辨率。
+    [3] OLMo 2 Tech Report, arXiv:2501.00656, 2025, Section 3.1.
+        沿用 LLaMA 3 的 base=500000 设置。
+    [4] CS336 "Language Models from Scratch," Stanford, Spring 2024.
+
+  base frequency 选择：
+    θ_i = base^{-2i/d_k}，i = 0,…,d_k/2-1
+    base=10000（原始）在 seq_len≫1000 时高频分量旋转超过 2π，位置分辨率退化。
+    base=500000 将有效序列长度上限提升约 50x，对 CIFAR-100 的
+    seq_len=3072 (32×32×3) 尤为重要。
+  """
+  def __init__(self, dim: int, base: int = 500000):
     super().__init__()
-    # dim is d_k (head dimension), must be even
     assert dim % 2 == 0
-    # precompute the inverse frequencies 
-    # shape: (dim // 2, ) 
-    inv_freq = 1.0 / (10000 ** (torch.arange(0, dim, 2).float() / dim)) 
+    # θ_i = base^{-2i/d_k}，shape: (dim//2,)  [1] Eq.(15)
+    inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
     self.register_buffer('inv_freq', inv_freq)
   
   def forward(self, seq_len: int, device: torch.device):
-    #positions: (seq_len, ) 
+    # positions: (seq_len,)
     t = torch.arange(seq_len, device=device).float()
-    # outer product: (seq_len , dim // 2) 
+    # outer product → (seq_len, dim//2)，再 cat 成 (seq_len, dim)  [1] Eq.(34)
     freqs = torch.outer(t, self.inv_freq)
-    # concat to (seq_len, dim) 
     emb = torch.cat([freqs, freqs], dim=-1)
     return emb.cos(), emb.sin()
 
 def rotate_half(x):
-  # x:(..., dim) 
-  # split into two halves and rotate 
-  x1 = x[..., :x.shape[-1] // 2] 
-  x2 = x[..., x.shape[-1] // 2 :] 
+  """将向量后半段取负后与前半段拼接，实现 90° 旋转。[1] Eq.(34) 的等价实现。"""
+  x1 = x[..., :x.shape[-1] // 2]
+  x2 = x[..., x.shape[-1] // 2:]
   return torch.cat([-x2, x1], dim=-1)
 
 def apply_rotary_emb(q, k, cos, sin):
-  # q, k: (batch, heads, seq_len, d_k) 
-  # cos, sin: (seq_len, d_k) 
-  cos = cos.unsqueeze(0).unsqueeze(0) # (1, 1, seq_len, d_k) 
-  sin = sin.unsqueeze(0).unsqueeze(0) 
-
-  q = (q * cos) + (rotate_half(q) * sin) 
-  k = (k * cos) + (rotate_half(k) * sin) 
+  """
+  将 RoPE 应用到 query 和 key。
+  q, k: (batch, heads, seq_len, d_k)
+  cos, sin: (seq_len, d_k)
+  Ref: Su et al., arXiv:2104.09864 [1], Eq.(34).
+  """
+  cos = cos.unsqueeze(0).unsqueeze(0)  # (1, 1, seq_len, d_k)
+  sin = sin.unsqueeze(0).unsqueeze(0)
+  q = (q * cos) + (rotate_half(q) * sin)
+  k = (k * cos) + (rotate_half(k) * sin)
   return q, k
 
 class RMSNorm(nn.Module):
@@ -66,15 +83,41 @@ class LayerNormalization(nn.Module):
       return self.alpha * x + self.bias
 
 class FeedForwardBlock(nn.Module):
+  """
+  SwiGLU Feed-Forward Block.
+
+  替换原 ReLU 双线性 FFN 为 SwiGLU 三线性门控 FFN：
+      FFN(x) = W2 · (SiLU(W1·x) ⊙ W3·x)
+
+  参考:
+    [1] Shazeer, "GLU Variants Improve Transformers," arXiv:2002.05202, 2020.
+        提出 SwiGLU = Swish-Gated Linear Unit，Section 2, Eq.(6).
+    [2] Touvron et al., "LLaMA," arXiv:2302.13971, 2023.
+        采用 SwiGLU + bias=False，Section 2.
+    [3] OLMo 2 Tech Report, arXiv:2501.00656, 2025.
+        同样采用 SwiGLU，FFN hidden dim = (8/3) * d_model.
+    [4] CS336 "Language Models from Scratch," Stanford, Spring 2024.
+        Assignment 1 参考实现。
+
+  参数量与原 ReLU FFN 对齐：
+    原 ReLU FFN:  2 × (d_model × d_ff)
+    SwiGLU FFN:   3 × (d_model × d_ff_swiglu)
+    令 d_ff_swiglu = (2/3) × d_ff 即可保持参数量不变。
+    调用方应传入已计算好的 d_ff（即 (8/3)*d_model，取整到 64 的倍数）。
+
+  bias=False: 现代 LLM 标准做法 [2][3]，与 weight decay 更兼容。
+  """
   def __init__(self, d_model: int, d_ff: int, dropout: float) -> None:
       super().__init__()
-      self.linear_1 = nn.Linear(d_model, d_ff) # w1 and b1
+      self.w1 = nn.Linear(d_model, d_ff, bias=False)   # gate path
+      self.w3 = nn.Linear(d_model, d_ff, bias=False)   # value path
+      self.w2 = nn.Linear(d_ff, d_model, bias=False)   # down-projection
       self.dropout = nn.Dropout(dropout)
-      self.linear_2 = nn.Linear(d_ff, d_model) # w2 and b2
 
   def forward(self, x):
-      # (batch, seq_len, d_model) --> (batch, seq_len, d_ff) --> (batch, seq_len, d_model)
-      return self.linear_2(self.dropout(torch.relu(self.linear_1(x))))
+      # SwiGLU: SiLU(W1·x) ⊙ (W3·x)，再经 W2 投影回 d_model
+      # [1] Eq.(6): FFN_SwiGLU(x, W, V, W2) = (Swish1(xW) ⊙ xV) W2
+      return self.dropout(self.w2(F.silu(self.w1(x)) * self.w3(x)))
 
 
 def conv(in_ch, out_ch, k=5, s=2):
@@ -98,7 +141,7 @@ class ResidualBlock(nn.Module):
   def forward(self, x):
     return self.act(x + self.net(x)) 
 
-from .flash_attn import TritonAttention
+from .flash_attn import TritonAttention  # available for optional use
 class MultiHeadAttentionBlock(nn.Module):
   def __init__(self, d_model: int, h: int, dropout: float) -> None:
       super().__init__()
@@ -117,43 +160,6 @@ class MultiHeadAttentionBlock(nn.Module):
       self.k_norm = RMSNorm(self.d_k)
       self.rope = RotaryEmbedding(self.d_k) 
 
-  # @staticmethod
-  # def attention(query, key, value, mask, dropout: nn.Dropout):
-  #     d_k = query.shape[-1]
-  #     # Just apply the formula from the paper
-  #     # (batch, h, seq_len, d_k) --> (batch, h, seq_len, seq_len)
-  #     attention_scores = (query @ key.transpose(-2, -1)) / math.sqrt(d_k)
-  #     if mask is not None:
-  #         # Write a very low value (indicating -inf) to the positions where mask == 0
-  #         min_val = torch.finfo(query.dtype).min 
-  #         attention_scores.masked_fill_(mask == 0, min_val) 
-  #     attention_scores = attention_scores.softmax(dim=-1) # (batch, h, seq_len, seq_len) # Apply softmax
-  #     if dropout is not None:
-  #         attention_scores = dropout(attention_scores)
-  #     # (batch, h, seq_len, seq_len) --> (batch, h, seq_len, d_k)
-  #     # return attention scores which can be used for visualization
-  #     return (attention_scores @ value), attention_scores
-
-  # def forward(self, q, k, v, mask):
-  #     query = self.w_q(q) # (batch, seq_len, d_model) --> (batch, seq_len, d_model)
-  #     key = self.w_k(k) # (batch, seq_len, d_model) --> (batch, seq_len, d_model)
-  #     value = self.w_v(v) # (batch, seq_len, d_model) --> (batch, seq_len, d_model)
-
-  #     # (batch, seq_len, d_model) --> (batch, seq_len, h, d_k) --> (batch, h, seq_len, d_k)
-  #     query = query.view(query.shape[0], query.shape[1], self.h, self.d_k).transpose(1, 2)
-  #     key = key.view(key.shape[0], key.shape[1], self.h, self.d_k).transpose(1, 2)
-  #     value = value.view(value.shape[0], value.shape[1], self.h, self.d_k).transpose(1, 2)
-
-  #     # Calculate attention
-  #     x, self.attention_scores = MultiHeadAttentionBlock.attention(query, key, value, mask, self.dropout)
-      
-  #     # Combine all the heads together
-  #     # (batch, h, seq_len, d_k) --> (batch, seq_len, h, d_k) --> (batch, seq_len, d_model)
-  #     x = x.transpose(1, 2).contiguous().view(x.shape[0], -1, self.h * self.d_k)
-
-  #     # Multiply by Wo
-  #     # (batch, seq_len, d_model) --> (batch, seq_len, d_model)  
-  #     return self.w_o(x)
   def forward(self, q, k, v, mask=None):
     batch_size, seq_len, _ = q.shape
     
@@ -167,10 +173,7 @@ class MultiHeadAttentionBlock(nn.Module):
     cos, sin = self.rope(seq_len, q.device) 
     query, key = apply_rotary_emb(query, key, cos, sin) 
     
-    causal = True 
     softmax_scale = 1.0 / (self.d_k ** 0.5)
-    
-    # attn_output = TritonAttention.apply(query, key, value, causal, softmax_scale) 
     attn_output = F.scaled_dot_product_attention(
     query, key, value,
     attn_mask=None,
@@ -193,17 +196,7 @@ class GPTBlock(nn.Module):
     self.ff = FeedForwardBlock(d_model, d_ff, dropout)
   
   def forward(self, x, mask=None):
-    # residual = x 
-    # x = self.norm1(x) 
-    # x = self.attn(x, x, x, mask) 
-    # x = residual + x
-
-    # residual = x 
-    # x = self.norm2(x)
-    # x = self.ff(x) 
-    # x = residual + x 
-    # OLMo 2: h := x + RMSNorm(Attention(x))
+    # OLMo 2 post-norm: x = x + RMSNorm(sublayer(x))
     x = x + self.norm1(self.attn(x, x, x, mask))
-    # hout := h + RMSNorm(MLP(h))
-    x = x + self.norm2(self.ff(x)) 
-    return x 
+    x = x + self.norm2(self.ff(x))
+    return x

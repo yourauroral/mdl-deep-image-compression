@@ -25,3 +25,6 @@ datasets/
 
 # Test images (DO NOT COMMIT)
 assets/
+
+# AI files (DO NOT COMMIT)
+CLAUDE.md
