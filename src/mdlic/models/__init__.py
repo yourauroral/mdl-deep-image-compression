@@ -1,1 +1,1 @@
-from .hyperprior import HyperpriorModel 
+from .igpt import IGPT
