@@ -18,14 +18,14 @@ data:
   num_workers: 4
 
 train:
-  amp_dtype: "fp16" # 4090: fp16; H800/H20: bf16
+  amp_dtype: "bf16" # 4090: fp16; H800/H20: bf16
   batch_size: 64 # 4090: 64; H800/H20: 256
   grad_accum_steps: 8 
-  lr: 3e-4
+  lr: 1e-4
   eps: 1e-8
   epochs: 100
   log_freq: 100
-  clip_max_norm: 1.0
+  clip_max_norm: 1000.0
   lmbda: 0.01
   lr_milestones: [60, 90]
   lr_gamma: 0.1

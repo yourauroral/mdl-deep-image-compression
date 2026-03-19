@@ -138,9 +138,19 @@ def train_one_epoch(model, loader, optimizer, scaler, lmbda, device,
                 torch.nn.utils.clip_grad_norm_(model.parameters(), clip_max_norm) 
                 scaler.step(optimizer)
                 scaler.update()
+                if (i + 1) % log_freq == 0:
+                    print(f"  [AMP] loss_scale={scaler.get_scale():.1f}")
             else:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), clip_max_norm)
                 optimizer.step()
+
+                if (i + 1) % log_freq == 0:
+                    total_norm = sum(
+                        p.grad.norm().item() ** 2
+                        for p in model.parameters()
+                        if p.grad is not None
+                    ) ** 0.5
+                    print(f"  [GRAD] grad_norm={total_norm:.4f}")
             
             optimizer.zero_grad(set_to_none=True) 
 

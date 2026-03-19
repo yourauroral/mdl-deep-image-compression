@@ -18,8 +18,6 @@ wandb/
 
 # Datasets (DO NOT COMMIT)
 datasets/
-data/raw/
-data/processed/
 
 # OS/Editor
 .DS_Store

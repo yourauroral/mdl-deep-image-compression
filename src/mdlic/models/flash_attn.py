@@ -68,8 +68,8 @@ def _attn_fwd_inner(
         V_block = tl.load(V_block_ptr)
         # V_block = V_block.to(tl.float16) # added 
         # P_block = P_block.to(tl.float16)
-        V_block = V_block.to(Q.type.element_ty)
-        P_block = P_block.to(Q.type.element_ty) 
+        V_block = V_block.to(Q_block.dtype)
+        P_block = P_block.to(Q_block.dtype) 
         # This computes the following: O_new = P x V + O_old * alpha
         O_block = O_block * alpha[:, None]
         O_block = tl.dot(P_block, V_block, O_block)
@@ -369,9 +369,9 @@ def _attn_bwd_dq(
             P_block = tl.where(mask_block, P_block, 0.0)
 
         # Compute dP and dS.
-        dP_block = tl.dot(dO_block, V_T_block).to(tl.float32)
+        dP_block = tl.dot(dO_block, V_T_block.to(dO_block.dtype)).to(tl.float32)
         dS_block = P_block * (dP_block - Di[:, None])
-        dS_block = dS_block.to(tl.float16)
+        dS_block = dS_block.to(Q_block.dtype)
         # Compute dQ.
         # NOTE: We need to de-scale dq in the end, because kT was pre-scaled.
         dQ_block += softmax_scale * tl.dot(dS_block, tl.trans(K_T_block))
@@ -486,19 +486,19 @@ def _attn_bwd_dk_dv(
 
         dO_block = tl.load(dO_ptrs)
         # According to the formula: dV_new = dV_old + P^T x dO, where x is the matrix multiplication
-        dV_block += tl.dot(P_T_block.to(tl.float16), dO_block)
+        dV_block += tl.dot(P_T_block.to(dO_block.dtype), dO_block)
 
         # Delta = rowsum(O * dO) where * is the element-wise product
         Di = tl.load(D + offs_q)
 
         # dP = dO x V^T, so dP^T = V x dO^T
         # Where x is the matrix multiplication
-        dpT_block = tl.dot(V_block, tl.trans(dO_block)).to(tl.float32)
-
+        dpT_block = tl.dot(V_block.to(dO_block.dtype), tl.trans(dO_block)).to(tl.float32)
+        
         # We know that dS = P * (dP - Delta), so dS^T = P^T * (dP^T - Delta^T)
 
         dS_T_block = P_T_block * (dpT_block - Di[None, :])
-        dS_T_block = dS_T_block.to(tl.float16)
+        dS_T_block = dS_T_block.to(K_block.dtype)
 
         # According to the formula on the paper: dK_new = dK_old + dS^T x Q
         dK_block += softmax_scale * tl.dot(dS_T_block, tl.trans(qT_block))

@@ -170,7 +170,13 @@ class MultiHeadAttentionBlock(nn.Module):
     causal = True 
     softmax_scale = 1.0 / (self.d_k ** 0.5)
     
-    attn_output = TritonAttention.apply(query, key, value, causal, softmax_scale) 
+    # attn_output = TritonAttention.apply(query, key, value, causal, softmax_scale) 
+    attn_output = F.scaled_dot_product_attention(
+    query, key, value,
+    attn_mask=None,
+    dropout_p=0.0,
+    is_causal=True
+    )
     
     # 合并多头: (batch, h, seq_len, d_k) -> (batch, seq_len, h, d_k) -> (batch, seq_len, d_model)    
     attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, self.d_model)
