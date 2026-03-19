@@ -31,7 +31,12 @@ train:
   eps: 1e-8
   epochs: 100
   log_freq: 100
-  clip_max_norm: 1000.0
+  # 梯度裁剪阈值（L2 范数）
+  # clip_max_norm=1000 实际上等于不裁剪，无法防止梯度爆炸。
+  # GPT-2、OLMo 2 等标准做法使用 1.0。
+  # Ref: Radford et al., "GPT-2," 2019 — clip_max_norm=1.0
+  # Ref: OLMo 2 Tech Report, arXiv:2501.00656, 2025, Section 3.3 — clip_max_norm=1.0
+  clip_max_norm: 1.0
   lmbda: 0.01
   # z-loss 权重：惩罚 log-partition function 过大，防止 logits 发散
   # Ref: PaLM arXiv:2204.02311 Section 5; OLMo 2 arXiv:2501.00656

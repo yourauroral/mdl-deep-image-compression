@@ -171,9 +171,10 @@ class MultiHeadAttentionBlock(nn.Module):
     key = self.k_norm(key)
 
     cos, sin = self.rope(seq_len, q.device) 
-    query, key = apply_rotary_emb(query, key, cos, sin) 
-    
-    softmax_scale = 1.0 / (self.d_k ** 0.5)
+    query, key = apply_rotary_emb(query, key, cos, sin)
+
+    # F.scaled_dot_product_attention 内部已做 1/sqrt(d_k) 缩放，无需手动传入。
+    # 使用 is_causal=True 启用自回归 causal mask。
     attn_output = F.scaled_dot_product_attention(
     query, key, value,
     attn_mask=None,
