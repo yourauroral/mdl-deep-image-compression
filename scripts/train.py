@@ -66,35 +66,42 @@ def train_one_epoch(model, loader, optimizer, scaler, device,
         if (i + 1) % grad_accum_steps == 0:
             if scaler is not None:
                 scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), clip_max_norm)
+                # clip_grad_norm_ 在 GPU 上计算并返回 total_norm tensor，无需 CPU 同步。
+                # 只在需要记录时调用 .item()，避免每步都阻塞 GPU。
+                # Ref: CS336 "Language Models from Scratch," Stanford 2024 —
+                #      grad_norm 的 .item() 会触发 GPU→CPU 同步，拖慢训练。
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), clip_max_norm)
                 scaler.step(optimizer)
                 scaler.update()
-                if (i + 1) % log_freq == 0:
-                    print(f"  [AMP] loss_scale={scaler.get_scale():.1f}")
+                if writer and (i + 1) % log_freq == 0:
+                    step = epoch * steps + i
+                    # .item() 仅在 log 时调用，不在每个 step 阻塞
+                    writer.add_scalar('train/grad_norm', grad_norm.item(), step)
+                    writer.add_scalar('train/loss_scale', scaler.get_scale(), step)
             else:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), clip_max_norm)
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), clip_max_norm)
                 optimizer.step()
-                if (i + 1) % log_freq == 0:
-                    total_norm = sum(
-                        p.grad.norm().item() ** 2
-                        for p in model.parameters()
-                        if p.grad is not None
-                    ) ** 0.5
-                    print(f"  [GRAD] grad_norm={total_norm:.4f}")
+                if writer and (i + 1) % log_freq == 0:
+                    step = epoch * steps + i
+                    writer.add_scalar('train/grad_norm', grad_norm.item(), step)
 
             optimizer.zero_grad(set_to_none=True)
 
-        total_loss += loss.item()
-        total_bpp += bpp.item()
+        # 用 tensor 累加，避免每步 .item() 触发 GPU→CPU 同步
+        # Ref: CS336 — 只在 log 时才 .item()
+        total_loss += loss.detach()
+        total_bpp  += bpp.detach()
 
         if (i + 1) % log_freq == 0:
-            print(f"Epoch {epoch} Step {i+1}/{steps} | Loss: {loss.item():.4f} | BPP: {bpp.item():.4f}")
+            loss_val = loss.item()
+            bpp_val  = bpp.item()
+            print(f"Epoch {epoch} Step {i+1}/{steps} | Loss: {loss_val:.4f} | BPP: {bpp_val:.4f}")
             if writer:
                 step = epoch * steps + i
-                writer.add_scalar('train/loss', loss.item(), step)
-                writer.add_scalar('train/bpp', bpp.item(), step)
+                writer.add_scalar('train/loss', loss_val, step)
+                writer.add_scalar('train/bpp',  bpp_val,  step)
 
-    return total_loss / steps, total_bpp / steps
+    return total_loss.item() / steps, total_bpp.item() / steps
 
 
 # ==================== Validation ====================
