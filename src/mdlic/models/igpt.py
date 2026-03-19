@@ -138,6 +138,8 @@ class IGPT(nn.Module):
       mtp_weight:    MTP 辅助 loss 权重，默认 0.1（use_mtp=True 时生效）
                      Ref: DeepSeek-V3 arXiv:2412.19437 Section 2.3
     """
+    z_loss_weight = float(z_loss_weight)
+    mtp_weight = float(mtp_weight)
     x = x.clamp(0, 1)
     B = x.size(0)
 

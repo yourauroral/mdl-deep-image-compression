@@ -264,8 +264,8 @@ def main():
             clip_max_norm=config['train']['clip_max_norm'],
             amp_dtype=amp_dtype,
             grad_accum_steps=grad_accum_steps,
-            z_loss_weight=config["train"].get("z_loss_weight", 1e-4),
-            mtp_weight=config["train"].get("mtp_weight", 0.1),
+            z_loss_weight=float(config["train"].get("z_loss_weight", 1e-4)),
+            mtp_weight=float(config["train"].get("mtp_weight", 0.1)),
         )
 
         if rank == 0:
