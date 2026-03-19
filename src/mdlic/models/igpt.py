@@ -194,5 +194,12 @@ class IGPT(nn.Module):
 
     return {
       "loss": loss,
+      # 单独返回 ce_loss，用于计算 BPP。
+      # BPP = ce_loss / ln(2)，因为 ce_loss = -log p(x) 是 nats 单位的编码长度。
+      # z_loss 是正则项（惩罚 logits 幅度），不对应实际编码比特，
+      # 混入 BPP 计算会高估真实码率。
+      # Ref: Shannon, "A Mathematical Theory of Communication," 1948 —
+      #      最优编码长度 = -log₂ p(x) = -ln p(x) / ln(2)
+      "ce_loss": ce_loss,
       "logits": logits
     }

@@ -18,7 +18,11 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 import torch.distributed as dist
-from torch.cuda.amp import autocast, GradScaler
+# torch.cuda.amp.autocast 和 GradScaler 在 PyTorch 2.4+ 已废弃，
+# 迁移至 torch.amp 统一接口。
+# Ref: PyTorch 2.4 Release Notes — "torch.cuda.amp.autocast is deprecated"
+from torch.amp import autocast
+from torch.cuda.amp import GradScaler
 from torch.utils.tensorboard import SummaryWriter
 import numpy as np
 from torchvision import transforms
@@ -50,16 +54,25 @@ def train_one_epoch(model, loader, optimizer, scaler, device,
         _, C, _, _ = x.shape
 
         if scaler is not None:
-            with autocast(dtype=amp_dtype):
+            with autocast(device_type="cuda", dtype=amp_dtype):
                 out = model(x, z_loss_weight=z_loss_weight, mtp_weight=mtp_weight)
                 loss = out["loss"]
-                bpp = (loss / math.log(2)) * C
+                ce_loss = out["ce_loss"]
+                # BPP 只用 ce_loss（纯交叉熵），不含 z_loss 正则项。
+                # ce_loss = -log p(x_t | x_{<t}) 的均值（nats/token），
+                # 乘 C 是因为每个像素有 C 个通道、每通道独立预测一个 token。
+                # BPP = ce_loss * C / ln(2) 将 nats 转换为 bits。
+                # 如果混入 z_loss，会高估真实码率（z_loss 不对应编码比特）。
+                # Ref: Shannon, "A Mathematical Theory of Communication," 1948
+                bpp = (ce_loss / math.log(2)) * C
             loss_scaled = loss / grad_accum_steps
             scaler.scale(loss_scaled).backward()
         else:
             out = model(x, z_loss_weight=z_loss_weight, mtp_weight=mtp_weight)
             loss = out["loss"]
-            bpp = (loss / math.log(2)) * C
+            ce_loss = out["ce_loss"]
+            # BPP 只用 ce_loss，排除 z_loss 正则项（同上）
+            bpp = (ce_loss / math.log(2)) * C
             loss_scaled = loss / grad_accum_steps
             loss_scaled.backward()
 
@@ -119,7 +132,9 @@ def validate(model, loader, device):
         _, C, _, _ = x.shape
         out = model(x)
         loss = out["loss"]
-        bpp = (loss / math.log(2)) * C
+        ce_loss = out["ce_loss"]
+        # 验证 BPP：同训练一样，只用 ce_loss 计算，排除 z_loss 正则项
+        bpp = (ce_loss / math.log(2)) * C
         bpp_list.append(bpp.item())
         total_loss += loss.item()
     avg_bpp = float(np.mean(bpp_list))
