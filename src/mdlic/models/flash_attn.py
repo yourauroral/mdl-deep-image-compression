@@ -47,7 +47,7 @@ def _attn_fwd_inner(
 
         if STAGE == 2:
             mask = offs_q[:, None] >= (start_kv + offs_kv[None, :])
-            QK_block = QK_block * softmax_scale + tl.where(mask, 0, -1.0e6)
+            QK_block = QK_block * softmax_scale + tl.where(mask, 0, float('-inf'))
             m_ij = tl.maximum(m_i, tl.max(QK_block, 1))
             QK_block -= m_ij[:, None]
         else:
@@ -268,7 +268,7 @@ def _attn_bwd_preprocess(
         + index_batch_head * HEAD_DIM * SEQ_LEN
         + offs_q[:, None] * HEAD_DIM
         + offs_dim[None, :]
-    )
+    ).to(tl.float32)
     # Load a single block of BLOCK_SIZE_Q rows of dO
     dO_block = tl.load(
         dO
@@ -362,11 +362,15 @@ def _attn_bwd_dq(
         QK_block = softmax_scale * tl.dot(Q_block, K_T_block)
         P_block = tl.math.exp(QK_block - M_block)
 
+        # _attn_bwd_dq 和 _attn_bwd_dk_dv 里，在 exp 之前先加掩码
         if STAGE == 3:
-            # Autoregressive masking.
             offs_kv = curr_kv + tl.arange(0, BLOCK_KV)
             mask_block = offs_q[:, None] >= offs_kv[None, :]
-            P_block = tl.where(mask_block, P_block, 0.0)
+            # ✅ 先 mask 再 exp，与前向语义一致
+            QK_block = tl.where(mask_block, QK_block, -1.0e6)
+
+        P_block = tl.math.exp(QK_block - M_block)
+        # 不需要再 tl.where 了
 
         # Compute dP and dS.
         dP_block = tl.dot(dO_block, V_T_block.to(dO_block.dtype)).to(tl.float32)
