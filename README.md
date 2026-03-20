@@ -28,7 +28,10 @@ pip install scikit-image  # 可选，用于 SSIM 计算
 ### 训练
 
 ```bash
-# 基础训练（CIFAR-100）
+# CIFAR-10
+python scripts/train.py --config configs/igpt_cifar10_baseline.yaml
+
+# CIFAR-100
 python scripts/train.py --config configs/igpt_cifar100_baseline.yaml
 
 # 从断点恢复
@@ -36,7 +39,7 @@ python scripts/train.py --config configs/igpt_cifar100_baseline.yaml \
     --resume experiments/igpt_cifar100_baseline/checkpoints/epoch_10.pth
 
 # 多卡分布式
-torchrun --nproc_per_node=4 scripts/train.py --config configs/igpt_cifar100_baseline.yaml
+torchrun --nproc_per_node=4 scripts/train.py --config configs/igpt_cifar10_baseline.yaml
 ```
 
 ### 测试
@@ -101,6 +104,7 @@ tensorboard --logdir experiments/igpt_cifar100_baseline/logs --port 6006
 | `train.lmbda` | Rate-distortion 权衡系数 |
 | `train.amp_dtype` | `fp16` 或 `bf16` |
 | `train.z_loss_weight` | z-loss 正则化权重（默认 1e-4） |
+| `data.dataset` | 数据集名称（`cifar10` 或 `cifar100`） |
 | `data.train` / `data.valid` | 数据集路径 |
 | `checkpoint.save_dir` | 检查点保存目录 |
 
@@ -124,7 +128,12 @@ python scripts/train.py --config configs/igpt_cifar100_mtp.yaml
 
 ## 数据集
 
-CIFAR-100 由 `torchvision.datasets.CIFAR100` 自动下载，放置于 config 中 `data.train` 指定的目录。
+通过 `data.dataset` 字段选择数据集（`cifar10` 或 `cifar100`），由 `torchvision.datasets` 加载，放置于 `data.train` 指定的目录。
+
+| 数据集 | 训练集 | 测试集 | 配置文件 |
+|--------|--------|--------|----------|
+| CIFAR-10 | 50,000 | 10,000 | `configs/igpt_cifar10_baseline.yaml` |
+| CIFAR-100 | 50,000 | 10,000 | `configs/igpt_cifar100_baseline.yaml` |
 
 ## 特性
 

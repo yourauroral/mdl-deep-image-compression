@@ -18,6 +18,7 @@ model:
   use_mtp: false
 
 data:
+  dataset: "cifar100"   # cifar10 或 cifar100
   train: datasets/
   valid: datasets/
   patch_size: null
