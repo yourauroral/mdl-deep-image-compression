@@ -2,6 +2,16 @@
 
 基于自回归 Transformer（iGPT）的深度图像压缩，对像素序列建模联合概率分布，使用交叉熵损失实现无损/近无损压缩。
 
+## 环境要求
+
+| 依赖 | 最低版本 | 说明 |
+|------|----------|------|
+| Python | 3.10+ | |
+| PyTorch | **2.4+** | `torch.amp.autocast` 统一接口；`F.scaled_dot_product_attention` 需 2.0+ |
+| torchvision | 0.19+ | 随 PyTorch 2.4 配套 |
+| Triton | 3.0+ | PyTorch CUDA 安装自带，Triton kernel 可选 |
+| CUDA | 11.8+ | Triton kernel 需要 GPU；CPU 下自动回退到 PyTorch 实现 |
+
 ## 安装
 
 依赖手动安装：
