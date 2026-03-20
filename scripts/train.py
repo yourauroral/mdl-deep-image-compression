@@ -177,11 +177,15 @@ def main():
     device = torch.device(f'cuda:{args.local_rank}' if distributed else 'cuda' if torch.cuda.is_available() else 'cpu')
     writer = SummaryWriter(log_dir=log_dir) if rank == 0 else None
 
-    # Dataset (CIFAR-100)
-    from torchvision.datasets import CIFAR100
+    # Dataset: 根据 config 选择 CIFAR-10 或 CIFAR-100
+    from torchvision.datasets import CIFAR10, CIFAR100
     transform = transforms.ToTensor()
-    train_dataset = CIFAR100(root=config["data"]["train"], train=True,  download=False, transform=transform)
-    valid_dataset = CIFAR100(root=config["data"]["valid"], train=False, download=False, transform=transform)
+    dataset_name = config["data"].get("dataset", "cifar100")
+    DatasetClass = CIFAR10 if dataset_name == "cifar10" else CIFAR100
+    train_dataset = DatasetClass(root=config["data"]["train"], train=True,  download=False, transform=transform)
+    valid_dataset = DatasetClass(root=config["data"]["valid"], train=False, download=False, transform=transform)
+    if rank == 0:
+        print(f"Dataset: {dataset_name} | Train: {len(train_dataset)} | Valid: {len(valid_dataset)}")
 
     train_sampler = DistributedSampler(train_dataset, shuffle=True) if distributed else None
     train_loader = DataLoader(
