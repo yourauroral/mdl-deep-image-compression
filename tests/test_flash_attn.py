@@ -9,7 +9,7 @@ import torch
 
 import triton
 import triton.language as tl
-from src.mdlic.models.flash_attn import TritonAttention, _test_op
+from src.mdlic.ops.flash_attn import TritonAttention, _test_op
 
 @pytest.mark.parametrize(
     "batch, heads, seq_len, head_dim, causal",

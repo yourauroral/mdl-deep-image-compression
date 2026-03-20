@@ -31,7 +31,7 @@ except ImportError:
 #   [3] Milakov & Gimelshein, "Online normalizer calculation for softmax,"
 #       arXiv:1805.02867, 2018.
 try:
-    from .flash_attn import TritonAttention as _TritonAttention
+    from ..ops.flash_attn import TritonAttention as _TritonAttention
     _USE_TRITON_ATTN = True
 except ImportError:
     _TritonAttention = None
