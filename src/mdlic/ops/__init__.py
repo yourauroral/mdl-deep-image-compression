@@ -6,3 +6,9 @@ try:
     from .fused_ce_zloss import fused_cross_entropy_zloss
 except ImportError:
     fused_cross_entropy_zloss = None
+
+try:
+    from .fused_rms_norm import FusedRMSNorm, fused_rms_norm
+except ImportError:
+    FusedRMSNorm = None
+    fused_rms_norm = None

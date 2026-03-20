@@ -18,8 +18,11 @@ from src.mdlic.models.flash_attn import TritonAttention, _test_op
         (2, 4, 1024, 64, False),   # 非因果
         (1, 2, 128, 32, True),     # 小尺寸，快速验证
         (2, 8, 2048, 64, True),    # 较大规模（可能耗时）
+        (1, 2, 192, 32, True),     # 非 block 对齐（192 = 64*3，对齐）
+        (1, 4, 320, 64, True),     # 非 128 对齐但 64 对齐
     ],
-    ids=["causal_medium", "non_causal", "causal_small", "causal_large"]
+    ids=["causal_medium", "non_causal", "causal_small", "causal_large",
+         "causal_192", "causal_320"]
 )
 
 def test_flash_attn(batch, heads, seq_len, head_dim, causal):
