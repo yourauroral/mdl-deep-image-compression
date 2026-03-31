@@ -12,12 +12,21 @@ model:
                   # Ref: Shazeer arXiv:2002.05202; LLaMA arXiv:2302.13971; CS336
   dropout: 0.1
   use_mtp: false
+  # 消融开关（Ablation toggles）：设为 false 可单独关闭对应组件
+  use_ycbcr: true           # E1: RGB→YCbCr 预处理
+  use_rope: true            # E2: Rotary Position Embedding
+  use_post_norm: true       # E3: OLMo2 post-norm（false→pre-norm）
+  use_swiglu: true          # E4: SwiGLU FFN（false→ReLU FFN）
+  use_qk_norm: true         # E5: QK-Norm
+  use_depth_scaled_init: true  # E6: 深度缩放初始化
+  use_zloss: true           # E7: z-loss 正则
+  activation_checkpointing: false  # Phase 2.2: selective activation checkpointing
+  logit_soft_cap: 0.0
 
 data:
   dataset: "cifar10"    # cifar10 或 cifar100
   train: datasets/
   valid: datasets/
-  patch_size: null
   num_workers: 4
 
 train:
@@ -29,11 +38,32 @@ train:
   epochs: 100
   log_freq: 100
   clip_max_norm: 1.0
-  lmbda: 0.01
   z_loss_weight: 1e-4
   mtp_weight: 0.1
   lr_schedule: "cosine"
   warmup_epochs: 5
+  # WSD (Warmup-Stable-Decay) 参数（lr_schedule: "wsd" 时生效）
+  # Ref: MiniCPM arXiv:2404.06395; Hagele et al. arXiv:2405.18392
+  stable_epochs: 70
+  decay_beta: 1.0
+  # torch.compile
+  compile: false
+  # SWA (Stochastic Weight Averaging)
+  # Ref: Izmailov et al., arXiv:1803.05407
+  swa:
+    enabled: false
+    start_epoch: 80
+    update_interval: 1
+  # muP (Maximal Update Parameterization)
+  # Ref: Yang et al., arXiv:2203.03466
+  mup:
+    enabled: false
+    base_width: 64
+  muon:
+    enabled: false
+    lr: 0.02
+    momentum: 0.95
+    ns_steps: 5
 
 eval:
   interval: 5
