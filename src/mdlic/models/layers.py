@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
+from torch.utils.checkpoint import checkpoint as torch_checkpoint
 
 # Fused RMSNorm Triton kernel（可选）：
 # 将归一化 + 缩放合并为单次 kernel launch，减少 HBM 读写。
@@ -13,6 +14,18 @@ try:
 except ImportError:
     _fused_rms_norm = None
     _USE_FUSED_RMSNORM = False
+
+# Fused SwiGLU Triton kernel（可选）：
+# 将 silu(a) ⊙ b 合并为单次 kernel launch，减少 HBM 读写。
+# Backward 采用 activation recomputation，不存 silu(a) 中间结果。
+# 若 Triton 不可用（如 CPU 环境），自动回退到 F.silu(a) * b。
+# Ref: Liger-Kernel arXiv:2410.10989 的 fused SwiGLU pattern（手写实现）。
+try:
+    from ..ops.fused_swiglu import fused_swiglu as _fused_swiglu
+    _USE_FUSED_SWIGLU = True
+except ImportError:
+    _fused_swiglu = None
+    _USE_FUSED_SWIGLU = False
 
 # Flash Attention Triton kernel（可选）：
 # 手写 Flash Attention v2，将 QK^T 计算、softmax、V 加权合并为一次 kernel launch，
@@ -36,6 +49,60 @@ try:
 except ImportError:
     _TritonAttention = None
     _USE_TRITON_ATTN = False
+
+# Fused RoPE Triton kernel（可选）：
+# 将 RoPE 旋转直接应用到 Q/K，避免 rotate_half 等中间张量。
+# 若 Triton 不可用，自动回退到 PyTorch apply_rotary_emb。
+# Ref: Su et al., arXiv:2104.09864; Liger-Kernel arXiv:2410.10989（手写实现）。
+try:
+    from ..ops.fused_rope import fused_apply_rotary_emb as _fused_rope
+    _USE_FUSED_ROPE = True
+except ImportError:
+    _fused_rope = None
+    _USE_FUSED_ROPE = False
+
+# Fused Add+RMSNorm Triton kernel（可选）：
+# 将 OLMo 2 post-norm 中的 residual + RMSNorm(sublayer_out) 合并为单次 kernel launch。
+# 减少一次 HBM 读写。若 Triton 不可用，自动回退到 PyTorch 分步计算。
+# Ref: OLMo 2 arXiv:2501.00656 Section 3.1; Liger-Kernel arXiv:2410.10989（手写实现）。
+try:
+    from ..ops.fused_add_rms_norm import fused_add_rms_norm as _fused_add_rms_norm
+    _USE_FUSED_ADD_RMSNORM = True
+except ImportError:
+    _fused_add_rms_norm = None
+    _USE_FUSED_ADD_RMSNORM = False
+
+# Fused Attention + RoPE（可选）：
+# 将 RoPE 旋转与 Flash Attention 合并为单次操作，减少 Q/K 的 HBM 读写。
+# 若任一依赖不可用（fused_rope 或 flash_attn），自动回退到分步调用。
+# Ref: Su et al., arXiv:2104.09864; Dao, arXiv:2307.08691（手写实现）。
+try:
+    from ..ops.fused_attn_rope import fused_attn_rope as _fused_attn_rope
+    _USE_FUSED_ATTN_ROPE = True
+except ImportError:
+    _fused_attn_rope = None
+    _USE_FUSED_ATTN_ROPE = False
+
+
+def get_fused_kernel_status() -> dict:
+    """
+    返回各 fused Triton kernel 的可用状态，方便训练启动时打印诊断信息。
+
+    返回:
+      dict[str, bool]，key 为 kernel 名称，value 为是否可用。
+    """
+    # 导入 igpt.py 中注册的 kernel 状态（fused_ce_zloss, fused_linear_ce）
+    from .igpt import _USE_FUSED_CE, _USE_FUSED_LINEAR_CE
+    return {
+        "fused_rms_norm": _USE_FUSED_RMSNORM,
+        "fused_swiglu": _USE_FUSED_SWIGLU,
+        "flash_attn": _USE_TRITON_ATTN,
+        "fused_rope": _USE_FUSED_ROPE,
+        "fused_add_rms_norm": _USE_FUSED_ADD_RMSNORM,
+        "fused_attn_rope": _USE_FUSED_ATTN_ROPE,
+        "fused_ce_zloss": _USE_FUSED_CE,
+        "fused_linear_ce": _USE_FUSED_LINEAR_CE,
+    }
 
 class RotaryEmbedding(nn.Module):
   """
@@ -122,22 +189,6 @@ class RMSNorm(nn.Module):
     rms = x.pow(2).mean(dim=-1, keepdim=True).add(self.eps).sqrt()
     return self.weight * (x / rms)
 
-class LayerNormalization(nn.Module):
-  def __init__(self, features: int, eps:float=10**-6) -> None:
-      super().__init__()
-      self.eps = eps
-      self.alpha = nn.Parameter(torch.ones(features)) # alpha is a learnable parameter
-      self.bias = nn.Parameter(torch.zeros(features)) # bias is a learnable parameter
-  def forward(self, x):
-      # x: (batch, seq_len, hidden_size)
-        # Keep the dimension for broadcasting
-      mean = x.mean(dim = -1, keepdim = True) # (batch, seq_len, 1)
-      # Keep the dimension for broadcasting
-      var = x.var(dim = -1, keepdim = True, unbiased=False) # (batch, seq_len, 1)
-      # eps is to prevent dividing by zero or when var is very small
-      x = (x - mean) / torch.sqrt(var + self.eps) 
-      return self.alpha * x + self.bias
-
 class FeedForwardBlock(nn.Module):
   """
   SwiGLU Feed-Forward Block.
@@ -173,29 +224,38 @@ class FeedForwardBlock(nn.Module):
   def forward(self, x):
       # SwiGLU: SiLU(W1·x) ⊙ (W3·x)，再经 W2 投影回 d_model
       # [1] Eq.(6): FFN_SwiGLU(x, W, V, W2) = (Swish1(xW) ⊙ xV) W2
-      return self.dropout(self.w2(F.silu(self.w1(x)) * self.w3(x)))
+      a = self.w1(x)  # gate path
+      b = self.w3(x)  # value path
+      if _USE_FUSED_SWIGLU and x.is_cuda:
+          # Fused kernel: silu(a) ⊙ b 一次 HBM 读写
+          gate = _fused_swiglu(a, b)
+      else:
+          # PyTorch fallback
+          gate = F.silu(a) * b
+      return self.dropout(self.w2(gate))
 
 
-def conv(in_ch, out_ch, k=5, s=2):
-  p = k // 2 
-  return nn.Conv2d(in_ch, out_ch, kernel_size=k, stride=s, padding=p) 
+class ReLUFeedForwardBlock(nn.Module):
+  """
+  标准 ReLU 双线性 FFN（消融 baseline）。
 
-def deconv(in_ch, out_ch, k=5, s=2):
-  p = k // 2
-  op = s - 1 
-  return nn.ConvTranspose2d(in_ch, out_ch, kernel_size=k, stride=s, padding=p, output_padding=op) 
+  FFN(x) = W2 · ReLU(W1·x)
 
-class ResidualBlock(nn.Module):
-  def __init__(self, ch:int):
-    super().__init__()
-    self.net = nn.Sequential(
-      nn.Conv2d(ch, ch, kernel_size=3, stride=1, padding=1),
-      nn.ReLU(inplace=True),
-      nn.Conv2d(ch, ch, kernel_size=3, stride=1, padding=1),
-    )
-    self.act = nn.ReLU(inplace=True) 
+  用于 use_swiglu=False 时的 fallback，对比 SwiGLU 的效果。
+  d_ff 使用标准 4×d_model。
+  参考: Vaswani et al., "Attention Is All You Need," arXiv:1706.03762, 2017.
+  """
+  def __init__(self, d_model: int, d_ff: int, dropout: float) -> None:
+      super().__init__()
+      # ReLU FFN: d_ff = 4*d_model（标准设置）
+      d_ff_relu = 4 * d_model
+      self.w1 = nn.Linear(d_model, d_ff_relu, bias=False)
+      self.w2 = nn.Linear(d_ff_relu, d_model, bias=False)
+      self.dropout = nn.Dropout(dropout)
+
   def forward(self, x):
-    return self.act(x + self.net(x)) 
+      return self.dropout(self.w2(F.relu(self.w1(x))))
+
 
 class MultiHeadAttentionBlock(nn.Module):
   """
@@ -225,10 +285,13 @@ class MultiHeadAttentionBlock(nn.Module):
     [5] OLMo 2 Tech Report, arXiv:2501.00656, 2025, Section 3.1.
         - Post-norm 架构
   """
-  def __init__(self, d_model: int, h: int, dropout: float) -> None:
+  def __init__(self, d_model: int, h: int, dropout: float,
+               use_rope: bool = True, use_qk_norm: bool = True) -> None:
       super().__init__()
       self.d_model = d_model # Embedding vector size
       self.h = h # Number of heads
+      self.use_rope = use_rope
+      self.use_qk_norm = use_qk_norm
       # Make sure d_model is divisible by h
       assert d_model % h == 0, "d_model is not divisible by h"
 
@@ -238,9 +301,11 @@ class MultiHeadAttentionBlock(nn.Module):
       self.w_v = nn.Linear(d_model, d_model, bias=False) # Wv
       self.w_o = nn.Linear(d_model, d_model, bias=False) # Wo
       self.dropout = nn.Dropout(dropout)
-      self.q_norm = RMSNorm(self.d_k)
-      self.k_norm = RMSNorm(self.d_k)
-      self.rope = RotaryEmbedding(self.d_k)
+      if use_qk_norm:
+          self.q_norm = RMSNorm(self.d_k)
+          self.k_norm = RMSNorm(self.d_k)
+      if use_rope:
+          self.rope = RotaryEmbedding(self.d_k)
 
   def forward(self, q, k, v, mask=None):
     batch_size, seq_len, _ = q.shape
@@ -249,11 +314,28 @@ class MultiHeadAttentionBlock(nn.Module):
     key   = self.w_k(k).view(batch_size, seq_len, self.h, self.d_k).transpose(1, 2).contiguous()
     value = self.w_v(v).view(batch_size, seq_len, self.h, self.d_k).transpose(1, 2).contiguous()
 
-    query = self.q_norm(query)
-    key = self.k_norm(key)
+    if self.use_qk_norm:
+        query = self.q_norm(query)
+        key = self.k_norm(key)
 
-    cos, sin = self.rope(seq_len, q.device)
-    query, key = apply_rotary_emb(query, key, cos, sin)
+    if self.use_rope:
+        cos, sin = self.rope(seq_len, q.device)
+        # Fused Attn+RoPE: 将 RoPE 和 Flash Attention 合并为一次操作，
+        # 减少 Q/K 的 HBM 读写（RoPE 就地修改后直接被 Attn 读取）。
+        # Ref: Su et al., arXiv:2104.09864; Dao, arXiv:2307.08691
+        if _USE_FUSED_ATTN_ROPE and query.is_cuda:
+            softmax_scale = 1.0 / math.sqrt(self.d_k)
+            attn_output = _fused_attn_rope(query, key, value, cos, sin,
+                                            causal=True,
+                                            softmax_scale=softmax_scale)
+            attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, self.d_model)
+            attn_output = self.dropout(attn_output)
+            return self.w_o(attn_output)
+        elif _USE_FUSED_ROPE and query.is_cuda:
+            # Fused RoPE: 就地旋转 Q/K，零中间张量分配
+            query, key = _fused_rope(query, key, cos, sin)
+        else:
+            query, key = apply_rotary_emb(query, key, cos, sin)
 
     # 选择注意力后端：
     # 1. Triton 手写 Flash Attention（CUDA + triton 可用时）
@@ -276,15 +358,59 @@ class MultiHeadAttentionBlock(nn.Module):
     return self.w_o(attn_output)
 
 class GPTBlock(nn.Module):
-  def __init__(self, d_model, h, d_ff, dropout):
+  def __init__(self, d_model, h, d_ff, dropout,
+               use_post_norm: bool = True, use_swiglu: bool = True,
+               use_qk_norm: bool = True, use_rope: bool = True,
+               activation_checkpointing: bool = False):
     super().__init__()
+    self.use_post_norm = use_post_norm
+    self.activation_checkpointing = activation_checkpointing
     self.norm1 = RMSNorm(d_model)
     self.norm2 = RMSNorm(d_model)
-    self.attn = MultiHeadAttentionBlock(d_model, h, dropout) 
-    self.ff = FeedForwardBlock(d_model, d_ff, dropout)
-  
+    self.attn = MultiHeadAttentionBlock(d_model, h, dropout,
+                                         use_rope=use_rope,
+                                         use_qk_norm=use_qk_norm)
+    if use_swiglu:
+        self.ff = FeedForwardBlock(d_model, d_ff, dropout)
+    else:
+        # 消融 fallback: 标准 ReLU FFN
+        self.ff = ReLUFeedForwardBlock(d_model, d_ff, dropout)
+
+  def _attn_forward(self, x, mask):
+    """Attention sublayer，可被 activation checkpoint 包裹。"""
+    return self.attn(x, x, x, mask)
+
   def forward(self, x, mask=None):
-    # OLMo 2 post-norm: x = x + RMSNorm(sublayer(x))
-    x = x + self.norm1(self.attn(x, x, x, mask))
-    x = x + self.norm2(self.ff(x))
+    if self.use_post_norm:
+        # OLMo 2 post-norm: x = x + RMSNorm(sublayer(x))
+        if self.activation_checkpointing and self.training:
+            # Selective activation checkpointing：只 checkpoint attention（显存瓶颈）
+            # Ref: Chen et al., "Training Deep Nets with Sublinear Memory Cost,"
+            #      arXiv:1604.06174, 2016.
+            attn_out = torch_checkpoint(self._attn_forward, x, mask,
+                                        use_reentrant=False)
+        else:
+            attn_out = self._attn_forward(x, mask)
+        # Fused Add+RMSNorm: residual + RMSNorm(sublayer_out) 一次 kernel
+        if _USE_FUSED_ADD_RMSNORM and x.is_cuda:
+            x = _fused_add_rms_norm(x, attn_out, self.norm1.weight, self.norm1.eps)
+        else:
+            x = x + self.norm1(attn_out)
+        ff_out = self.ff(x)
+        if _USE_FUSED_ADD_RMSNORM and x.is_cuda:
+            x = _fused_add_rms_norm(x, ff_out, self.norm2.weight, self.norm2.eps)
+        else:
+            x = x + self.norm2(ff_out)
+    else:
+        # Pre-norm（消融 baseline）: x = x + sublayer(RMSNorm(x))
+        # Ref: Xiong et al., "On Layer Normalization in the Transformer
+        #      Architecture," ICML 2020, arXiv:2002.04745.
+        if self.activation_checkpointing and self.training:
+            attn_out = torch_checkpoint(self._attn_forward,
+                                        self.norm1(x), mask,
+                                        use_reentrant=False)
+        else:
+            attn_out = self._attn_forward(self.norm1(x), mask)
+        x = x + attn_out
+        x = x + self.ff(self.norm2(x))
     return x

@@ -147,6 +147,9 @@ class FusedRMSNormFunction(torch.autograd.Function):
         # x: (..., N)，weight: (N,)
         x_shape = x.shape
         N = x_shape[-1]
+        assert weight.ndim == 1 and weight.shape[0] == N, (
+            f"weight.shape ({weight.shape}) 与 x 最后一维 ({N}) 不匹配"
+        )
         M = x.numel() // N  # 总行数
 
         # 展平为 (M, N)

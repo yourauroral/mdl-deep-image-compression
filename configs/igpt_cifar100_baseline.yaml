@@ -16,12 +16,24 @@ model:
   # Ref: DeepSeek-V3 arXiv:2412.19437 Section 2.3
   # 设为 false 可禁用，训练时建议先跑 baseline（false），再对比开启效果
   use_mtp: false
+  # 消融开关（Ablation toggles）：设为 false 可单独关闭对应组件
+  use_ycbcr: true           # E1: RGB→YCbCr 预处理
+  use_rope: true            # E2: Rotary Position Embedding
+  use_post_norm: true       # E3: OLMo2 post-norm（false→pre-norm）
+  use_swiglu: true          # E4: SwiGLU FFN（false→ReLU FFN）
+  use_qk_norm: true         # E5: QK-Norm
+  use_depth_scaled_init: true  # E6: 深度缩放初始化
+  use_zloss: true           # E7: z-loss 正则
+  activation_checkpointing: false  # Phase 2.2: selective activation checkpointing
+  # Logit soft-capping: cap * tanh(logits / cap)，平滑限幅防止 logits 爆炸
+  # 与 z-loss 互补：z-loss 惩罚 logsumexp，soft-cap 直接约束幅值
+  # Ref: Gemma 2 arXiv:2408.00118 — 推荐 30.0；0 = 禁用
+  logit_soft_cap: 0.0
 
 data:
   dataset: "cifar100"   # cifar10 或 cifar100
   train: datasets/
   valid: datasets/
-  patch_size: null
   num_workers: 4
 
 train:
@@ -38,7 +50,6 @@ train:
   # Ref: Radford et al., "GPT-2," 2019 — clip_max_norm=1.0
   # Ref: OLMo 2 Tech Report, arXiv:2501.00656, 2025, Section 3.3 — clip_max_norm=1.0
   clip_max_norm: 1.0
-  lmbda: 0.01
   # z-loss 权重：惩罚 log-partition function 过大，防止 logits 发散
   # Ref: PaLM arXiv:2204.02311 Section 5; OLMo 2 arXiv:2501.00656
   z_loss_weight: 1e-4
@@ -48,10 +59,39 @@ train:
   # LR 调度：cosine decay with linear warmup
   # Ref: OLMo 2 arXiv:2501.00656; Loshchilov & Hutter arXiv:1608.03983; CS336
   lr_schedule: "cosine"
-  warmup_epochs: 5      # 线性 warmup epoch 数，之后进入 cosine decay
+  warmup_epochs: 5      # 线性 warmup epoch 数，之后进入 cosine/WSD
+  # WSD (Warmup-Stable-Decay) 参数（lr_schedule: "wsd" 时生效）
+  # Ref: MiniCPM arXiv:2404.06395; Hagele et al. arXiv:2405.18392
+  stable_epochs: 70     # warmup 后维持峰值 LR 的 epoch 数
+  decay_beta: 1.0       # decay 阶段指数: (1 - progress)^beta
   # 旧 MultiStepLR 字段已废弃，切换回旧行为请设 lr_schedule: "multistep"
   # lr_milestones: [60, 90]
   # lr_gamma: 0.1
+  # torch.compile: 开启 fullgraph 模式编译模型
+  # Ref: PyTorch 2.0+ torch.compile 文档
+  compile: false
+  # SWA (Stochastic Weight Averaging)
+  # 手写实现，训练后期对权重取 running average，提升泛化
+  # Ref: Izmailov et al., arXiv:1803.05407; Hagele et al. arXiv:2405.18392
+  swa:
+    enabled: false
+    start_epoch: 80     # 开始 SWA 的 epoch
+    update_interval: 1  # 每隔几个 epoch 更新一次 SWA 权重
+  # muP (Maximal Update Parameterization)
+  # 小模型调参 → 大模型迁移，LR 和初始化按宽度比例缩放
+  # Ref: Yang et al., arXiv:2203.03466
+  mup:
+    enabled: false
+    base_width: 64      # 基准宽度（小模型 d_model）
+  # Muon 优化器：对 2D 权重矩阵使用 Newton-Schulz 正交化 SGD+Momentum
+  # 替代 AdamW 的 hidden 层部分，non-2D 参数仍用 AdamW
+  # 在小模型上验证 ~1.3-2x 训练效率提升
+  # Ref: Keller Jordan, 2024; arXiv:2502.16982
+  muon:
+    enabled: false
+    lr: 0.02            # Muon LR（远大于 Adam，因正交化后步长已归一化）
+    momentum: 0.95      # SGD momentum
+    ns_steps: 5         # Newton-Schulz 迭代步数
 
 eval:
   interval: 5
