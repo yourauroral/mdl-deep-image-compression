@@ -154,7 +154,7 @@ def _fused_ce_zloss_bwd_kernel(
     # d_logits_i = inv_M * [(1 + 2*w*lse) * softmax_i - 1{i=target}]
     scale = 1.0 + 2.0 * z_loss_weight * lse
     target_mask = cols == target
-    indicator = tl.where(target_mask, tl.full_like(softmax, 1.0), tl.zeros_like(softmax))
+    indicator = tl.where(target_mask, softmax * 0.0 + 1.0, tl.zeros_like(softmax))
     d_logits = inv_M * (scale * softmax - indicator)
 
     # ── 3. 写回 ──

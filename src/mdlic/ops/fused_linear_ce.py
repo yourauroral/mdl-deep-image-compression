@@ -108,7 +108,7 @@ def _fused_linear_ce_fwd_kernel(
 
         # Online softmax 更新
         block_max = tl.max(tl.where(v_mask, logit_block,
-                                     tl.full_like(logit_block, float('-inf'))))
+                                     logit_block + float('-inf')))
         new_max = tl.maximum(running_max, block_max)
 
         # 修正旧 sum: sum_old * exp(old_max - new_max)
@@ -188,7 +188,7 @@ def _fused_linear_ce_bwd_kernel(
             logit_block += tl.sum(w_chunk * h_chunk[None, :], axis=1)
 
         block_max = tl.max(tl.where(v_mask, logit_block,
-                                     tl.full_like(logit_block, float('-inf'))))
+                                     logit_block + float('-inf')))
         new_max = tl.maximum(running_max, block_max)
         alpha = tl.exp(running_max - new_max)
         running_sum_exp = running_sum_exp * alpha
