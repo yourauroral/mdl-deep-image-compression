@@ -42,7 +42,8 @@ def _check_finite(out: dict, tag: str):
     # 初始随机模型的 BPP 应在 8 (= log2(256)) 附近，远超 24 说明有问题
     bpp = ce_val / math.log(2) * 3  # 假设 3 通道
     assert 0.0 < bpp < 30.0, f"[{tag}] BPP={bpp:.2f} 超出合理范围 (0, 30)"
-    print(f"  [{tag}] loss={loss_val:.4f}  ce_loss={ce_val:.4f}  BPP={bpp:.2f}  logits={out['logits'].shape}")
+    logits_info = out['logits'].shape if out['logits'] is not None else "None (fused path)"
+    print(f"  [{tag}] loss={loss_val:.4f}  ce_loss={ce_val:.4f}  BPP={bpp:.2f}  logits={logits_info}")
 
 
 def main():
