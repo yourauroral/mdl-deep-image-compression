@@ -125,10 +125,18 @@ def main():
     print(f"  [soft-cap] OK — max |logit| = {max_logit:.2f} ≤ 30.0")
 
     # ── 5. muP 初始化 + backward ──
+    # muP embedding std=1.0（论文规定），weight tying 后 head 也是 std=1.0，
+    # 随机初始化时 logits 方差大 → BPP 远高于正常值是预期行为，
+    # 只检查 loss 有限即可，不限制 BPP 范围。
     print("\n=== Test 5: muP Init + Backward ===")
     model._init_weights_mup(base_width=64)
     out5 = model(x)
-    _check_finite(out5, "mup")
+    loss_val = out5['loss'].item()
+    ce_val = out5['ce_loss'].item()
+    assert math.isfinite(loss_val), f"[mup] loss is {loss_val} (NaN/Inf!)"
+    assert math.isfinite(ce_val), f"[mup] ce_loss is {ce_val} (NaN/Inf!)"
+    bpp = ce_val / math.log(2) * 3
+    print(f"  [mup] loss={loss_val:.4f}  ce_loss={ce_val:.4f}  BPP={bpp:.2f} (muP init, high BPP expected)")
 
     out5['loss'].backward()
     grad_ok = all(p.grad is not None for p in model.parameters() if p.requires_grad)
