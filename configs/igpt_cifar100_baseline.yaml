@@ -5,11 +5,11 @@ model:
   image_size: 32
   in_channels: 3
   vocab_size: 256
-  d_model: 128
-  N: 2
-  h: 4
-  d_ff: 384       # SwiGLU hidden dim: (8/3)*d_model=341, 向上取整到64的倍数=384
-                  # 原 ReLU FFN d_ff=512(4x)，SwiGLU 3矩阵等参数量需 (2/3)*512≈341
+  d_model: 256
+  N: 8
+  h: 8
+  d_ff: 688       # SwiGLU hidden dim: (8/3)*d_model=682, 向上取整到16的倍数=688
+                  # 原 ReLU FFN d_ff=1024(4x)，SwiGLU 3矩阵等参数量需 (2/3)*1024≈682
                   # Ref: Shazeer arXiv:2002.05202; LLaMA arXiv:2302.13971; CS336
   dropout: 0.1
   # MTP 辅助预测头：预测 t+2 token，提供更密集的梯度信号
@@ -39,10 +39,10 @@ data:
 train:
   amp_dtype: "bf16" # 4090: fp16; H800/H20: bf16
   batch_size: 64 # 4090: 64; H800/H20: 256
-  grad_accum_steps: 8 
+  grad_accum_steps: 16
   lr: 1e-4
   eps: 1e-8
-  epochs: 100
+  epochs: 200
   log_freq: 100
   # 梯度裁剪阈值（L2 范数）
   # clip_max_norm=1000 实际上等于不裁剪，无法防止梯度爆炸。
@@ -62,7 +62,7 @@ train:
   warmup_epochs: 5      # 线性 warmup epoch 数，之后进入 cosine/WSD
   # WSD (Warmup-Stable-Decay) 参数（lr_schedule: "wsd" 时生效）
   # Ref: MiniCPM arXiv:2404.06395; Hagele et al. arXiv:2405.18392
-  stable_epochs: 70     # warmup 后维持峰值 LR 的 epoch 数
+  stable_epochs: 140     # warmup 后维持峰值 LR 的 epoch 数
   decay_beta: 1.0       # decay 阶段指数: (1 - progress)^beta
   # 旧 MultiStepLR 字段已废弃，切换回旧行为请设 lr_schedule: "multistep"
   # lr_milestones: [60, 90]
@@ -75,7 +75,7 @@ train:
   # Ref: Izmailov et al., arXiv:1803.05407; Hagele et al. arXiv:2405.18392
   swa:
     enabled: false
-    start_epoch: 80     # 开始 SWA 的 epoch
+    start_epoch: 160     # 开始 SWA 的 epoch
     update_interval: 1  # 每隔几个 epoch 更新一次 SWA 权重
   # muP (Maximal Update Parameterization)
   # 小模型调参 → 大模型迁移，LR 和初始化按宽度比例缩放

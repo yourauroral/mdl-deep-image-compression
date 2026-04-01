@@ -5,10 +5,11 @@ model:
   image_size: 32
   in_channels: 3
   vocab_size: 256
-  d_model: 128
-  N: 2
-  h: 4
-  d_ff: 384       # SwiGLU hidden dim: (8/3)*d_model=341, 向上取整到64的倍数=384
+  d_model: 256
+  N: 8
+  h: 8
+  d_ff: 688       # SwiGLU hidden dim: (8/3)*d_model=682, 向上取整到16的倍数=688
+                  # 原 ReLU FFN d_ff=1024(4x)，SwiGLU 3矩阵等参数量需 (2/3)*1024≈682
                   # Ref: Shazeer arXiv:2002.05202; LLaMA arXiv:2302.13971; CS336
   dropout: 0.1
   use_mtp: false
@@ -32,10 +33,10 @@ data:
 train:
   amp_dtype: "bf16"
   batch_size: 64
-  grad_accum_steps: 8
+  grad_accum_steps: 16
   lr: 1e-4
   eps: 1e-8
-  epochs: 100
+  epochs: 200
   log_freq: 100
   clip_max_norm: 1.0
   z_loss_weight: 1e-4
@@ -44,7 +45,7 @@ train:
   warmup_epochs: 5
   # WSD (Warmup-Stable-Decay) 参数（lr_schedule: "wsd" 时生效）
   # Ref: MiniCPM arXiv:2404.06395; Hagele et al. arXiv:2405.18392
-  stable_epochs: 70
+  stable_epochs: 140
   decay_beta: 1.0
   # torch.compile
   compile: false
@@ -52,7 +53,7 @@ train:
   # Ref: Izmailov et al., arXiv:1803.05407
   swa:
     enabled: false
-    start_epoch: 80
+    start_epoch: 160
     update_interval: 1
   # muP (Maximal Update Parameterization)
   # Ref: Yang et al., arXiv:2203.03466
