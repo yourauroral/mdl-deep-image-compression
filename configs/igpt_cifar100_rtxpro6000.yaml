@@ -1,0 +1,69 @@
+exp_name: "igpt_cifar100_rtxpro6000"
+
+model:
+  type: igpt
+  image_size: 32
+  in_channels: 3
+  vocab_size: 256
+  d_model: 256
+  N: 8
+  h: 8
+  d_ff: 688       # SwiGLU hidden dim: (8/3)*d_model=682, 向上取整到16的倍数=688
+  dropout: 0.0    # 先不加 dropout，观察纯模型能力；如过拟合再加回 0.1
+  use_mtp: false
+  # 消融开关全开
+  use_ycbcr: true
+  use_rope: true
+  use_post_norm: true
+  use_swiglu: true
+  use_qk_norm: true
+  use_depth_scaled_init: true
+  use_zloss: true
+  activation_checkpointing: false  # 96GB 显存充足，不需要
+  logit_soft_cap: 0.0
+
+data:
+  dataset: "cifar100"
+  train: datasets/
+  valid: datasets/
+  num_workers: 12
+
+train:
+  amp_dtype: "bf16"
+  # RTX PRO 6000 96GB: 直接放大 batch_size，减少 grad_accum 轮次
+  # 有效 batch = 512 × 2 = 1024（与原 64×16 一致）
+  batch_size: 512
+  grad_accum_steps: 2
+  lr: 1e-4
+  eps: 1e-8
+  epochs: 300
+  log_freq: 50       # batch 大了，每 epoch step 少，更频繁 log
+  clip_max_norm: 1.0
+  z_loss_weight: 1e-4
+  mtp_weight: 0.1
+  lr_schedule: "cosine"
+  warmup_epochs: 5
+  # WSD 参数（备用，切换 lr_schedule: "wsd" 时生效）
+  stable_epochs: 200
+  decay_beta: 1.0
+  # 单卡 96GB 开 compile 最大化吞吐
+  compile: true
+  # SWA: 最后 20% epoch 做权重平均
+  swa:
+    enabled: true
+    start_epoch: 240
+    update_interval: 1
+  mup:
+    enabled: false
+    base_width: 64
+  muon:
+    enabled: false
+    lr: 0.02
+    momentum: 0.95
+    ns_steps: 5
+
+eval:
+  interval: 3
+
+checkpoint:
+  save_interval: 10
