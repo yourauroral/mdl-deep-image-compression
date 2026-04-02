@@ -28,12 +28,12 @@ data:
   dataset: "cifar10"    # cifar10 或 cifar100
   train: datasets/
   valid: datasets/
-  num_workers: 4
+  num_workers: 8
 
 train:
   amp_dtype: "bf16"
-  batch_size: 64
-  grad_accum_steps: 16
+  batch_size: 256
+  grad_accum_steps: 4
   lr: 1e-4
   eps: 1e-8
   epochs: 200
@@ -48,7 +48,7 @@ train:
   stable_epochs: 140
   decay_beta: 1.0
   # torch.compile
-  compile: false
+  compile: true
   # SWA (Stochastic Weight Averaging)
   # Ref: Izmailov et al., arXiv:1803.05407
   swa:
