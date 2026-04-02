@@ -48,7 +48,7 @@ train:
   stable_epochs: 140
   decay_beta: 1.0
   # torch.compile
-  compile: true
+  compile: false
   # SWA (Stochastic Weight Averaging)
   # Ref: Izmailov et al., arXiv:1803.05407
   swa:

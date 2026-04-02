@@ -69,7 +69,7 @@ train:
   # lr_gamma: 0.1
   # torch.compile: 开启 fullgraph 模式编译模型
   # Ref: PyTorch 2.0+ torch.compile 文档
-  compile: true
+  compile: false
   # SWA (Stochastic Weight Averaging)
   # 手写实现，训练后期对权重取 running average，提升泛化
   # Ref: Izmailov et al., arXiv:1803.05407; Hagele et al. arXiv:2405.18392
