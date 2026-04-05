@@ -11,7 +11,7 @@
 | PixelCNN++ | 2.92 | Salimans et al., ICLR 2017 | Discretized logistic mixture |
 | Image Transformer | 2.90 | Parmar et al., ICML 2018 | Autoregressive Transformer |
 | PixelSNAIL | 2.85 | Chen et al., ICML 2018 | Discretized logistic mixture |
-| **iGPT (Ours)** | **TBD** | — | **Categorical CE (vocab=256)** |
+| **iGPT (Ours)** | **3.77** | — | **Categorical CE (vocab=256)** |
 
 > **注**: PixelCNN++ 和 PixelSNAIL 使用 discretized logistic mixture likelihood，
 > 本文使用逐通道 categorical CE（vocab=256）。两者都是估计 log-likelihood 的 bits/dim，
@@ -35,7 +35,7 @@
 
 | 实验 | 配置 | BPP↓ | ΔBPP |
 |------|------|------|------|
-| E0 | Full Proposed Model | TBD | — |
+| E0 | Full Proposed Model | 3.77 | — |
 | E1 | w/o YCbCr | TBD | +? |
 | E2 | w/o RoPE (learned PE) | TBD | +? |
 | E3 | w/o Post-Norm (Pre-Norm) | TBD | +? |

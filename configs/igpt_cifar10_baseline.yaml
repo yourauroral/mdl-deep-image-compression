@@ -5,13 +5,12 @@ model:
   image_size: 32
   in_channels: 3
   vocab_size: 256
-  d_model: 256
-  N: 8
+  d_model: 512
+  N: 12
   h: 8
-  d_ff: 688       # SwiGLU hidden dim: (8/3)*d_model=682, 向上取整到16的倍数=688
-                  # 原 ReLU FFN d_ff=1024(4x)，SwiGLU 3矩阵等参数量需 (2/3)*1024≈682
+  d_ff: 1376      # SwiGLU hidden dim: (8/3)*512=1365, 向上取整到16的倍数=1376
                   # Ref: Shazeer arXiv:2002.05202; LLaMA arXiv:2302.13971; CS336
-  dropout: 0.1
+  dropout: 0.0    # CIFAR-10 数据量足够，去掉 dropout 提升拟合能力
   use_mtp: false
   # 消融开关（Ablation toggles）：设为 false 可单独关闭对应组件
   use_ycbcr: true           # E1: RGB→YCbCr 预处理
@@ -21,39 +20,38 @@ model:
   use_qk_norm: true         # E5: QK-Norm
   use_depth_scaled_init: true  # E6: 深度缩放初始化
   use_zloss: true           # E7: z-loss 正则
-  activation_checkpointing: false  # Phase 2.2: selective activation checkpointing
+  activation_checkpointing: false
   logit_soft_cap: 0.0
 
 data:
-  dataset: "cifar10"    # cifar10 或 cifar100
+  dataset: "cifar10"
   train: datasets/
   valid: datasets/
   num_workers: 8
 
 train:
   amp_dtype: "bf16"
-  batch_size: 64
-  grad_accum_steps: 16
-  lr: 1e-4
+  batch_size: 256
+  grad_accum_steps: 4       # effective batch = 1024
+  lr: 3e-4                  # 更大模型+更大 batch，适当提高 LR
   eps: 1e-8
-  epochs: 200
-  log_freq: 100
+  epochs: 300
+  log_freq: 50
   clip_max_norm: 1.0
   z_loss_weight: 1e-4
   mtp_weight: 0.1
   lr_schedule: "cosine"
-  warmup_epochs: 5
+  warmup_epochs: 10
   # WSD (Warmup-Stable-Decay) 参数（lr_schedule: "wsd" 时生效）
   # Ref: MiniCPM arXiv:2404.06395; Hagele et al. arXiv:2405.18392
-  stable_epochs: 140
+  stable_epochs: 200
   decay_beta: 1.0
-  # torch.compile
-  compile: false
+  compile: true
   # SWA (Stochastic Weight Averaging)
   # Ref: Izmailov et al., arXiv:1803.05407
   swa:
-    enabled: false
-    start_epoch: 160
+    enabled: true
+    start_epoch: 260
     update_interval: 1
   # muP (Maximal Update Parameterization)
   # Ref: Yang et al., arXiv:2203.03466
