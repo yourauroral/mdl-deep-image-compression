@@ -46,7 +46,7 @@ train:
   # Ref: MiniCPM arXiv:2404.06395; Hagele et al. arXiv:2405.18392
   stable_epochs: 200
   decay_beta: 1.0
-  compile: true
+  compile: false
   # SWA (Stochastic Weight Averaging)
   # Ref: Izmailov et al., arXiv:1803.05407
   swa:
