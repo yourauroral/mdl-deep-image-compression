@@ -43,6 +43,7 @@
 | E5 | w/o QK-Norm | TBD | +? |
 | E6 | w/o Depth-Scaled Init | TBD | +? |
 | E7 | w/o z-loss | TBD | +? |
+| E8 | w/ Sub-pixel AR | TBD | -? |
 
 ## 环境要求
 
@@ -197,6 +198,9 @@ python scripts/evaluate.py --config configs/igpt_cifar100_baseline.yaml \
 
 - **输入预处理**：RGB → YCbCr（ITU-R BT.601），`round()` 量化到 [0,255]
 - **Tokenization**：每像素每通道作为独立 token（vocab=256，seq_len=3072 for 32×32×3）
+- **子像素自回归**（可选）：pixel-first 序列排列 [Y₀,Cb₀,Cr₀, Y₁,Cb₁,Cr₁, ...]，
+  使 Cb 条件于同像素的 Y，Cr 条件于 Y+Cb，配合 channel embedding 和像素级 RoPE。
+  Ref: PixelCNN++ (Salimans 2017), PixelSNAIL (Chen 2018)
 - **模型结构**：SwiGLU FFN、RoPE（base=500000）、QK-Norm、RMSNorm、OLMo 2 post-norm、Weight Tying
 - **损失**：Cross-Entropy + z-loss 正则化（权重 1e-4）
 - **BPP 计算**：`BPP = CE_loss / ln(2) × C`（C 为通道数，只用 CE，不含 z-loss）
@@ -279,6 +283,7 @@ python scripts/evaluate.py --config configs/igpt_cifar100_baseline.yaml \
 | `model.use_post_norm` | OLMo 2 post-norm（默认 true） |
 | `model.use_swiglu` | SwiGLU FFN（默认 true） |
 | `model.use_qk_norm` | QK-Norm（默认 true） |
+| `model.use_subpixel_ar` | 子像素自回归 pixel-first 序列（默认 false） |
 | `model.logit_soft_cap` | Logit soft-capping 上界（0=禁用，推荐 30.0） |
 | `train.amp_dtype` | `fp16` 或 `bf16` |
 | `train.lr_schedule` | `cosine` / `wsd` / `multistep` |
@@ -304,9 +309,10 @@ python scripts/evaluate.py --config configs/igpt_cifar100_baseline.yaml \
 - 自回归 iGPT（SwiGLU FFN、RoPE base=500k、QK-Norm、OLMo 2 post-norm）
 - YCbCr 色彩空间输入（ITU-R BT.601），降低通道间冗余
 - Weight Tying（embedding ↔ output head 共享权重）
+- 子像素自回归（可选，pixel-first 序列 + channel embedding + 像素级 RoPE）
 - MTP 辅助预测头（可选，DeepSeek-V3 风格）
 - Logit soft-capping（可选，Gemma 2 风格）
-- 7 项消融开关，config 驱动
+- 7 项消融开关 + 子像素自回归实验，config 驱动
 
 **训练策略**
 - Cosine / WSD LR schedule + linear warmup
@@ -394,6 +400,11 @@ mdl-deep-image-compression/
 - [Dehghani et al. 2023] "Scaling Vision Transformers," arXiv:2302.05442 (QK-Norm)
 - [Radford et al. 2019] "GPT-2" (Depth-scaled init, Weight Tying)
 - [Vaswani et al. 2017] "Attention Is All You Need," NeurIPS 2017
+
+### 子像素自回归
+- [Salimans et al. 2017] "PixelCNN++," ICLR 2017 — 通道间条件依赖, CIFAR-10: 2.92 bits/dim
+- [van den Oord et al. 2016] "Conditional Image Generation with PixelCNN Decoders," NeurIPS 2016 — 子像素条件分解
+- [Chen et al. 2018] "PixelSNAIL," ICML 2018 — 通道自回归, CIFAR-10: 2.85 bits/dim
 
 ### Baseline
 - [Salimans et al. 2017] "PixelCNN++," ICLR 2017 — CIFAR-10: 2.92 bits/dim

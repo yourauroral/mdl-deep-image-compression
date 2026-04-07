@@ -24,6 +24,12 @@ model:
   use_qk_norm: true         # E5: QK-Norm
   use_depth_scaled_init: true  # E6: 深度缩放初始化
   use_zloss: true           # E7: z-loss 正则
+  # 子像素自回归 (Sub-pixel Autoregression):
+  # pixel-first 序列排列 [Y0,Cb0,Cr0, Y1,Cb1,Cr1, ...]，
+  # 使同一像素内的通道能相互条件化 p(Cb|Y) 和 p(Cr|Y,Cb)。
+  # Ref: Salimans et al., "PixelCNN++," ICLR 2017
+  # Ref: van den Oord et al., NeurIPS 2016
+  use_subpixel_ar: false
   activation_checkpointing: false  # Phase 2.2: selective activation checkpointing
   # Logit soft-capping: cap * tanh(logits / cap)，平滑限幅防止 logits 爆炸
   # 与 z-loss 互补：z-loss 惩罚 logsumexp，soft-cap 直接约束幅值

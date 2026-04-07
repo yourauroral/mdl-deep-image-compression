@@ -307,7 +307,17 @@ class MultiHeadAttentionBlock(nn.Module):
       if use_rope:
           self.rope = RotaryEmbedding(self.d_k)
 
-  def forward(self, q, k, v, mask=None):
+  def forward(self, q, k, v, mask=None, position_ids=None):
+    """
+    参数:
+      q, k, v: (batch, seq_len, d_model)
+      mask: 可选注意力掩码
+      position_ids: 可选 (seq_len,) long tensor，指定每个 token 的 RoPE 位置 ID。
+                    用于子像素自回归：同一像素内的 3 个通道 token 共享相同位置 ID，
+                    使 RoPE 只编码像素间的空间关系。
+                    None 时使用默认 0,1,2,...,seq_len-1。
+                    Ref: PixelCNN++ [Salimans 2017] — 通道间条件依赖
+    """
     batch_size, seq_len, _ = q.shape
 
     query = self.w_q(q).view(batch_size, seq_len, self.h, self.d_k).transpose(1, 2).contiguous()
@@ -319,7 +329,15 @@ class MultiHeadAttentionBlock(nn.Module):
         key = self.k_norm(key)
 
     if self.use_rope:
-        cos, sin = self.rope(seq_len, q.device)
+        # 子像素自回归模式下，使用像素级 position_ids 生成 RoPE
+        # 同一像素内的通道 token 共享同一位置编码
+        if position_ids is not None:
+            max_pos = int(position_ids.max().item()) + 1
+            cos_full, sin_full = self.rope(max_pos, q.device)
+            cos = cos_full[position_ids]  # (seq_len, d_k)
+            sin = sin_full[position_ids]
+        else:
+            cos, sin = self.rope(seq_len, q.device)
         # Fused Attn+RoPE: 将 RoPE 和 Flash Attention 合并为一次操作，
         # 减少 Q/K 的 HBM 读写（RoPE 就地修改后直接被 Attn 读取）。
         # Ref: Su et al., arXiv:2104.09864; Dao, arXiv:2307.08691
@@ -376,11 +394,11 @@ class GPTBlock(nn.Module):
         # 消融 fallback: 标准 ReLU FFN
         self.ff = ReLUFeedForwardBlock(d_model, d_ff, dropout)
 
-  def _attn_forward(self, x, mask):
+  def _attn_forward(self, x, mask, position_ids=None):
     """Attention sublayer，可被 activation checkpoint 包裹。"""
-    return self.attn(x, x, x, mask)
+    return self.attn(x, x, x, mask, position_ids=position_ids)
 
-  def forward(self, x, mask=None):
+  def forward(self, x, mask=None, position_ids=None):
     if self.use_post_norm:
         # OLMo 2 post-norm: x = x + RMSNorm(sublayer(x))
         if self.activation_checkpointing and self.training:
@@ -388,9 +406,9 @@ class GPTBlock(nn.Module):
             # Ref: Chen et al., "Training Deep Nets with Sublinear Memory Cost,"
             #      arXiv:1604.06174, 2016.
             attn_out = torch_checkpoint(self._attn_forward, x, mask,
-                                        use_reentrant=False)
+                                        position_ids, use_reentrant=False)
         else:
-            attn_out = self._attn_forward(x, mask)
+            attn_out = self._attn_forward(x, mask, position_ids)
         # Fused Add+RMSNorm: residual + RMSNorm(sublayer_out) 一次 kernel
         if _USE_FUSED_ADD_RMSNORM and x.is_cuda:
             x = _fused_add_rms_norm(x, attn_out, self.norm1.weight, self.norm1.eps)
@@ -408,9 +426,9 @@ class GPTBlock(nn.Module):
         if self.activation_checkpointing and self.training:
             attn_out = torch_checkpoint(self._attn_forward,
                                         self.norm1(x), mask,
-                                        use_reentrant=False)
+                                        position_ids, use_reentrant=False)
         else:
-            attn_out = self._attn_forward(self.norm1(x), mask)
+            attn_out = self._attn_forward(self.norm1(x), mask, position_ids)
         x = x + attn_out
         x = x + self.ff(self.norm2(x))
     return x

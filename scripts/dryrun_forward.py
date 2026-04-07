@@ -149,6 +149,31 @@ def main():
     # ── 参数量统计 ──
     n_params = sum(p.numel() for p in model.parameters())
     print(f"\nTotal params: {n_params:,}")
+
+    # ── 6. 子像素自回归 ──
+    # 验证 pixel-first 序列排列 + channel embedding + pixel-level RoPE
+    # Ref: Salimans et al., "PixelCNN++," ICLR 2017 — 通道间条件依赖
+    # Ref: van den Oord et al., NeurIPS 2016 — 子像素条件分解
+    print("\n=== Test 6: Sub-pixel Autoregression ===")
+    model6 = IGPT(
+        image_size=32, in_channels=3, vocab_size=256,
+        d_model=mcfg["d_model"], N=mcfg["N"], h=mcfg["h"], d_ff=mcfg["d_ff"],
+        dropout=0.1, use_subpixel_ar=True,
+    ).to(device)
+    out6 = model6(x)
+    _check_finite(out6, "subpixel-ar")
+    # 验证 channel_embed 存在且维度正确
+    assert hasattr(model6, 'channel_embed'), "sub-pixel AR model should have channel_embed"
+    assert model6.channel_embed.weight.shape == (3, mcfg["d_model"]), (
+        f"channel_embed shape mismatch: {model6.channel_embed.weight.shape}"
+    )
+    print("  [channel_embed] OK — shape (3, d_model)")
+    # 验证 backward 正常
+    out6['loss'].backward()
+    grad_ok6 = all(p.grad is not None for p in model6.parameters() if p.requires_grad)
+    assert grad_ok6, "Some parameters missing gradients after backward (subpixel-ar)"
+    print("  [backward] all grads computed: OK")
+
     print("\nAll checks passed!")
 
 

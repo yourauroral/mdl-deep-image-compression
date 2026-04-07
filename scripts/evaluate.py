@@ -130,13 +130,16 @@ def evaluate_model(model, loader, device, amp_dtype=None):
 
 @torch.no_grad()
 def evaluate_per_channel(model, loader, device, amp_dtype=None,
-                         use_ycbcr=True):
+                         use_ycbcr=True, use_subpixel_ar=False):
     """
     Per-channel BPP 分解 — 分别计算 Y/Cb/Cr (或 R/G/B) 各通道的 BPP。
 
     原理:
-      模型预测整个 token 序列 (Y_0, Y_1, ..., Y_{H*W-1}, Cb_0, ..., Cr_{H*W-1})，
-      将 logits 和 targets 按通道拆分后分别计算 CE loss。
+      模型预测整个 token 序列，将 logits 和 targets 按通道拆分后分别计算 CE loss。
+
+      序列布局:
+        - channel-first (use_subpixel_ar=False): [Y_all, Cb_all, Cr_all]
+        - pixel-first  (use_subpixel_ar=True):  [Y0,Cb0,Cr0, Y1,Cb1,Cr1, ...]
 
       BPP_channel = CE_channel / ln(2)
       BPP_total = BPP_Y + BPP_Cb + BPP_Cr
@@ -147,6 +150,7 @@ def evaluate_per_channel(model, loader, device, amp_dtype=None,
       device: torch.device
       amp_dtype: AMP 精度
       use_ycbcr: bool — 模型是否使用 YCbCr（决定通道名称）
+      use_subpixel_ar: bool — 是否使用子像素自回归（pixel-first 布局）
 
     返回:
       channel_bpps: dict[str, (float, float)] — {通道名: (bpp_mean, bpp_std)}
@@ -178,24 +182,44 @@ def evaluate_per_channel(model, loader, device, amp_dtype=None,
             tokens = rgb_to_ycbcr_int(x.clamp(0, 1))
         else:
             tokens = (x.clamp(0, 1) * 255).round().long()
-        tokens = tokens.reshape(B, -1)  # (B, seq_len)
+
+        if use_subpixel_ar:
+            # pixel-first: (B, C, H, W) → (B, H, W, C) → (B, H*W*C)
+            tokens = tokens.permute(0, 2, 3, 1).reshape(B, -1)
+        else:
+            tokens = tokens.reshape(B, -1)  # channel-first: (B, seq_len)
         target_tokens = tokens[:, 1:]    # (B, T)
 
-        # 按通道拆分: 序列布局是 [Y_pixels, Cb_pixels, Cr_pixels]
-        # 每通道 pixels_per_channel 个 token
+        # 按通道拆分: 根据序列布局提取每通道的 token
         for i, ch_name in enumerate(channel_names):
-            start = i * pixels_per_channel
-            end = (i + 1) * pixels_per_channel
-            # 注意 target 偏移了 1，所以通道边界也偏移
-            # target_tokens[t] 对应 logits[t] 的预测
-            # 通道 i 的 target 范围: [start, end) 但受限于 T = seq_len-1
-            ch_start = max(0, start - 1)   # logits index 对应 target index
-            ch_end = min(end - 1, logits.shape[1])
-            if ch_start >= ch_end:
-                continue
-
-            ch_logits = logits[:, ch_start:ch_end]    # (B, ch_len, vocab)
-            ch_targets = target_tokens[:, ch_start:ch_end]  # (B, ch_len)
+            if use_subpixel_ar:
+                # pixel-first: 通道 i 的 token 在位置 i, i+C, i+2*C, ...
+                # target_tokens 相对于 tokens 偏移了 1
+                # 需要找到 target 中属于通道 i 的位置
+                T = target_tokens.shape[1]
+                # tokens 中通道 i 的位置: i, i+C, i+2C, ...
+                # target_tokens[t] = tokens[t+1]，其通道 = (t+1) % C
+                ch_mask = torch.arange(T, device=device) % C == ((i - 1) % C if i > 0 else (C - 1))
+                # 更准确: target_tokens[t] 对应 tokens[t+1]，
+                # tokens[t+1] 的通道 = (t+1) % C
+                ch_mask = ((torch.arange(T, device=device) + 1) % C) == i
+                if not ch_mask.any():
+                    continue
+                ch_logits = logits[:, ch_mask]      # (B, ch_len, vocab)
+                ch_targets = target_tokens[:, ch_mask]  # (B, ch_len)
+            else:
+                # channel-first: 通道 i 占连续 pixels_per_channel 个 token
+                start = i * pixels_per_channel
+                end = (i + 1) * pixels_per_channel
+                # 注意 target 偏移了 1，所以通道边界也偏移
+                # target_tokens[t] 对应 logits[t] 的预测
+                # 通道 i 的 target 范围: [start, end) 但受限于 T = seq_len-1
+                ch_start = max(0, start - 1)   # logits index 对应 target index
+                ch_end = min(end - 1, logits.shape[1])
+                if ch_start >= ch_end:
+                    continue
+                ch_logits = logits[:, ch_start:ch_end]    # (B, ch_len, vocab)
+                ch_targets = target_tokens[:, ch_start:ch_end]  # (B, ch_len)
 
             ch_ce = F.cross_entropy(
                 ch_logits.reshape(-1, ch_logits.shape[-1]),
@@ -224,7 +248,8 @@ def evaluate_per_channel(model, loader, device, amp_dtype=None,
 
 @torch.no_grad()
 def evaluate_position_bpp(model, loader, device, amp_dtype=None,
-                           image_size=32, in_channels=3, use_ycbcr=True):
+                           image_size=32, in_channels=3, use_ycbcr=True,
+                           use_subpixel_ar=False):
     """
     Per-position BPP 热力图 — 计算每个像素位置的平均 BPP。
 
@@ -282,16 +307,27 @@ def evaluate_position_bpp(model, loader, device, amp_dtype=None,
                 tokens = rgb_to_ycbcr_int(x_clamped)
             else:
                 tokens = (x_clamped * 255).round().long()
-            tokens = tokens.reshape(B_cur, -1)
+            if use_subpixel_ar:
+                tokens = tokens.permute(0, 2, 3, 1).reshape(B_cur, -1)
+            else:
+                tokens = tokens.reshape(B_cur, -1)
             target_tokens = tokens[:, 1:]
             # 手动计算 logits
             hidden = model.token_embed(tokens[:, :-1])
+            if hasattr(model, 'channel_embed') and use_subpixel_ar:
+                T_in = tokens.shape[1] - 1
+                ch_idx = torch.arange(T_in, device=device) % C
+                hidden = hidden + model.channel_embed(ch_idx).unsqueeze(0)
             if not model.use_rope:
                 T = tokens.shape[1] - 1
                 positions = torch.arange(T, device=device)
                 hidden = hidden + model.pos_embed(positions)
+            position_ids = None
+            if use_subpixel_ar and model.use_rope:
+                T_in = tokens.shape[1] - 1
+                position_ids = torch.arange(T_in, device=device) // C
             for block in model.blocks:
-                hidden = block(hidden, mask=None)
+                hidden = block(hidden, mask=None, position_ids=position_ids)
             if not model.use_post_norm:
                 hidden = model.final_norm(hidden)
             logits = model.head(hidden).float()
@@ -303,7 +339,10 @@ def evaluate_position_bpp(model, loader, device, amp_dtype=None,
                 tokens = rgb_to_ycbcr_int(x_clamped)
             else:
                 tokens = (x_clamped * 255).round().long()
-            tokens = tokens.reshape(B_cur, -1)
+            if use_subpixel_ar:
+                tokens = tokens.permute(0, 2, 3, 1).reshape(B_cur, -1)
+            else:
+                tokens = tokens.reshape(B_cur, -1)
             target_tokens = tokens[:, 1:]
 
         # Per-token CE loss: (B, T)
@@ -329,8 +368,13 @@ def evaluate_position_bpp(model, loader, device, amp_dtype=None,
     position_bpp_full = np.zeros(seq_len)
     position_bpp_full[1:] = position_bpp
 
-    # (seq_len,) → (C, H, W)
-    position_bpp_chw = position_bpp_full.reshape(C, H, W)
+    if use_subpixel_ar:
+        # pixel-first: (seq_len,) → (H, W, C) → (C, H, W)
+        position_bpp_hwc = position_bpp_full.reshape(H, W, C)
+        position_bpp_chw = position_bpp_hwc.transpose(2, 0, 1)  # (C, H, W)
+    else:
+        # channel-first: (seq_len,) → (C, H, W)
+        position_bpp_chw = position_bpp_full.reshape(C, H, W)
 
     # 总 BPP 热力图: 对 C 通道求和 → (H, W)
     heatmap = position_bpp_chw.sum(axis=0)
@@ -549,9 +593,10 @@ def cmd_single(args, config, device):
     if args.per_channel:
         print("\n计算 per-channel BPP...")
         use_ycbcr = mcfg.get("use_ycbcr", True)
+        use_subpixel_ar = mcfg.get("use_subpixel_ar", False)
         channel_bpps, (total_bpp, total_std) = evaluate_per_channel(
             model, test_loader, device, amp_dtype=amp_dtype,
-            use_ycbcr=use_ycbcr
+            use_ycbcr=use_ycbcr, use_subpixel_ar=use_subpixel_ar
         )
         for ch_name, (ch_bpp, ch_std) in channel_bpps.items():
             print(f"  {ch_name}: {ch_bpp:.4f} ± {ch_std:.4f}")
@@ -581,12 +626,13 @@ def cmd_single(args, config, device):
     if args.heatmap:
         print("\n生成 per-position BPP 热力图...")
         use_ycbcr = mcfg.get("use_ycbcr", True)
+        use_subpixel_ar = mcfg.get("use_subpixel_ar", False)
         image_size = mcfg.get("image_size", 32)
         in_channels = mcfg.get("in_channels", 3)
         heatmap, channel_heatmaps = evaluate_position_bpp(
             model, test_loader, device, amp_dtype=amp_dtype,
             image_size=image_size, in_channels=in_channels,
-            use_ycbcr=use_ycbcr
+            use_ycbcr=use_ycbcr, use_subpixel_ar=use_subpixel_ar
         )
         # 保存到 checkpoint 同目录
         ckpt_dir = os.path.dirname(args.checkpoint) or "."

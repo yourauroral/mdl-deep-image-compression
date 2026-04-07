@@ -110,9 +110,21 @@ class IGPT(nn.Module):
     # logits = cap * tanh(logits / cap)，平滑限幅
     # Ref: Gemma 2, arXiv:2408.00118 — output logit capping = 30.0
     logit_soft_cap: float = 0.0,  # 0.0 = 禁用；推荐 30.0
+    # 子像素自回归 (Sub-pixel Autoregression):
+    # 将序列从 channel-first [Y_all, Cb_all, Cr_all] 改为 pixel-first
+    # [Y0,Cb0,Cr0, Y1,Cb1,Cr1, ...]，使同一像素内的通道能相互条件化:
+    #   p(Cb_i | Y_i, context)  和  p(Cr_i | Y_i, Cb_i, context)
+    # 这是 PixelCNN++/PixelSNAIL 取得低 bits/dim 的关键技巧之一。
+    # Ref: Salimans et al., "PixelCNN++," ICLR 2017 — 通道间条件依赖
+    # Ref: van den Oord et al., "Conditional Image Generation with PixelCNN
+    #       Decoders," NeurIPS 2016 — 子像素条件分解
+    # Ref: Chen et al., "PixelSNAIL," ICML 2018 — 通道自回归
+    use_subpixel_ar: bool = False,
   ):
     super().__init__()
     self.seq_len = image_size * image_size * in_channels
+    self.in_channels = in_channels
+    self.image_size = image_size
     self.vocab_size = vocab_size
     self.d_model = d_model
     self.N_layers = N
@@ -122,7 +134,16 @@ class IGPT(nn.Module):
     self.use_zloss = use_zloss
     self.use_depth_scaled_init = use_depth_scaled_init
     self.logit_soft_cap = logit_soft_cap
+    self.use_subpixel_ar = use_subpixel_ar
     self.token_embed = nn.Embedding(vocab_size, d_model)
+
+    # Channel embedding: 子像素自回归模式下，为每个通道位置（0=Y/R, 1=Cb/G, 2=Cr/B）
+    # 添加可学习的通道嵌入，帮助模型区分同一像素内的不同通道 token。
+    # 标准 RoPE/learned PE 只编码序列位置，无法区分通道语义。
+    # Ref: van den Oord et al., "Conditional Image Generation with PixelCNN
+    #       Decoders," NeurIPS 2016 — 通道条件化需要通道标识
+    if use_subpixel_ar:
+        self.channel_embed = nn.Embedding(in_channels, d_model)
 
     # Learned positional embedding fallback（use_rope=False 时）
     # Ref: Radford et al., "GPT-2," 2019 — learned absolute PE
@@ -272,13 +293,41 @@ class IGPT(nn.Module):
     else:
         # 消融 baseline: 直接量化 RGB 到 [0,255]
         x = (x * 255).round().long()
-    x = x.reshape(B, -1)      # (B, seq_len)，seq_len = 3*H*W
+
+    if self.use_subpixel_ar:
+        # 子像素自回归: pixel-first 排列
+        # (B, C, H, W) → (B, H, W, C) → (B, H*W*C)
+        # 序列: [Y0, Cb0, Cr0, Y1, Cb1, Cr1, ..., Y_{N-1}, Cb_{N-1}, Cr_{N-1}]
+        # 使得 Cb_i 可以看到同像素的 Y_i，Cr_i 可以看到 Y_i 和 Cb_i。
+        # 这种排列下 causal mask 自然实现通道间条件依赖:
+        #   p(Cb_i | Y_i, Y_{<i}, Cb_{<i}, Cr_{<i})
+        #   p(Cr_i | Y_i, Cb_i, Y_{<i}, Cb_{<i}, Cr_{<i})
+        # Ref: Salimans et al., "PixelCNN++," ICLR 2017
+        # Ref: van den Oord et al., "Conditional Image Generation with PixelCNN
+        #       Decoders," NeurIPS 2016
+        x = x.permute(0, 2, 3, 1).reshape(B, -1)  # (B, seq_len)
+    else:
+        # 默认: channel-first 排列 [Y_all, Cb_all, Cr_all]
+        x = x.reshape(B, -1)      # (B, seq_len)，seq_len = 3*H*W
 
     # NTP：输入 x[0..T-1]，预测 x[1..T]
     input_tokens  = x[:, :-1]   # (B, T)
     target_tokens = x[:, 1:]    # (B, T)
 
     hidden = self.token_embed(input_tokens)   # (B, T, d_model)
+
+    # 子像素自回归: 添加 channel embedding + 像素级 RoPE position_ids
+    position_ids = None
+    if self.use_subpixel_ar:
+        T = input_tokens.shape[1]
+        C = self.in_channels
+        # Channel indices: [0,1,2, 0,1,2, ...] 循环，标识每个 token 属于哪个通道
+        channel_indices = torch.arange(T, device=input_tokens.device) % C
+        hidden = hidden + self.channel_embed(channel_indices).unsqueeze(0)
+        # Pixel-level position_ids: 同一像素内的 C 个 token 共享同一位置 ID
+        # [0,0,0, 1,1,1, 2,2,2, ...]，使 RoPE 只编码像素间空间距离
+        # Ref: Su et al., "RoFormer," arXiv:2104.09864 — RoPE 编码相对位置
+        position_ids = torch.arange(T, device=input_tokens.device) // C
 
     # Learned positional embedding（use_rope=False 时）
     if not self.use_rope:
@@ -287,7 +336,7 @@ class IGPT(nn.Module):
         hidden = hidden + self.pos_embed(positions)
 
     for block in self.blocks:
-      hidden = block(hidden, mask=None)
+      hidden = block(hidden, mask=None, position_ids=position_ids)
 
     # Final norm: 仅 pre-norm 模式需要（post-norm 模式在 block 内已归一化）
     if not self.use_post_norm:

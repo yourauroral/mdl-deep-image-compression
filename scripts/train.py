@@ -109,6 +109,7 @@ def _build_model_from_config(mcfg: dict, device) -> IGPT:
         use_zloss=mcfg.get("use_zloss", True),
         activation_checkpointing=mcfg.get("activation_checkpointing", False),
         logit_soft_cap=float(mcfg.get("logit_soft_cap", 0.0)),
+        use_subpixel_ar=mcfg.get("use_subpixel_ar", False),
     ).to(device)
 
 
