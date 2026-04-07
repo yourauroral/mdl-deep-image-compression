@@ -57,3 +57,41 @@ def compute_bpp(ce_loss: torch.Tensor, channels: int) -> torch.Tensor:
       scalar tensor — BPP（bits/pixel）
     """
     return (ce_loss / math.log(2)) * channels
+
+
+def build_gaussian_targets(targets: torch.Tensor, vocab_size: int,
+                           sigma: float) -> torch.Tensor:
+    """
+    构建 Gaussian label smoothing 的 soft target 分布。
+
+    对每个 target 值 t，生成 P(k) ∝ exp(-(k-t)²/(2σ²)), k=0..V-1，
+    并通过 softmax 归一化为概率分布。保留像素值的序数关系：
+    预测 127 时，128 获得的概率远高于 0。
+
+    动机:
+      标准 categorical CE 将 256 个像素值视为无序类别，
+      预测 128（差 1）与预测 0（差 127）惩罚相同。
+      Gaussian soft target 注入序数先验，使模型学到"接近即好"。
+      这与 PixelCNN++ 使用 discretized logistic 的动机一致。
+
+    参考:
+      [1] Szegedy et al., "Rethinking the Inception Architecture," CVPR 2016,
+          arXiv:1512.00567 — 提出 uniform label smoothing 正则化
+      [2] Salimans et al., "PixelCNN++," ICLR 2017 —
+          discretized logistic mixture 隐式保留序数关系
+
+    参数:
+      targets: (M,) long tensor，取值 [0, vocab_size-1]
+      vocab_size: int，词汇表大小（256）
+      sigma: float，高斯标准差（推荐 1.0）
+    返回:
+      (M, vocab_size) float tensor，每行和为 1 的 soft target 分布
+    """
+    # arange: [0, 1, ..., V-1]，shape (1, V)
+    bins = torch.arange(vocab_size, device=targets.device, dtype=torch.float32).unsqueeze(0)
+    # targets: (M,) → (M, 1)
+    t = targets.unsqueeze(1).float()
+    # log_probs = -(k - t)² / (2σ²)，shape (M, V)
+    log_probs = -((bins - t) ** 2) / (2.0 * sigma * sigma)
+    # softmax 归一化（数值稳定，等价于 exp + normalize）
+    return torch.softmax(log_probs, dim=-1)

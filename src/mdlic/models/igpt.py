@@ -120,6 +120,17 @@ class IGPT(nn.Module):
     #       Decoders," NeurIPS 2016 — 子像素条件分解
     # Ref: Chen et al., "PixelSNAIL," ICML 2018 — 通道自回归
     use_subpixel_ar: bool = False,
+    # Sliding Window Attention: 限制每个 token 只关注最近 W 个 token，
+    # 利用图像的空间局部性减少注意力计算量。
+    # -1 = full causal attention（默认）; 推荐 512 或 1024。
+    # Ref: Beltagy et al., "Longformer," arXiv:2004.05150, 2020
+    # Ref: Jiang et al., "Mistral 7B," arXiv:2310.06825, 2023
+    sliding_window_size: int = -1,
+    # Full attention 穿插频率 (Mistral 风格):
+    # 每 N 层有 1 层使用 full causal attention，其余层使用 sliding window。
+    # 0 = 全部使用 sliding_window_size; 4 = 每 4 层 1 层 full。
+    # Ref: Jiang et al., "Mistral 7B," arXiv:2310.06825, 2023
+    full_attn_every_n: int = 0,
   ):
     super().__init__()
     self.seq_len = image_size * image_size * in_channels
@@ -151,14 +162,18 @@ class IGPT(nn.Module):
     if not use_rope:
         self.pos_embed = nn.Embedding(self.seq_len - 1, d_model)
 
+    self.sliding_window_size = sliding_window_size
+    self.full_attn_every_n = full_attn_every_n
+
     self.blocks = nn.ModuleList([
       GPTBlock(d_model, h, d_ff, dropout,
                use_post_norm=use_post_norm,
                use_swiglu=use_swiglu,
                use_qk_norm=use_qk_norm,
                use_rope=use_rope,
-               activation_checkpointing=activation_checkpointing)
-      for _ in range(N)
+               activation_checkpointing=activation_checkpointing,
+               window_size=self._get_layer_window_size(layer_idx))
+      for layer_idx in range(N)
     ])
 
     # Final RMSNorm: 仅在 pre-norm 模式下需要。
@@ -196,7 +211,24 @@ class IGPT(nn.Module):
       # 共享 self.head 权重，不新建 Linear，节省参数 [1]
 
     self._init_weights()
-  
+
+  def _get_layer_window_size(self, layer_idx: int) -> int:
+    """
+    决定第 layer_idx 层的注意力窗口大小。
+
+    - sliding_window_size <= 0: 所有层 full causal (-1)
+    - full_attn_every_n == 0: 所有层使用 sliding_window_size
+    - full_attn_every_n > 0: 每 N 层中最后 1 层 full causal，其余 windowed
+      例如 N=4: layer 3,7,11 用 full，其余 windowed
+      Ref: Jiang et al., "Mistral 7B," arXiv:2310.06825, 2023
+    """
+    if self.sliding_window_size <= 0:
+        return -1  # full causal
+    if (self.full_attn_every_n > 0
+            and (layer_idx + 1) % self.full_attn_every_n == 0):
+        return -1  # 此层 full causal
+    return self.sliding_window_size
+
   def _init_weights(self):
     """
     权重初始化：基础 std=0.02，残差通路输出投影用深度缩放（可选）。
@@ -272,7 +304,8 @@ class IGPT(nn.Module):
         # Embedding: std = 1.0 [1] Table 8
         nn.init.normal_(module.weight, mean=0.0, std=1.0)
 
-  def forward(self, x, z_loss_weight: float = 1e-4, mtp_weight: float = 0.1):
+  def forward(self, x, z_loss_weight: float = 1e-4, mtp_weight: float = 0.1,
+              label_smoothing_sigma: float = 0.0):
     """
     参数:
       x:             (B, C, H, W) float [0,1]
@@ -280,6 +313,9 @@ class IGPT(nn.Module):
                      Ref: PaLM arXiv:2204.02311; OLMo 2 arXiv:2501.00656
       mtp_weight:    MTP 辅助 loss 权重，默认 0.1（use_mtp=True 时生效）
                      Ref: DeepSeek-V3 arXiv:2412.19437 Section 2.3
+      label_smoothing_sigma: Gaussian label smoothing σ，默认 0.0（禁用）
+                     σ > 0 时训练用 soft targets，验证自动用 hard targets。
+                     Ref: Szegedy et al., arXiv:1512.00567
     """
     z_loss_weight = float(z_loss_weight)
     mtp_weight = float(mtp_weight)
@@ -345,11 +381,36 @@ class IGPT(nn.Module):
     # --- 主 loss: NTP cross-entropy (+ 可选 fused z-loss) ---
     z_w = z_loss_weight if self.use_zloss else 0.0
 
+    # Gaussian Label Smoothing: σ > 0 且训练模式时，绕过 fused kernels，
+    # 使用 PyTorch F.cross_entropy 的 soft target 路径。
+    # 验证时（model.eval()）自动走 hard target 路径，保证 BPP 可比性。
+    # Ref: Szegedy et al., "Rethinking the Inception Architecture," arXiv:1512.00567
+    use_label_smoothing = label_smoothing_sigma > 0.0 and self.training
+    if use_label_smoothing:
+        from ..utils import build_gaussian_targets
+        logits = self.head(hidden).float()        # (B, T, vocab_size)
+        if self.logit_soft_cap > 0:
+            logits = self.logit_soft_cap * torch.tanh(logits / self.logit_soft_cap)
+        # 构建高斯 soft targets: (B*T, V)
+        soft_targets = build_gaussian_targets(
+            target_tokens.reshape(-1), self.vocab_size, label_smoothing_sigma
+        )
+        # F.cross_entropy 支持 (N, C) float target（PyTorch 1.10+）
+        # 等价于 -sum(soft_target * log_softmax(logits), dim=-1).mean()
+        ce_loss = F.cross_entropy(
+            logits.reshape(-1, self.vocab_size), soft_targets, reduction="mean"
+        )
+        if self.use_zloss:
+            log_z = torch.logsumexp(logits, dim=-1)
+            z_loss = (log_z ** 2).mean()
+            loss = ce_loss + z_w * z_loss
+        else:
+            loss = ce_loss
     # Fused Linear + CE + z-loss: 将 output head 投影和 CE loss 合并，
     # 避免实例化完整 (B*T, V) logits 张量。
     # 条件: 无 soft-capping（需要完整 logits）、z-loss 启用、kernel 可用。
     # Ref: Liger-Kernel arXiv:2410.10989（手写 Fused Linear CE pattern）
-    if (_USE_FUSED_LINEAR_CE and hidden.is_cuda and z_w > 0
+    elif (_USE_FUSED_LINEAR_CE and hidden.is_cuda and z_w > 0
             and self.logit_soft_cap <= 0):
         ce_loss, z_loss = _fused_linear_ce(
             hidden.reshape(-1, self.d_model),

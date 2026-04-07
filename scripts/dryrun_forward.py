@@ -174,6 +174,55 @@ def main():
     assert grad_ok6, "Some parameters missing gradients after backward (subpixel-ar)"
     print("  [backward] all grads computed: OK")
 
+    # ── Test 7: Gaussian Label Smoothing ──
+    # 验证 label smoothing 路径正确绕过 fused kernels 并产生有限 loss。
+    # Ref: Szegedy et al., "Rethinking the Inception Architecture," arXiv:1512.00567
+    print("\n=== Test 7: Gaussian Label Smoothing ===")
+    model7 = _build_model_from_config(mcfg, device)
+    model7.train()
+    out7 = model7(x, label_smoothing_sigma=1.0)
+    _check_finite(out7, "gaussian-smooth")
+    # label smoothing 模式下 logits 必须存在（不走 fused path）
+    assert out7['logits'] is not None, "label smoothing should produce logits (non-fused path)"
+    # 验证 sigma=0（eval 模式）和 sigma=1 的 ce_loss 不同
+    model7.eval()
+    out7_hard = model7(x)
+    assert abs(out7['ce_loss'].item() - out7_hard['ce_loss'].item()) > 1e-6, (
+        "label smoothing should change CE loss vs hard targets"
+    )
+    print("  [gaussian-smooth] OK — soft target CE via PyTorch path")
+
+    # ── Test 8: Sliding Window Attention ──
+    # 验证 sliding window 正确限制注意力范围。
+    # Ref: Beltagy et al., "Longformer," arXiv:2004.05150
+    # Ref: Jiang et al., "Mistral 7B," arXiv:2310.06825
+    print("\n=== Test 8: Sliding Window Attention ===")
+    model8 = IGPT(
+        image_size=32, in_channels=3, vocab_size=256,
+        d_model=mcfg["d_model"], N=mcfg["N"], h=mcfg["h"], d_ff=mcfg["d_ff"],
+        dropout=0.1, sliding_window_size=256,
+    ).to(device)
+    out8 = model8(x)
+    _check_finite(out8, "sliding-window")
+    print("  [sliding-window] OK — window_size=256")
+
+    # Mistral 风格混合: 每 2 层 1 层 full attention
+    model8b = IGPT(
+        image_size=32, in_channels=3, vocab_size=256,
+        d_model=mcfg["d_model"], N=4, h=mcfg["h"], d_ff=mcfg["d_ff"],
+        dropout=0.1, sliding_window_size=256, full_attn_every_n=2,
+    ).to(device)
+    out8b = model8b(x)
+    _check_finite(out8b, "sliding-window-mixed")
+    # 验证: layer 0 windowed, layer 1 full, layer 2 windowed, layer 3 full
+    for i, block in enumerate(model8b.blocks):
+        expected_ws = -1 if (i + 1) % 2 == 0 else 256
+        actual_ws = block.attn.window_size
+        assert actual_ws == expected_ws, (
+            f"Layer {i} window_size: expected {expected_ws}, got {actual_ws}"
+        )
+    print("  [mixed-window] OK — layers alternate windowed/full")
+
     print("\nAll checks passed!")
 
 

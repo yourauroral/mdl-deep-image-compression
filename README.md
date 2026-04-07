@@ -44,6 +44,8 @@
 | E6 | w/o Depth-Scaled Init | TBD | +? |
 | E7 | w/o z-loss | TBD | +? |
 | E8 | w/ Sub-pixel AR | TBD | -? |
+| E9 | w/ Label Smoothing σ=1.0 | TBD | -? |
+| E10 | w/ Sliding Window W=512 | TBD | -? |
 
 ## 环境要求
 
@@ -284,10 +286,13 @@ python scripts/evaluate.py --config configs/igpt_cifar100_baseline.yaml \
 | `model.use_swiglu` | SwiGLU FFN（默认 true） |
 | `model.use_qk_norm` | QK-Norm（默认 true） |
 | `model.use_subpixel_ar` | 子像素自回归 pixel-first 序列（默认 false） |
+| `model.sliding_window_size` | Sliding window 大小（-1=full causal，推荐 512/1024） |
+| `model.full_attn_every_n` | 每 N 层 1 层 full attention（0=全部 windowed） |
 | `model.logit_soft_cap` | Logit soft-capping 上界（0=禁用，推荐 30.0） |
 | `train.amp_dtype` | `fp16` 或 `bf16` |
 | `train.lr_schedule` | `cosine` / `wsd` / `multistep` |
 | `train.z_loss_weight` | z-loss 正则化权重（默认 1e-4） |
+| `train.label_smoothing_sigma` | Gaussian label smoothing σ（0=禁用，推荐 1.0） |
 | `train.muon.enabled` | 是否启用 Muon 优化器 |
 | `train.swa.enabled` | 是否启用 SWA（默认 false） |
 | `data.dataset` | 数据集名称（`cifar10` 或 `cifar100`） |
@@ -310,11 +315,13 @@ python scripts/evaluate.py --config configs/igpt_cifar100_baseline.yaml \
 - YCbCr 色彩空间输入（ITU-R BT.601），降低通道间冗余
 - Weight Tying（embedding ↔ output head 共享权重）
 - 子像素自回归（可选，pixel-first 序列 + channel embedding + 像素级 RoPE）
+- Sliding Window Attention（可选，Longformer/Mistral 风格，可混合 full attention）
 - MTP 辅助预测头（可选，DeepSeek-V3 风格）
 - Logit soft-capping（可选，Gemma 2 风格）
-- 7 项消融开关 + 子像素自回归实验，config 驱动
+- 7 项消融开关 + 子像素自回归 + Label Smoothing + Sliding Window 实验，config 驱动
 
 **训练策略**
+- Gaussian Label Smoothing（可选，高斯软化 target 保留像素值序数关系）
 - Cosine / WSD LR schedule + linear warmup
 - SWA 权重平均（手写 lerp 实现）
 - muP 初始化 + LR 缩放
@@ -433,3 +440,14 @@ mdl-deep-image-compression/
 - [ITU-R BT.601] YCbCr 标准
 - [Wallace 1992] "The JPEG Still Picture Compression Standard"
 - [Wiegand et al. 2003] "Overview of the H.264/AVC Video Coding Standard"
+
+### 理论框架
+- [Shannon 1948] "A Mathematical Theory of Communication" — 源编码定理
+- [Tishby & Zaslavsky 2015] "Deep Learning and the Information Bottleneck Principle," arXiv:1503.02406
+- [Delétang et al. 2024] "Language Modeling Is Compression," ICLR 2024, arXiv:2309.10668
+
+### Sliding Window Attention & Label Smoothing
+- [Child et al. 2019] "Generating Long Sequences with Sparse Transformers," arXiv:1904.10509 — CIFAR-10: 2.80 bits/dim
+- [Beltagy et al. 2020] "Longformer," arXiv:2004.05150 (Sliding window attention)
+- [Jiang et al. 2023] "Mistral 7B," arXiv:2310.06825 (Mixed sliding window + full attention)
+- [Szegedy et al. 2016] "Rethinking the Inception Architecture," arXiv:1512.00567 (Label smoothing)

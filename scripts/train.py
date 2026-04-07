@@ -110,6 +110,8 @@ def _build_model_from_config(mcfg: dict, device) -> IGPT:
         activation_checkpointing=mcfg.get("activation_checkpointing", False),
         logit_soft_cap=float(mcfg.get("logit_soft_cap", 0.0)),
         use_subpixel_ar=mcfg.get("use_subpixel_ar", False),
+        sliding_window_size=int(mcfg.get("sliding_window_size", -1)),
+        full_attn_every_n=int(mcfg.get("full_attn_every_n", 0)),
     ).to(device)
 
 
@@ -158,7 +160,8 @@ def train_one_epoch(model, loader, optimizer, scaler, device,
                     epoch, log_freq, writer, clip_max_norm,
                     amp_dtype=torch.float16, grad_accum_steps=1,
                     z_loss_weight=1e-4, mtp_weight=0.1,
-                    distributed=False, optimizers=None):
+                    distributed=False, optimizers=None,
+                    label_smoothing_sigma=0.0):
     """
     optimizers: Muon 模式下传入 [muon_opt, adamw_opt] 列表，
                 非 Muon 模式下为 None（仅使用 optimizer 参数）。
@@ -191,7 +194,8 @@ def train_one_epoch(model, loader, optimizer, scaler, device,
             # AMP autocast：有 scaler 时启用 fp16/bf16 混合精度
             amp_ctx = autocast(device_type="cuda", dtype=amp_dtype) if scaler is not None else nullcontext()
             with amp_ctx:
-                out = model(x, z_loss_weight=z_loss_weight, mtp_weight=mtp_weight)
+                out = model(x, z_loss_weight=z_loss_weight, mtp_weight=mtp_weight,
+                            label_smoothing_sigma=label_smoothing_sigma)
                 loss = out["loss"]
                 ce_loss = out["ce_loss"]
                 # BPP 只用 ce_loss（纯交叉熵），不含 z_loss 正则项。
@@ -581,6 +585,7 @@ def main():
             mtp_weight=float(config["train"].get("mtp_weight", 0.1)),
             distributed=distributed,
             optimizers=optimizers,
+            label_smoothing_sigma=float(config["train"].get("label_smoothing_sigma", 0.0)),
         )
 
         if rank == 0:

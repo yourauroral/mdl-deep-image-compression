@@ -35,6 +35,14 @@ model:
   # 与 z-loss 互补：z-loss 惩罚 logsumexp，soft-cap 直接约束幅值
   # Ref: Gemma 2 arXiv:2408.00118 — 推荐 30.0；0 = 禁用
   logit_soft_cap: 0.0
+  # Sliding Window Attention: 限制每个 token 只关注最近 W 个 token
+  # -1 = full causal attention（默认）; 推荐 512 或 1024
+  # Ref: Beltagy et al., "Longformer," arXiv:2004.05150
+  # Ref: Jiang et al., "Mistral 7B," arXiv:2310.06825
+  sliding_window_size: -1
+  # Full attention 穿插频率: 每 N 层 1 层 full causal，其余 windowed
+  # 0 = 全部 windowed; 4 = 每 4 层 1 层 full (Mistral 风格)
+  full_attn_every_n: 0
 
 data:
   dataset: "cifar100"   # cifar10 或 cifar100
@@ -62,6 +70,11 @@ train:
   # MTP 辅助 loss 权重，use_mtp=true 时生效
   # Ref: DeepSeek-V3 arXiv:2412.19437 建议从 0.1 开始实验
   mtp_weight: 0.1
+  # Gaussian Label Smoothing: 用高斯分布软化 target，保留像素值的序数关系
+  # sigma=0.0 禁用（使用 hard categorical CE）; 推荐 sigma=1.0
+  # 启用时训练绕过 fused CE kernel，验证自动用 hard targets
+  # Ref: Szegedy et al., arXiv:1512.00567 — label smoothing
+  label_smoothing_sigma: 0.0
   # LR 调度：cosine decay with linear warmup
   # Ref: OLMo 2 arXiv:2501.00656; Loshchilov & Hutter arXiv:1608.03983; CS336
   lr_schedule: "cosine"

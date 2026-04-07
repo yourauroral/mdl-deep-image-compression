@@ -28,6 +28,14 @@ model:
   use_subpixel_ar: true
   activation_checkpointing: false
   logit_soft_cap: 0.0
+  # Sliding Window Attention: 限制每个 token 只关注最近 W 个 token
+  # -1 = full causal attention（默认）; 推荐 512 或 1024
+  # Ref: Beltagy et al., "Longformer," arXiv:2004.05150
+  # Ref: Jiang et al., "Mistral 7B," arXiv:2310.06825
+  sliding_window_size: -1
+  # Full attention 穿插频率: 每 N 层 1 层 full causal，其余 windowed
+  # 0 = 全部 windowed; 4 = 每 4 层 1 层 full (Mistral 风格)
+  full_attn_every_n: 0
 
 data:
   dataset: "cifar10"
@@ -46,6 +54,11 @@ train:
   clip_max_norm: 1.0
   z_loss_weight: 1e-4
   mtp_weight: 0.1
+  # Gaussian Label Smoothing: 用高斯分布软化 target，保留像素值的序数关系
+  # sigma=0.0 禁用（使用 hard categorical CE）; 推荐 sigma=1.0
+  # 启用时训练绕过 fused CE kernel，验证自动用 hard targets
+  # Ref: Szegedy et al., arXiv:1512.00567 — label smoothing
+  label_smoothing_sigma: 0.0
   lr_schedule: "cosine"
   warmup_epochs: 10
   # WSD (Warmup-Stable-Decay) 参数（lr_schedule: "wsd" 时生效）

@@ -84,6 +84,43 @@ except ImportError:
     _USE_FUSED_ATTN_ROPE = False
 
 
+def _build_sliding_window_mask(seq_len: int, window_size: int,
+                               device: torch.device) -> torch.Tensor:
+    """
+    构建 sliding window causal attention mask。
+
+    每个 token i 只能看到 [max(0, i-window_size+1), i] 范围内的 token。
+    同时保持 causal 约束（不能看到未来 token）。
+
+    动机:
+      图像具有空间局部性 — 相邻像素相关性最强，远距离像素相关性弱。
+      限制注意力范围可将 capacity 集中在局部细节，同时减少计算量。
+
+    参考:
+      [1] Beltagy et al., "Longformer: The Long-Document Transformer,"
+          arXiv:2004.05150, 2020 — sliding window attention
+      [2] Jiang et al., "Mistral 7B," arXiv:2310.06825, 2023 —
+          每层 sliding window，部分层 full attention
+
+    参数:
+      seq_len: int — 序列长度
+      window_size: int — 窗口大小（包含当前 token）
+      device: torch.device
+    返回:
+      (seq_len, seq_len) float tensor，0.0 = 允许，-inf = 屏蔽
+    """
+    # diff[i][j] = i - j；causal: diff >= 0；window: diff < window_size
+    row = torch.arange(seq_len, device=device).unsqueeze(1)
+    col = torch.arange(seq_len, device=device).unsqueeze(0)
+    diff = row - col
+    mask = torch.where(
+        (diff >= 0) & (diff < window_size),
+        torch.tensor(0.0, device=device),
+        torch.tensor(float('-inf'), device=device),
+    )
+    return mask
+
+
 def get_fused_kernel_status() -> dict:
     """
     返回各 fused Triton kernel 的可用状态，方便训练启动时打印诊断信息。
@@ -286,12 +323,20 @@ class MultiHeadAttentionBlock(nn.Module):
         - Post-norm 架构
   """
   def __init__(self, d_model: int, h: int, dropout: float,
-               use_rope: bool = True, use_qk_norm: bool = True) -> None:
+               use_rope: bool = True, use_qk_norm: bool = True,
+               window_size: int = -1) -> None:
       super().__init__()
       self.d_model = d_model # Embedding vector size
       self.h = h # Number of heads
       self.use_rope = use_rope
       self.use_qk_norm = use_qk_norm
+      # Sliding window attention: 限制每个 token 只关注最近 window_size 个 token
+      # -1 = full causal attention；> 0 = sliding window
+      # 启用时绕过 Triton Flash Attention，使用 PyTorch SDPA + 显式 mask
+      # Ref: Beltagy et al., "Longformer," arXiv:2004.05150, 2020
+      # Ref: Jiang et al., "Mistral 7B," arXiv:2310.06825, 2023
+      self.window_size = window_size
+      self._sw_mask_cache = None  # sliding window mask 缓存
       # Make sure d_model is divisible by h
       assert d_model % h == 0, "d_model is not divisible by h"
 
@@ -338,10 +383,35 @@ class MultiHeadAttentionBlock(nn.Module):
             sin = sin_full[position_ids]
         else:
             cos, sin = self.rope(seq_len, q.device)
+
+        # Sliding window 模式: 绕过 Triton Flash Attention，
+        # 只使用 Fused/PyTorch RoPE + PyTorch SDPA（支持显式 mask）。
+        # Triton Flash Attention 只支持 full causal mask，不支持 sliding window。
+        # Ref: Beltagy et al., "Longformer," arXiv:2004.05150
+        if self.window_size > 0:
+            # RoPE 旋转（与 full attention 路径一致）
+            if _USE_FUSED_ROPE and query.is_cuda:
+                query, key = _fused_rope(query, key, cos, sin)
+            else:
+                query, key = apply_rotary_emb(query, key, cos, sin)
+            # 构建/缓存 sliding window causal mask
+            if (self._sw_mask_cache is None
+                    or self._sw_mask_cache.shape[0] != seq_len
+                    or self._sw_mask_cache.device != query.device):
+                self._sw_mask_cache = _build_sliding_window_mask(
+                    seq_len, self.window_size, query.device
+                )
+            attn_output = F.scaled_dot_product_attention(
+                query, key, value,
+                attn_mask=self._sw_mask_cache,
+                dropout_p=0.0,
+                is_causal=False,  # mask 已包含 causal 约束
+            )
+        # Full causal attention 路径（原有逻辑不变）
         # Fused Attn+RoPE: 将 RoPE 和 Flash Attention 合并为一次操作，
         # 减少 Q/K 的 HBM 读写（RoPE 就地修改后直接被 Attn 读取）。
         # Ref: Su et al., arXiv:2104.09864; Dao, arXiv:2307.08691
-        if _USE_FUSED_ATTN_ROPE and query.is_cuda:
+        elif _USE_FUSED_ATTN_ROPE and query.is_cuda:
             softmax_scale = 1.0 / math.sqrt(self.d_k)
             attn_output = _fused_attn_rope(query, key, value, cos, sin,
                                             causal=True,
@@ -355,19 +425,20 @@ class MultiHeadAttentionBlock(nn.Module):
         else:
             query, key = apply_rotary_emb(query, key, cos, sin)
 
-    # 选择注意力后端：
+    # 选择注意力后端（仅非 sliding window 路径到达此处）：
     # 1. Triton 手写 Flash Attention（CUDA + triton 可用时）
     # 2. F.scaled_dot_product_attention（PyTorch 内置后端）
-    if _USE_TRITON_ATTN and query.is_cuda:
-      softmax_scale = 1.0 / math.sqrt(self.d_k)
-      attn_output = _TritonAttention.apply(query, key, value, True, softmax_scale)
-    else:
-      attn_output = F.scaled_dot_product_attention(
-        query, key, value,
-        attn_mask=None,
-        dropout_p=0.0,
-        is_causal=True
-      )
+    if self.window_size <= 0:
+      if _USE_TRITON_ATTN and query.is_cuda:
+        softmax_scale = 1.0 / math.sqrt(self.d_k)
+        attn_output = _TritonAttention.apply(query, key, value, True, softmax_scale)
+      else:
+        attn_output = F.scaled_dot_product_attention(
+          query, key, value,
+          attn_mask=None,
+          dropout_p=0.0,
+          is_causal=True
+        )
 
     # 合并多头: (batch, h, seq_len, d_k) -> (batch, seq_len, h, d_k) -> (batch, seq_len, d_model)
     attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, self.d_model)
@@ -379,7 +450,8 @@ class GPTBlock(nn.Module):
   def __init__(self, d_model, h, d_ff, dropout,
                use_post_norm: bool = True, use_swiglu: bool = True,
                use_qk_norm: bool = True, use_rope: bool = True,
-               activation_checkpointing: bool = False):
+               activation_checkpointing: bool = False,
+               window_size: int = -1):
     super().__init__()
     self.use_post_norm = use_post_norm
     self.activation_checkpointing = activation_checkpointing
@@ -387,7 +459,8 @@ class GPTBlock(nn.Module):
     self.norm2 = RMSNorm(d_model)
     self.attn = MultiHeadAttentionBlock(d_model, h, dropout,
                                          use_rope=use_rope,
-                                         use_qk_norm=use_qk_norm)
+                                         use_qk_norm=use_qk_norm,
+                                         window_size=window_size)
     if use_swiglu:
         self.ff = FeedForwardBlock(d_model, d_ff, dropout)
     else:
