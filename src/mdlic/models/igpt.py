@@ -28,6 +28,19 @@ except ImportError:
     _fused_linear_ce = None
     _USE_FUSED_LINEAR_CE = False
 
+# Fused DMOL Triton kernel（可选）：
+# 将 Discretized Mixture of Logistics 的 sigmoid CDF、log-prob、logsumexp
+# 合并为一次 kernel launch。支持单通道和跨通道条件化两种模式。
+# Ref: Salimans et al., "PixelCNN++," ICLR 2017.
+try:
+    from ..ops.fused_dmol import fused_dmol_loss as _fused_dmol
+    from ..ops.fused_dmol import fused_dmol_loss_channels as _fused_dmol_channels
+    _USE_FUSED_DMOL = True
+except ImportError:
+    _fused_dmol = None
+    _fused_dmol_channels = None
+    _USE_FUSED_DMOL = False
+
 def rgb_to_ycbcr_int(x: torch.Tensor) -> torch.Tensor:
   """
   将 RGB 图像转换为 YCbCr 色彩空间后量化到 [0,255] 整数。
@@ -131,6 +144,17 @@ class IGPT(nn.Module):
     # 0 = 全部使用 sliding_window_size; 4 = 每 4 层 1 层 full。
     # Ref: Jiang et al., "Mistral 7B," arXiv:2310.06825, 2023
     full_attn_every_n: int = 0,
+    # Loss 类型: "ce" = categorical cross-entropy (vocab=256)
+    #            "dmol" = Discretized Mixture of Logistics
+    # DMOL 用 logistic 混合分布建模像素值的连续性，利用序数结构:
+    #   邻近像素值(如 127 vs 128)获得高概率，远距离值(如 127 vs 0)获得低概率。
+    # CE 将 256 值视为无序类别，无法利用这一结构。
+    # Ref: Salimans et al., "PixelCNN++," ICLR 2017
+    loss_type: str = "ce",
+    # DMOL 混合分量数 K（仅 loss_type="dmol" 时生效）
+    # 每个 token 输出 3K (单通道) 或 10K (跨通道条件化) 参数
+    # K=10 是 PixelCNN++ 标准设置
+    num_mixtures: int = 10,
   ):
     super().__init__()
     self.seq_len = image_size * image_size * in_channels
@@ -146,6 +170,8 @@ class IGPT(nn.Module):
     self.use_depth_scaled_init = use_depth_scaled_init
     self.logit_soft_cap = logit_soft_cap
     self.use_subpixel_ar = use_subpixel_ar
+    self.loss_type = loss_type
+    self.num_mixtures = num_mixtures
     self.token_embed = nn.Embedding(vocab_size, d_model)
 
     # Channel embedding: 子像素自回归模式下，为每个通道位置（0=Y/R, 1=Cb/G, 2=Cr/B）
@@ -187,15 +213,30 @@ class IGPT(nn.Module):
     if not use_post_norm:
         self.final_norm = RMSNorm(d_model)
 
-    self.head = nn.Linear(d_model, vocab_size, bias=False)
-
-    # Weight Tying: embedding 和 output head 共享权重矩阵
-    # 减少 vocab_size × d_model 个参数，同时提供正则化效果。
-    # Ref: Press & Wolf, "Using the Output Embedding to Improve Language Models,"
-    #      EACL 2017, arXiv:1608.05859.
-    # Ref: Radford et al., "GPT-2," 2019 — GPT-2 使用 weight tying。
-    # Ref: OLMo 2 arXiv:2501.00656 Section 3.1 — OLMo 2 使用 weight tying。
-    self.head.weight = self.token_embed.weight
+    # Output head: 根据 loss_type 决定输出维度
+    if loss_type == "dmol":
+        # DMOL head: 维度取决于是否跨通道条件化
+        if use_subpixel_ar:
+            # 跨通道条件化: 每像素输出 10K 参数
+            # [logit_π, μ_y, μ_cb, μ_cr, log_s_y, log_s_cb, log_s_cr, α, β, γ]
+            # 但 autoregressive 模型每个 token 位置都输出参数，
+            # 只取每像素最后一个 token (Cr 位置) 的输出用于计算像素级 loss。
+            # Ref: Salimans et al., "PixelCNN++," ICLR 2017, Section 2.1
+            self._dmol_head_dim = 10 * num_mixtures
+        else:
+            # 单通道 per-token: 每 token 输出 3K 参数 [logit_π, μ, log_s]
+            self._dmol_head_dim = 3 * num_mixtures
+        self.head = nn.Linear(d_model, self._dmol_head_dim, bias=False)
+        # DMOL head 维度 != vocab_size，无法 weight tying
+    else:
+        self.head = nn.Linear(d_model, vocab_size, bias=False)
+        # Weight Tying: embedding 和 output head 共享权重矩阵
+        # 减少 vocab_size × d_model 个参数，同时提供正则化效果。
+        # Ref: Press & Wolf, "Using the Output Embedding to Improve Language Models,"
+        #      EACL 2017, arXiv:1608.05859.
+        # Ref: Radford et al., "GPT-2," 2019 — GPT-2 使用 weight tying。
+        # Ref: OLMo 2 arXiv:2501.00656 Section 3.1 — OLMo 2 使用 weight tying。
+        self.head.weight = self.token_embed.weight
 
     # MTP 辅助头：一个额外的 GPTBlock + 共享 output head
     # 参考: DeepSeek-V3 arXiv:2412.19437 Section 2.3
@@ -251,8 +292,9 @@ class IGPT(nn.Module):
     N = self.N_layers
     for name, module in self.named_modules():
       if isinstance(module, nn.Linear):
-        # Weight tying: head.weight is token_embed.weight，跳过避免重复初始化
-        if name.endswith('head'):
+        # Weight tying: CE 模式下 head.weight is token_embed.weight，跳过避免重复初始化
+        # DMOL 模式下 head 是独立参数，需要正常初始化
+        if name.endswith('head') and self.loss_type == "ce":
           continue
         # 残差通路输出投影：深度缩放 [1][2][3]（use_depth_scaled_init 开关）
         if self.use_depth_scaled_init and any(name.endswith(s) for s in ('w_o', 'w2')):
@@ -287,8 +329,9 @@ class IGPT(nn.Module):
     d = self.d_model
     for name, module in self.named_modules():
       if isinstance(module, nn.Linear):
-        # Weight tying: head.weight is token_embed.weight，跳过避免重复初始化
-        if name.endswith('head'):
+        # Weight tying: CE 模式下 head.weight is token_embed.weight，跳过避免重复初始化
+        # DMOL 模式下 head 是独立参数，需要正常初始化
+        if name.endswith('head') and self.loss_type == "ce":
           continue
         fan_in = module.weight.shape[1]
         if any(name.endswith(s) for s in ('w_o', 'w2')):
@@ -377,6 +420,105 @@ class IGPT(nn.Module):
     # Final norm: 仅 pre-norm 模式需要（post-norm 模式在 block 内已归一化）
     if not self.use_post_norm:
         hidden = self.final_norm(hidden)
+
+    # --- DMOL loss path ---
+    # Discretized Mixture of Logistics: 用 logistic 混合分布建模像素值，
+    # 利用序数结构使邻近值自然获得高概率。
+    # Ref: Salimans et al., "PixelCNN++," ICLR 2017
+    if self.loss_type == "dmol":
+        from ..utils import (discretized_mix_logistic_loss,
+                             discretized_mix_logistic_loss_channels)
+
+        dmol_params = self.head(hidden).float()  # (B, T, head_dim)
+        K = self.num_mixtures
+        C = self.in_channels
+
+        if self.use_subpixel_ar:
+            # 跨通道条件化: pixel-first 序列 [Y0,Cb0,Cr0, Y1,...] 中，
+            # 每像素的 3 个 target token 组成一组，对应一组 10K 参数。
+            # 取每像素最后一个 token 位置 (Cr) 的 hidden → head 输出作为
+            # 该像素的混合参数，因为 Cr 位置能看到同像素的 Y 和 Cb。
+            # targets: (B, T) 按像素分组 → (B*num_pixels, 3)
+            T = target_tokens.shape[1]
+            # 每像素 C=3 个 token，取最后一个 token 的参数
+            # pixel 位置索引: C-1, 2C-1, 3C-1, ... (即每 C 个 token 取最后一个)
+            # 注意: NTP 偏移后 T = seq_len - 1，可能不整除 C，截断到完整像素
+            num_pixels = T // C
+            T_used = num_pixels * C
+
+            # 提取每像素最后一个 token 的 dmol_params
+            # indices: [C-1, 2C-1, ..., num_pixels*C-1]
+            pixel_last_idx = torch.arange(C - 1, T_used, C, device=hidden.device)
+            pixel_params = dmol_params[:, pixel_last_idx, :]  # (B, num_pixels, 10K)
+
+            # 重组 target: (B, T_used) → (B, num_pixels, C) → (B*num_pixels, C)
+            pixel_targets = target_tokens[:, :T_used].reshape(B, num_pixels, C)
+
+            # Fused kernel 或 PyTorch fallback
+            if _USE_FUSED_DMOL and pixel_params.is_cuda:
+                dmol_loss = _fused_dmol_channels(
+                    pixel_params.reshape(-1, 10 * K),
+                    pixel_targets.reshape(-1, C),
+                    num_mixtures=K,
+                )
+            else:
+                dmol_loss = discretized_mix_logistic_loss_channels(
+                    pixel_targets.reshape(-1, C),
+                    pixel_params.reshape(-1, 10 * K),
+                    num_mixtures=K,
+                    in_channels=C,
+                )
+        else:
+            # 单通道 per-token DMOL（channel-first 模式）
+            if _USE_FUSED_DMOL and dmol_params.is_cuda:
+                dmol_loss = _fused_dmol(
+                    dmol_params.reshape(-1, 3 * K),
+                    target_tokens.reshape(-1),
+                    num_mixtures=K,
+                )
+            else:
+                dmol_loss = discretized_mix_logistic_loss(
+                    target_tokens.reshape(-1),
+                    dmol_params.reshape(-1, 3 * K),
+                    num_mixtures=K,
+                )
+
+        loss = dmol_loss
+        ce_loss = dmol_loss  # BPP 计算: BPP = dmol_loss / ln(2) * C
+        logits = None         # DMOL 无 categorical logits
+
+        # MTP with DMOL (可选)
+        if self.use_mtp and x.shape[1] > 2:
+            mtp_target = x[:, 2:]
+            mtp_hidden = self.mtp_block(hidden[:, :-1])
+            if not self.use_post_norm:
+                mtp_hidden = self.mtp_norm(mtp_hidden)
+            mtp_params = self.head(mtp_hidden).float()
+            if self.use_subpixel_ar:
+                mtp_T = mtp_target.shape[1]
+                mtp_npx = mtp_T // C
+                mtp_T_used = mtp_npx * C
+                mtp_px_idx = torch.arange(C - 1, mtp_T_used, C, device=hidden.device)
+                mtp_px_params = mtp_params[:, mtp_px_idx, :]
+                mtp_px_targets = mtp_target[:, :mtp_T_used].reshape(B, mtp_npx, C)
+                mtp_loss = discretized_mix_logistic_loss_channels(
+                    mtp_px_targets.reshape(-1, C),
+                    mtp_px_params.reshape(-1, 10 * K),
+                    num_mixtures=K, in_channels=C,
+                )
+            else:
+                mtp_loss = discretized_mix_logistic_loss(
+                    mtp_target.reshape(-1),
+                    mtp_params.reshape(-1, 3 * K),
+                    num_mixtures=K,
+                )
+            loss = loss + mtp_weight * mtp_loss
+
+        return {
+            "loss": loss,
+            "ce_loss": ce_loss,
+            "logits": logits,
+        }
 
     # --- 主 loss: NTP cross-entropy (+ 可选 fused z-loss) ---
     z_w = z_loss_weight if self.use_zloss else 0.0

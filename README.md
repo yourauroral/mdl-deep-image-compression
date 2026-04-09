@@ -46,6 +46,7 @@
 | E8 | w/ Sub-pixel AR | TBD | -? |
 | E9 | w/ Label Smoothing σ=1.0 | TBD | -? |
 | E10 | w/ Sliding Window W=512 | TBD | -? |
+| E11 | w/ DMOL Loss (K=10) | TBD | -? |
 
 ## 环境要求
 
@@ -99,7 +100,7 @@ python scripts/train.py --config configs/igpt_cifar100_baseline.yaml --export_cs
 ```bash
 python tests/test_dataloader.py      # 验证数据加载和 YCbCr 转换
 python tests/test_flash_attn.py      # 验证 Flash Attention kernel
-python scripts/dryrun_forward.py     # 快速前向 sanity check（含 MTP/soft-cap/muP 测试）
+python scripts/dryrun_forward.py     # 快速前向 sanity check（含 MTP/soft-cap/muP/DMOL 测试）
 
 # Triton kernel 单元测试（需 GPU + Triton）
 pytest tests/test_fused_rms_norm.py      # Fused RMSNorm fwd+bwd 精度
@@ -192,6 +193,112 @@ python scripts/evaluate.py --config configs/igpt_cifar100_baseline.yaml \
 
 ## 架构
 
+### 模型架构图
+
+```
+                    RGB Image [B, 3, 32, 32]
+                              |
+                    +---------v-----------+
+                    |    RGB -> YCbCr     |
+                    |   (ITU-R BT.601)   |
+                    |  round() 量化 [0,255]|
+                    +---------+-----------+
+                              |
+                    +---------v-----------+
+                    |  Flatten to Tokens  |
+                    |  seq_len = 3×32×32  |
+                    |     = 3072 tokens   |
+                    +---------+-----------+
+                              |
+            +-----------------+-----------------+
+            |  channel-first (默认)              |  pixel-first (子像素自回归)
+            |  [Y_all | Cb_all | Cr_all]       |  [Y₀,Cb₀,Cr₀, Y₁,Cb₁,Cr₁, ...]
+            +-----------------+-----------------+
+                              |
+                    +---------v-----------+
+                    | NTP Shift: x[:-1]   |  input_tokens = x[0..T-1]
+                    |   target = x[1:]    |  target_tokens = x[1..T]
+                    +---------+-----------+
+                              |
+                    +---------v-----------+
+                    |   Token Embedding   |<--- Weight Tying (CE 模式)
+                    |   (vocab = 256,     |          |
+                    |    d_model)         |          |
+                    +---------+-----------+          |
+                              |                      |
+                    (+ Channel Embedding,             |
+                     子像素自回归模式)                  |
+                              |                      |
+                              |                      |
+            +=========================================+    |
+            |       N x GPT Block (Post-Norm)         |    |
+            |                                         |    |
+            |  input                                  |    |
+            |    |                                    |    |
+            |    +------->+                           |    |
+            |    |        |                           |    |
+            |    v        |                           |    |
+            |  MHA        | (skip)                    |    |
+            |  (RoPE,     |                           |    |
+            |   QK-Norm,  |                           |    |
+            |   Causal)   |                           |    |
+            |    |        |                           |    |
+            |    v        |                           |    |
+            |  RMSNorm    |                           |    |
+            |    |        |                           |    |
+            |    +<-------+                           |    |
+            |    | (add)                              |    |
+            |    |                                    |    |
+            |    +------->+                           |    |
+            |    |        |                           |    |
+            |    v        |                           |    |
+            |  SwiGLU     | (skip)                    |    |
+            |  FFN        |                           |    |
+            |    |        |                           |    |
+            |    v        |                           |    |
+            |  RMSNorm    |                           |    |
+            |    |        |                           |    |
+            |    +<-------+                           |    |
+            |    | (add)                              |    |
+            |    v                                    |    |
+            |  output                                 |    |
+            +=========================================+    |
+                              |                      |
+                    +---------v-----------+          |
+                    |    Output Head      |--- Weight Tying (CE 模式)
+                    |  CE:   Linear(→256) |
+                    |  DMOL: Linear(→3K   |
+                    |        或 →10K)     |
+                    +---------+-----------+
+                              |
+            +-----------------+-----------------+
+            |                                   |
+  +---------v-----------+         +-------------v-----------+
+  |    CE Loss Path     |         |      DMOL Loss Path     |
+  |  Cross-Entropy      |         |  Discretized Mixture of |
+  |  + z-loss (1e-4)    |         |  Logistics (K=10)       |
+  |  + Fused Linear+CE  |         |  跨通道条件化:           |
+  |  (可选 Triton)      |         |  μ_cb += α·Y            |
+  +---------+-----------+         |  μ_cr += β·Y + γ·Cb     |
+            |                     +-------------+-----------+
+            +-----------------+-----------------+
+                              |
+                     BPP = NLL / ln(2) × C
+```
+
+**Post-Norm 残差模式** (OLMo 2 风格):
+```
+  x = x + RMSNorm(Attention(x))
+  x = x + RMSNorm(FFN(x))
+```
+
+**子像素自回归序列排列**:
+```
+  channel-first:  [Y₀ Y₁ Y₂ ... Y₁₀₂₃ | Cb₀ Cb₁ ... Cb₁₀₂₃ | Cr₀ Cr₁ ... Cr₁₀₂₃]
+  pixel-first:    [Y₀ Cb₀ Cr₀ | Y₁ Cb₁ Cr₁ | Y₂ Cb₂ Cr₂ | ... | Y₁₀₂₃ Cb₁₀₂₃ Cr₁₀₂₃]
+                       ↑ causal mask 使 Cb₀ 可以看到 Y₀，Cr₀ 可以看到 Y₀ 和 Cb₀
+```
+
 模型代码位于 `src/mdlic/`：
 
 ### iGPT (`models/igpt.py`)
@@ -208,6 +315,10 @@ python scripts/evaluate.py --config configs/igpt_cifar100_baseline.yaml \
 - **BPP 计算**：`BPP = CE_loss / ln(2) × C`（C 为通道数，只用 CE，不含 z-loss）
 - **可选**：MTP 辅助预测头（DeepSeek-V3 风格，默认关闭）
 - **可选**：Logit soft-capping（Gemma 2 风格，默认关闭）
+- **可选**：Gaussian Label Smoothing（σ-高斯软化 target，保留像素序数关系，默认关闭）
+- **可选**：Sliding Window Attention（Longformer/Mistral 风格混合 full/windowed，默认关闭）
+- **可选**：DMOL Loss（Discretized Mixture of Logistics，K 组 logistic 混合分布替代 256-class CE，
+  利用像素值序数结构；子像素 AR 模式下支持跨通道条件化 μ_cb←Y, μ_cr←Y+Cb，PixelCNN++ 风格）
 
 ### 共享层 (`models/layers.py`)
 
@@ -234,9 +345,11 @@ python scripts/evaluate.py --config configs/igpt_cifar100_baseline.yaml \
 | `fused_add_rms_norm.py` | ~217 | Fused Add+RMSNorm，post-norm 残差+归一化合并 | OLMo 2 2025, Liger 2024 |
 | `fused_attn_rope.py` | ~100 | Fused Attention+RoPE，合并 RoPE 旋转与 Flash Attention | Su 2021, Dao 2023 |
 | `fused_linear_ce.py` | ~280 | Fused Linear+CE+z-loss，output head 投影与 CE 合并，避免实例化 logits | Liger 2024, PaLM 2022 |
+| `fused_dmol.py` | ~380 | Fused DMOL，discretized logistic mixture CDF + logsumexp，单通道/跨通道两种模式 | PixelCNN++ 2017 |
 
 所有 Triton kernel 均有 PyTorch 优雅回退，CPU 环境或无 Triton 时自动切换。
 训练启动时会打印各 kernel 的 ON/OFF 状态。
+总 Triton 代码量 ~2,800 行（不含测试）。
 
 ### Triton Kernel 单元测试 (`tests/`)
 
@@ -288,6 +401,8 @@ python scripts/evaluate.py --config configs/igpt_cifar100_baseline.yaml \
 | `model.use_subpixel_ar` | 子像素自回归 pixel-first 序列（默认 false） |
 | `model.sliding_window_size` | Sliding window 大小（-1=full causal，推荐 512/1024） |
 | `model.full_attn_every_n` | 每 N 层 1 层 full attention（0=全部 windowed） |
+| `model.loss_type` | 损失类型：`ce`（categorical CE，默认）或 `dmol`（Discretized Mixture of Logistics） |
+| `model.num_mixtures` | DMOL 混合分量数 K（默认 10，仅 loss_type=dmol 时生效） |
 | `model.logit_soft_cap` | Logit soft-capping 上界（0=禁用，推荐 30.0） |
 | `train.amp_dtype` | `fp16` 或 `bf16` |
 | `train.lr_schedule` | `cosine` / `wsd` / `multistep` |
@@ -316,6 +431,7 @@ python scripts/evaluate.py --config configs/igpt_cifar100_baseline.yaml \
 - Weight Tying（embedding ↔ output head 共享权重）
 - 子像素自回归（可选，pixel-first 序列 + channel embedding + 像素级 RoPE）
 - Sliding Window Attention（可选，Longformer/Mistral 风格，可混合 full attention）
+- DMOL Loss（可选，K 组 logistic 混合替代 CE，跨通道条件化 μ_cb←Y, μ_cr←Y+Cb）
 - MTP 辅助预测头（可选，DeepSeek-V3 风格）
 - Logit soft-capping（可选，Gemma 2 风格）
 - 7 项消融开关 + 子像素自回归 + Label Smoothing + Sliding Window 实验，config 驱动
@@ -329,10 +445,10 @@ python scripts/evaluate.py --config configs/igpt_cifar100_baseline.yaml \
 - 混合精度（bf16/fp16）+ 多 GPU DDP + no_sync 梯度累积
 - Selective activation checkpointing + torch.compile
 
-**手写 Triton Kernels（8 个，~2,400 行）**
+**手写 Triton Kernels（9 个，~2,800 行）**
 - Fused RMSNorm · Fused SwiGLU · Fused CE+z-loss
 - Flash Attention v2 · Fused RoPE · Fused Add+RMSNorm
-- Fused Attention+RoPE · Fused Linear+CE+z-loss
+- Fused Attention+RoPE · Fused Linear+CE+z-loss · Fused DMOL
 - 全部自动降级到 PyTorch 实现
 - 全部有独立单元测试
 
@@ -356,7 +472,7 @@ mdl-deep-image-compression/
 │   └── igpt_cifar100_baseline.yaml    # CIFAR-100 配置
 ├── src/mdlic/
 │   ├── models/
-│   │   ├── igpt.py                    # iGPT 模型（376 行）
+│   │   ├── igpt.py                    # iGPT 模型（~550 行）
 │   │   └── layers.py                  # GPTBlock/MHA/FFN/RMSNorm（412 行）
 │   ├── ops/
 │   │   ├── __init__.py                # Kernel 懒加载注册
@@ -367,11 +483,12 @@ mdl-deep-image-compression/
 │   │   ├── fused_rope.py              # Fused RoPE（~123 行）
 │   │   ├── fused_add_rms_norm.py      # Fused Add+RMSNorm（~217 行）
 │   │   ├── fused_attn_rope.py         # Fused Attn+RoPE（~100 行）
-│   │   └── fused_linear_ce.py         # Fused Linear+CE（~280 行）
+│   │   ├── fused_linear_ce.py         # Fused Linear+CE（~280 行）
+│   │   └── fused_dmol.py              # Fused DMOL（~380 行）
 │   ├── optim/
 │   │   └── muon.py                    # Muon 优化器（~203 行）
 │   └── utils/
-│       └── __init__.py                # seed_everything, compute_bpp
+│       └── __init__.py                # seed_everything, compute_bpp, DMOL loss
 ├── scripts/
 │   ├── train.py                       # 训练主循环（~680 行）
 │   ├── evaluate.py                    # 评测工具集（~700 行）
@@ -451,3 +568,6 @@ mdl-deep-image-compression/
 - [Beltagy et al. 2020] "Longformer," arXiv:2004.05150 (Sliding window attention)
 - [Jiang et al. 2023] "Mistral 7B," arXiv:2310.06825 (Mixed sliding window + full attention)
 - [Szegedy et al. 2016] "Rethinking the Inception Architecture," arXiv:1512.00567 (Label smoothing)
+
+### Discretized Mixture of Logistics (DMOL)
+- [Salimans et al. 2017] "PixelCNN++: Improving the PixelCNN with Discretized Logistic Mixture Likelihood," ICLR 2017 — DMOL loss, cross-channel conditioning, CIFAR-10: 2.92 bits/dim

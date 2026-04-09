@@ -134,6 +134,10 @@ def evaluate_per_channel(model, loader, device, amp_dtype=None,
     """
     Per-channel BPP 分解 — 分别计算 Y/Cb/Cr (或 R/G/B) 各通道的 BPP。
 
+    注意: DMOL (loss_type="dmol") 模式下，跨通道条件化使 per-channel BPP
+    分解数学上不可分（联合分布非独立乘积），此函数跳过并打印警告。
+    CE 模式下正常工作。
+
     原理:
       模型预测整个 token 序列，将 logits 和 targets 按通道拆分后分别计算 CE loss。
 
@@ -156,6 +160,10 @@ def evaluate_per_channel(model, loader, device, amp_dtype=None,
       channel_bpps: dict[str, (float, float)] — {通道名: (bpp_mean, bpp_std)}
       total_bpp: (float, float) — 总 BPP (mean, std)
     """
+    # DMOL 模式跳过 per-channel 分解
+    if hasattr(model, 'loss_type') and model.loss_type == "dmol":
+        print("  [WARN] DMOL 模式下跨通道条件化使 per-channel BPP 分解不可分，跳过。")
+        return {}, (0.0, 0.0)
     model.eval()
     use_amp = amp_dtype is not None and device.type == 'cuda'
     channel_names = ["Y", "Cb", "Cr"] if use_ycbcr else ["R", "G", "B"]
@@ -253,6 +261,8 @@ def evaluate_position_bpp(model, loader, device, amp_dtype=None,
     """
     Per-position BPP 热力图 — 计算每个像素位置的平均 BPP。
 
+    注意: DMOL 模式下暂不支持 per-position 分解，跳过并返回空。
+
     对于 CIFAR-100 32×32×3，每个位置有一个 token，
     将 per-token CE loss 重新 reshape 回 (H, W, C) 并对 batch 取平均。
     最终输出 (H, W) 的 BPP 热力图（C 通道求和）。
@@ -276,8 +286,11 @@ def evaluate_position_bpp(model, loader, device, amp_dtype=None,
       channel_heatmaps: dict[str, np.ndarray] — 每通道 (H, W) BPP 热力图
     """
     model.eval()
+    # DMOL 模式下暂不支持 per-position 分解
+    if hasattr(model, 'loss_type') and model.loss_type == "dmol":
+        print("  [WARN] DMOL 模式下 per-position BPP 热力图暂不支持，跳过。")
+        return np.zeros((image_size, image_size)), {}
     use_amp = amp_dtype is not None and device.type == 'cuda'
-    H = W = image_size
     C = in_channels
     seq_len = H * W * C
     channel_names = ["Y", "Cb", "Cr"] if use_ycbcr else ["R", "G", "B"]

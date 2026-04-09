@@ -44,6 +44,14 @@ model:
   # 0 = 全部 windowed; 4 = 每 4 层 1 层 full (Mistral 风格)
   full_attn_every_n: 0
 
+  # Loss 类型: "ce" = categorical cross-entropy (vocab=256, 标准自回归)
+  #            "dmol" = Discretized Mixture of Logistics
+  # DMOL 用 logistic 混合分布建模像素值的连续性，利用序数结构。
+  # Ref: Salimans et al., "PixelCNN++," ICLR 2017
+  loss_type: "ce"
+  # DMOL 混合分量数 K（仅 loss_type="dmol" 时生效）
+  num_mixtures: 10
+
 data:
   dataset: "cifar100"   # cifar10 或 cifar100
   train: datasets/

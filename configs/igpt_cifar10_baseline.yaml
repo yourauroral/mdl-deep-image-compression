@@ -37,6 +37,18 @@ model:
   # 0 = 全部 windowed; 4 = 每 4 层 1 层 full (Mistral 风格)
   full_attn_every_n: 0
 
+  # Loss 类型: "ce" = categorical cross-entropy (vocab=256, 标准自回归)
+  #            "dmol" = Discretized Mixture of Logistics
+  # DMOL 用 logistic 混合分布建模像素值的连续性，利用序数结构:
+  #   邻近像素值(如 127 vs 128)获得高概率，远距离值(如 127 vs 0)获得低概率。
+  # CE 将 256 值视为无序类别，无法利用这一结构。
+  # Ref: Salimans et al., "PixelCNN++," ICLR 2017
+  loss_type: "ce"
+  # DMOL 混合分量数 K（仅 loss_type="dmol" 时生效）
+  # 每个 token 输出 3K 参数 (per-token) 或 10K 参数 (跨通道条件化)
+  # K=10 是 PixelCNN++ 标准设置; K=5 可作为轻量替代
+  num_mixtures: 10
+
 data:
   dataset: "cifar10"
   train: datasets/

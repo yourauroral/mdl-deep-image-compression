@@ -87,6 +87,25 @@ def _validate_config(config: dict):
     z_w = float(tcfg.get('z_loss_weight', 1e-4))
     assert z_w >= 0, f"train.z_loss_weight 必须 >= 0，got {z_w}"
 
+    # loss_type 校验
+    loss_type = mcfg.get('loss_type', 'ce')
+    assert loss_type in ('ce', 'dmol'), (
+        f"model.loss_type 必须是 'ce' 或 'dmol'，got '{loss_type}'"
+    )
+    if loss_type == 'dmol':
+        K = int(mcfg.get('num_mixtures', 10))
+        assert K > 0, f"model.num_mixtures 必须 > 0，got {K}"
+        # Gaussian label smoothing 与 DMOL 不兼容（DMOL 自身已建模序数结构）
+        sigma = float(tcfg.get('label_smoothing_sigma', 0.0))
+        assert sigma == 0.0, (
+            f"DMOL 与 label_smoothing_sigma 不兼容，got sigma={sigma}"
+        )
+        # Logit soft-capping 仅适用于 CE logits，DMOL 参数语义不同
+        cap = float(mcfg.get('logit_soft_cap', 0.0))
+        assert cap == 0.0, (
+            f"DMOL 不使用 logit_soft_cap（参数语义不同），got cap={cap}"
+        )
+
 
 def _build_model_from_config(mcfg: dict, device) -> IGPT:
     """从 config['model'] 构建 IGPT 模型（统一 train.py 和 dryrun_forward.py）。"""
@@ -112,6 +131,8 @@ def _build_model_from_config(mcfg: dict, device) -> IGPT:
         use_subpixel_ar=mcfg.get("use_subpixel_ar", False),
         sliding_window_size=int(mcfg.get("sliding_window_size", -1)),
         full_attn_every_n=int(mcfg.get("full_attn_every_n", 0)),
+        loss_type=mcfg.get("loss_type", "ce"),
+        num_mixtures=int(mcfg.get("num_mixtures", 10)),
     ).to(device)
 
 

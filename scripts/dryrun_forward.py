@@ -223,6 +223,74 @@ def main():
         )
     print("  [mixed-window] OK — layers alternate windowed/full")
 
+    # ── Test 9: DMOL Loss (单通道 per-token, channel-first) ──
+    # 验证 Discretized Mixture of Logistics loss 路径。
+    # DMOL head 输出 3K 参数（非 256 类），无 weight tying。
+    # Ref: Salimans et al., "PixelCNN++," ICLR 2017
+    print("\n=== Test 9: DMOL Loss (per-token, channel-first) ===")
+    K = 10
+    model9 = IGPT(
+        image_size=32, in_channels=3, vocab_size=256,
+        d_model=mcfg["d_model"], N=mcfg["N"], h=mcfg["h"], d_ff=mcfg["d_ff"],
+        dropout=0.1, loss_type="dmol", num_mixtures=K,
+        use_subpixel_ar=False,
+    ).to(device)
+    out9 = model9(x)
+    loss_val = out9['loss'].item()
+    ce_val = out9['ce_loss'].item()
+    assert math.isfinite(loss_val), f"[dmol] loss is {loss_val} (NaN/Inf!)"
+    assert math.isfinite(ce_val), f"[dmol] ce_loss is {ce_val} (NaN/Inf!)"
+    bpp = ce_val / math.log(2) * 3
+    print(f"  [dmol] loss={loss_val:.4f}  ce_loss={ce_val:.4f}  BPP={bpp:.2f}")
+    # 验证 DMOL head 维度和无 weight tying
+    assert model9.head.out_features == 3 * K, (
+        f"DMOL head out_features: expected {3*K}, got {model9.head.out_features}"
+    )
+    assert model9.head.weight is not model9.token_embed.weight, (
+        "DMOL mode should NOT use weight tying"
+    )
+    assert out9['logits'] is None, "DMOL should return logits=None"
+    print(f"  [dmol-head] OK — out_features={3*K}, no weight tying, logits=None")
+    # Backward
+    out9['loss'].backward()
+    grad_ok9 = all(p.grad is not None for p in model9.parameters() if p.requires_grad)
+    assert grad_ok9, "Some parameters missing gradients after backward (dmol)"
+    grad_finite9 = all(torch.isfinite(p.grad).all().item() for p in model9.parameters() if p.grad is not None)
+    assert grad_finite9, "Some gradients contain NaN/Inf (dmol)"
+    print("  [backward] all grads computed and finite: OK")
+
+    # ── Test 10: DMOL + Subpixel AR (跨通道条件化) ──
+    # 验证跨通道条件化 DMOL: μ_cb 依赖 Y, μ_cr 依赖 Y+Cb。
+    # Head 输出 10K 参数: [π, μ_y, μ_cb, μ_cr, log_s_y, log_s_cb, log_s_cr, α, β, γ]
+    # Ref: Salimans et al., "PixelCNN++," ICLR 2017, Section 2.1
+    print("\n=== Test 10: DMOL + Subpixel AR (cross-channel conditioning) ===")
+    model10 = IGPT(
+        image_size=32, in_channels=3, vocab_size=256,
+        d_model=mcfg["d_model"], N=mcfg["N"], h=mcfg["h"], d_ff=mcfg["d_ff"],
+        dropout=0.1, loss_type="dmol", num_mixtures=K,
+        use_subpixel_ar=True,
+    ).to(device)
+    out10 = model10(x)
+    loss_val10 = out10['loss'].item()
+    ce_val10 = out10['ce_loss'].item()
+    assert math.isfinite(loss_val10), f"[dmol-subpixel] loss is {loss_val10} (NaN/Inf!)"
+    assert math.isfinite(ce_val10), f"[dmol-subpixel] ce_loss is {ce_val10} (NaN/Inf!)"
+    bpp10 = ce_val10 / math.log(2) * 3
+    print(f"  [dmol-subpixel] loss={loss_val10:.4f}  ce_loss={ce_val10:.4f}  BPP={bpp10:.2f}")
+    # 验证跨通道条件化 head: 10K 参数
+    assert model10.head.out_features == 10 * K, (
+        f"DMOL cross-channel head out_features: expected {10*K}, got {model10.head.out_features}"
+    )
+    assert hasattr(model10, 'channel_embed'), "subpixel AR should have channel_embed"
+    print(f"  [dmol-head] OK — out_features={10*K}, channel_embed exists")
+    # Backward
+    out10['loss'].backward()
+    grad_ok10 = all(p.grad is not None for p in model10.parameters() if p.requires_grad)
+    assert grad_ok10, "Some parameters missing gradients after backward (dmol-subpixel)"
+    grad_finite10 = all(torch.isfinite(p.grad).all().item() for p in model10.parameters() if p.grad is not None)
+    assert grad_finite10, "Some gradients contain NaN/Inf (dmol-subpixel)"
+    print("  [backward] all grads computed and finite: OK")
+
     print("\nAll checks passed!")
 
 
