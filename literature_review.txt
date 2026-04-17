@@ -1,0 +1,176 @@
+基于自回归 Transformer 的无损图像压缩：文献综述
+
+一、研究背景与理论基础
+
+信息论奠基人 Shannon（1948）证明，对离散无记忆源的最优无损编码长度等于其熵：L* = -log₂ p(x)。这一结论将数据压缩问题等价为概率建模问题——模型对数据分布的估计越准确，编码长度越短。对于图像压缩而言，若模型以交叉熵（CE）作为损失函数训练，则每像素的平均编码长度（bits per pixel, BPP）可表示为：
+
+    BPP = CE / ln(2) × C
+
+其中 C 为通道数。这一公式直接建立了深度学习损失函数与信息论最优编码之间的桥梁。
+
+Rissanen（1978）提出的最小描述长度（Minimum Description Length, MDL）原则进一步将模型选择纳入压缩框架：MDL(θ) = L(θ) + L(D|θ)，即总编码长度等于模型本身的描述长度加上数据在该模型下的编码长度。Grünwald（2007）对 MDL 理论做了系统性总结。近年来，Delétang 等人（2024）在"Language Modeling Is Compression"一文中，从实验角度验证了大规模语言模型作为通用压缩器的有效性，进一步巩固了"压缩即预测"这一核心命题。
+
+这些理论基础表明：训练一个强大的自回归概率模型，本质上就是在构建一个高效的无损压缩器。实际部署时，模型输出的条件概率通过算术编码（arithmetic coding）或非对称数字系统（ANS, Duda 2013）转为比特流；编码/解码双方共享同一模型参数，即可实现端到端无损压缩。本文围绕这一核心思想，综述像素级自回归模型、多尺度视觉建模、神经无损压缩、Transformer 架构优化、GPU 算子融合以及训练策略等方面的相关工作。
+
+
+二、像素级自回归模型
+
+像素级自回归模型将图像建模为像素序列的联合概率分布 p(x) = ∏ p(xₜ | x₁, ..., xₜ₋₁)，通过逐像素预测实现无损压缩。
+
+van den Oord 等人（2016）提出 PixelRNN，首次将循环神经网络应用于像素级自回归建模，采用 Row LSTM 和 Diagonal BiLSTM 两种架构捕获空间依赖。同期提出的 PixelCNN 用因果卷积替代 RNN，虽然牺牲了部分建模能力，但显著提高了并行度和训练效率。PixelRNN 在 CIFAR-10 上达到 3.00 bits/dim，开创了深度自回归图像生成的研究方向。
+
+Salimans 等人（2017）提出 PixelCNN++，在多个方面改进了原始 PixelCNN。其中最重要的贡献是引入了通道间的条件依赖建模：在预测色度通道时以亮度通道为条件，即 p(Cb|Y)·p(Cr|Y,Cb)，这种子像素自回归（sub-pixel autoregression）策略有效利用了通道间的统计冗余；此外 PixelCNN++ 采用离散化逻辑斯蒂混合（discretized logistic mixture）替代 256 路 softmax，压缩输出头参数。PixelCNN++ 在 CIFAR-10 上达到 2.92 bits/dim，成为重要的 baseline。
+
+Chen 等人（2018）提出 PixelSNAIL，将自注意力机制与因果卷积结合。自注意力能够直接建模任意距离的像素依赖关系，克服了卷积感受野有限的局限。PixelSNAIL 在 CIFAR-10 上达到 2.85 bits/dim，刷新了当时的最优结果。这一工作表明，注意力机制对于捕获图像中的长程结构至关重要。
+
+Parmar 等人（2018）提出 Image Transformer，探索纯注意力架构在像素生成中的应用，采用局部自注意力（local self-attention）在 1D/2D 邻域内建模依赖，在 CIFAR-10 上达到 2.90 bits/dim，证明 Transformer 架构在像素级建模上的可行性。
+
+Chen 等人（2020）提出 iGPT（Image GPT），将 GPT 架构直接应用于像素序列。iGPT 将图像展平为一维 token 序列，用标准的 Transformer decoder 进行自回归建模。除了生成能力外，iGPT 还展示了自回归预训练模型的表征学习能力——通过 linear probe 评估各层 hidden state 的分类准确率（Alain & Bengio, 2017），证明无监督的像素预测任务能够学到有意义的视觉特征。这一发现为自回归压缩模型的表征质量评估提供了标准方法。iGPT 的一个关键洞察是：表征质量随层深呈单峰曲线（中间层最优），与训练损失单调下降的走势不一致，说明 BPP 与表征能力是两个部分解耦的指标。
+
+
+三、多尺度视觉自回归
+
+传统光栅扫描（raster-scan）序列的一个固有问题是：序列早期的 token 只能看到极少的上下文，导致预测不确定性高、编码效率低。多尺度建模通过先粗后细的方式缓解这一问题。
+
+从信号处理的角度，Burt 和 Adelson（1983）提出的拉普拉斯金字塔（Laplacian Pyramid）和 Mallat（1989）提出的小波多分辨率分析（Wavelet MRA）是多尺度图像表示的经典方法。自然图像的功率谱服从 1/f² 规律（Field, 1987; Ruderman, 1994），意味着低频成分携带大部分能量，信息集中在粗尺度——这为先编码粗尺度再逐步细化的策略提供了理论依据。
+
+从信息论角度，条件熵满足 H(X_fine | X_coarse) ≤ H(X_fine)（Cover & Thomas, 2006），即已知粗尺度信息后，细尺度的不确定性严格降低。Equitz 和 Cover（1991）证明的逐步细化（successive refinement）定理表明，在满足 Markov 条件时，渐进编码与一次性编码的总码率相等——这为 MSPA 的无码率惩罚提供了关键理论保证。
+
+Menick 和 Kalchbrenner（2019）提出 Subscale Pixel Networks（SPN），是多尺度像素 AR 的重要先驱。SPN 将图像按"subscale"分组（按像素位置的低位比特划分），每组作为一个尺度，按从粗到细顺序预测。其思想与后来的 VAR 高度接近，但受限于 RNN/CNN 架构未能充分发挥。SPN 在 ImageNet 64×64 无条件生成上取得了当时的 SOTA，证明多尺度像素 AR 路线的可行性。
+
+van den Oord 等人（2017）提出 VQ-VAE，用向量量化将连续特征映射到离散 codebook，为多尺度离散建模奠定了基础。Tian 等人（2024）提出 VAR（Visual Autoregressive Modeling），采用 next-scale prediction 范式：模型按从粗到细的尺度顺序（1×1 → 2×2 → ... → 32×32）自回归生成图像。VAR 使用 block-causal attention（scale 内双向、跨 scale 因果），使每个细尺度 token 都能参考所有粗尺度信息作为全局上下文。VAR 在 ImageNet 256×256 上首次使 GPT 风格的自回归模型超越 diffusion Transformer，是 NeurIPS 2024 最佳论文。
+
+受 VAR 启发，本项目提出的多尺度像素自回归（MSPA）将 next-scale prediction 思想应用于像素空间的无损压缩：构建 6 级金字塔 [S0(1×1)...S5(32×32)]，总计 4095 个 token，采用标准 causal mask。与 VAR 在 VQ-VAE 潜空间建模不同，MSPA 直接在像素值空间建模（vocab=256），保证完全无损。由于自回归解码端必须顺序接收每个尺度，BPP 需要对所有尺度的 CE loss 求和：BPP_MSPA = Σ_k CE_k · N_k / ln(2) / (H·W·C)。根据 successive refinement 定理，这与直接在 S5 上的联合 CE 在理论上等价，但前者的优势在于：细尺度 token 能显式条件化于粗尺度全局信息，缓解光栅扫描序列的早期上下文稀缺问题。
+
+
+四、神经无损压缩
+
+除像素级自回归外，神经无损压缩还有若干并行的技术路线，各自代表不同的建模哲学。
+
+Townsend 等人（2019）提出 Bits-Back with ANS（BB-ANS），将变分自编码器（VAE）的隐变量后验 q(z|x) 解释为一段"借来"的比特流：编码时先从 q(z|x) 中采样 z（消耗比特），再用 p(x|z) 和 p(z) 编码 x 和 z（产生比特），净成本接近 VAE 的 ELBO。BB-ANS 在 MNIST、CIFAR-10 上实现了与 PixelCNN 接近但推理更快的压缩比。该路线的局限在于需要单独的 VAE 训练、比特借用机制复杂。
+
+Mentzer 等人（2019）提出 L3C（Learned Lossless Lossy Compression），是与 MSPA 路线最接近的已发表工作。L3C 学习一个层次化的概率模型，图像被递归下采样为多个表征层，每层用条件高斯混合建模给定粗层的细层条件分布。L3C 在高分辨率图像（Open Images、DIV2K）上优于 PNG、WebP、FLIF 等传统方法，是首个在自然图像上全面超越工程编解码器的神经方法。与 MSPA 相比，L3C 的关键差异：（a）每层使用独立的 CNN 而非统一的 Transformer；（b）连续特征高斯建模而非离散 token；（c）未利用自注意力的全局建模能力。
+
+Hoogeboom 等人（2019）提出 Integer Discrete Flows（IDF），将 normalizing flow 扩展到整数域，直接建模像素的离散概率分布。IDF 支持并行编解码，但复杂度受限于可逆变换的表达能力。Ho 等人（2019）的 Local Bits-Back Coding 将 flow 与 bits-back 结合，是连续 flow 上做无损压缩的代表性方案。这些路线与 AR 压缩的根本区别在于：AR 通过链式分解 ∏ p(xₜ|x_{<t}) 获得任意强表达力，代价是解码串行；flow-based 追求可逆变换并行解码，代价是建模能力受限。
+
+Delétang 等人（2024）的 "Language Modeling Is Compression" 实验性地验证：经过文本预训练的大规模语言模型（Chinchilla 70B）用算术编码对 ImageNet patch 压缩至 0.43 BPP、对 LibriSpeech 音频压缩至 0.16 BPB，均优于专业编解码器（PNG、FLAC）。这一结果强有力地支持"通用预测器即通用压缩器"的观点，与 MDL 框架高度契合。本项目将这一思想专门化到视觉领域：不依赖跨模态迁移，而是训练专用于图像分布的自回归模型，以换取更优的 BPP。
+
+
+五、Transformer 架构优化
+
+现代 Transformer 的高效训练依赖一系列架构改进。
+
+位置编码方面，Su 等人（2021）提出旋转位置编码（RoPE），通过对 Query 和 Key 向量施加旋转矩阵来编码相对位置信息。RoPE 具有良好的外推性和计算效率，已被 LLaMA（Touvron et al., 2023）等主流大模型广泛采用。在像素自回归场景中，RoPE 的 base 参数设为 500000 以适应长序列（LLaMA 3 设置）。对于子像素自回归（pixel-first 排列），本项目采用像素级 RoPE：同一像素内的 Y/Cb/Cr 三个 token 共享同一 position_id，使 RoPE 仅编码像素间的空间关系，通道间依赖则由额外的 channel embedding 承担。
+
+归一化方面，Zhang 和 Sennrich（2019）提出 RMSNorm，去除 LayerNorm 中的均值中心化操作，仅保留方均根归一化，在保持效果的同时减少计算量。OLMo 2（2025）系统对比了三种归一化位置：原始 post-norm（Vaswani 2017，LN 放在残差之外）、pre-norm（GPT-2 / LLaMA 主流）和 reordered norm（x = x + RMSNorm(sublayer(x))）。OLMo 2 证明 reordered norm 在训练稳定性和最终性能上均优于 pre-norm，且无需 final norm 层。本项目采用 OLMo 2 的 reordered norm 方案。
+
+前馈网络方面，Shazeer（2020）提出 SwiGLU，采用三线性门控结构：out = (xW_gate ⊙ SiLU(xW_up))W_down，隐层维度取 (8/3)×d_model。SwiGLU 在多项基准上优于 ReLU 和 GELU FFN，已成为 LLaMA 系列模型的标准配置。
+
+注意力稳定性方面，Dehghani 等人（2023）提出 QK-Norm，对 Query 和 Key 做 per-head RMSNorm，防止注意力 logits 在深层网络中数值爆炸。Press 和 Wolf（2017）提出 weight tying，让 token embedding 和 output head 共享同一权重矩阵，在减少参数量的同时隐式正则化模型。Inan 等人（2017）从信息论角度独立提出并分析了同一机制。在 MDL 框架下，weight tying 直接减少 L(θ) 的模型描述长度。
+
+初始化方面，Radford 等人（2019）在 GPT-2 中采用深度缩放初始化，将输出投影层的标准差设为 0.02/√(2N)（N 为层数），防止深层残差累积过大。Chowdhery 等人（2022）在 PaLM 中引入 z-loss 正则化：z_loss = λ·(logsumexp(logits))²（λ=1e-4），防止 logits 幅度失控，与 weight tying 协同使用效果更佳。
+
+
+六、GPU 算子融合与 Triton
+
+深度学习模型的训练效率很大程度上取决于 GPU 算子的实现质量。算子融合（kernel fusion）通过减少显存读写和 kernel 启动开销来加速计算。
+
+Dao 等人（2022）提出 FlashAttention，采用分块（tiling）策略将注意力计算完全放在 SRAM 中完成，避免实例化 O(N²) 的注意力矩阵到 HBM。其核心依赖 Milakov 和 Gimelshein（2018）提出的 online softmax 算法——通过维护运行最大值和归一化因子，实现单次遍历的 softmax 计算。Dao（2023）进一步提出 FlashAttention v2，优化了 causal mask 的 early termination 和 warp 间的工作分配，在 A100 上接近理论峰值性能。
+
+Hsu 等人（2024）提出 Liger-Kernel，用 Triton 实现了一系列融合算子，包括 Fused CE、Fused RMSNorm、Fused SwiGLU、Fused RoPE 等。Liger-Kernel 的核心设计模式——chunked online computation 避免实例化大型中间矩阵——为自定义 Triton kernel 的开发提供了重要参考。特别是 Fused Linear+CE kernel，通过将 output head 的线性变换与交叉熵损失融合，避免实例化 O(T×V) 的 logits 矩阵（T 为序列长度，V 为词表大小），显著降低显存占用。值得注意的是，在 weight tying 场景下，Fused Linear+CE 的 backward 必须显式回算 d_W = d_logits^T @ hidden；若仅依赖 token embedding 查表路径的梯度，将丢失 head 投影路径的梯度贡献，导致输出头权重欠训练。本项目对此做了单独的 PyTorch 二次计算保证正确性。
+
+Triton（Tillet et al., 2019）作为 Python 原生的 GPU 编程语言，降低了自定义高性能算子的开发门槛。相比 CUDA，Triton 以 block 为基本编程单元，自动处理线程调度和内存合并，使研究者能在保持接近 CUDA 性能的同时大幅提高开发效率。在本项目中，8 个手写 Triton kernel（约 2500 行）覆盖了 Flash Attention v2、Fused RMSNorm、Fused CE+z-loss、Fused SwiGLU、Fused RoPE、Fused Add+RMSNorm、Fused Attn+RoPE 和 Fused Linear+CE，全部支持自动降级到 PyTorch 参考实现、全部配有独立单元测试。
+
+
+六、训练策略
+
+高效的训练策略对模型最终性能至关重要。
+
+学习率调度方面，Hu 等人（2024）在 MiniCPM 中提出 WSD（Warmup-Stable-Decay）三阶段调度：预热阶段线性升温，稳定阶段保持恒定学习率，衰减阶段快速降低。相比 cosine schedule，WSD 在长训练中更稳定，且允许灵活延长稳定阶段。
+
+权重平均方面，Izmailov 等人（2018）提出 SWA（Stochastic Weight Averaging），在训练后期对多个 checkpoint 的权重做平均，获得更平坦的 loss landscape 和更好的泛化性能。
+
+参数化方面，Yang 等人（2022）提出 muP（Maximal Update Parameterization），按模型宽度比例缩放初始化标准差和学习率，使得在小模型上调优的超参数可以直接迁移到大模型。
+
+优化器方面，Jordan（2024）提出 Muon 优化器，对 2D 权重矩阵使用 Newton-Schulz 正交化更新方向，其余参数使用 AdamW。正交化更新有助于保持权重矩阵的条件数，加速收敛。
+
+混合精度训练（Micikevicius et al., 2018）通过将权重保持为 fp32、计算使用 fp16/bf16 显著降低显存和计算开销；bf16 相比 fp16 有更大的动态范围，避免 loss scaling 的复杂性，已成为大模型训练的主流选择。梯度累积（gradient accumulation）配合 DDP 的 no_sync 上下文（Li et al., 2020）能在保持大 effective batch size 的同时节省 AllReduce 通信开销。Selective activation checkpointing（Chen et al., 2016）对计算量大但重计算代价低的 attention 层做激活重算，权衡显存与计算。
+
+
+七、评估方法论
+
+无损图像压缩的评估需要多维度指标。
+
+压缩性能方面，标准指标是 bits/dim（等价于 bits/subpixel）或 bits/byte。比较对象分三类：（a）传统工程编解码器：PNG（~5.87 BPP on CIFAR-10）、WebP lossless（~5.02）、FLIF（~4.5）、JPEG-LS、JPEG-XL 无损模式；（b）神经压缩：PixelCNN++ (2.92)、PixelSNAIL (2.85)、Image Transformer (2.90)、L3C 等；（c）理论下界：数据集的经验熵（不可达）。实际部署还需报告编解码速度（MB/s）、模型显存峰值、首帧延迟等工程指标。
+
+表征质量方面，Alain 和 Bengio（2017）提出的 linear probe 已成为评估无监督预训练表征的标准方法：冻结预训练模型，在每层 hidden state 上训练一个线性分类器，报告分类准确率。iGPT（Chen et al., 2020）将该方法应用于像素 AR 模型，发现表征质量随层深呈单峰曲线（中间层最优），与 CE loss 单调下降的趋势不一致——这说明压缩能力与表征能力部分解耦，为"最后一层做压缩、中间层做下游"的两阶段使用方式提供依据。特征聚合方式通常采用全局平均池化（GAP）或末位 token。
+
+消融实验方面，现代 Transformer 组件众多（RoPE、QK-Norm、Post-Norm、SwiGLU、weight tying、z-loss、子像素 AR），逐项消融能定量各组件对 BPP 的贡献。OLMo 2 技术报告给出了非常详尽的归一化位置消融对比，是此类实验的良好模板。
+
+
+八、总结与展望
+
+本文综述了基于自回归 Transformer 的无损图像压缩相关工作，涵盖信息论基础、像素级自回归模型、多尺度视觉建模、神经无损压缩并行路线、Transformer 架构优化、GPU 算子融合、训练策略和评估方法论共八个方面。
+
+从 PixelRNN 到 iGPT，像素级自回归模型的建模能力持续提升，但光栅扫描序列中早期 token 缺乏全局上下文的问题仍是瓶颈。Subscale Pixel Networks 和 VAR 证明了多尺度 AR 路线的可行性，L3C 则是在像素空间做层次化概率建模的直接先例。本项目提出的 MSPA 将这三条线索汇合：采用 VAR 的 next-scale 架构范式、L3C 的像素空间目标、以及现代 Transformer（OLMo 2 reordered norm、RoPE、SwiGLU、QK-Norm）的全部工程改进，同时通过 8 个手写 Triton kernel 保证训练效率。在 MDL 框架下，压缩性能（L(D|θ)）、模型参数量（L(θ)）和训练效率三者被统一考量。
+
+相比 Delétang 等人（2024）用通用语言模型做跨模态压缩的路线，本项目选择训练视觉专用模型以换取更优的专业领域 BPP；相比 BB-ANS / Integer Flow 等非 AR 路线，本项目用串行解码的代价换取链式分解的任意强表达力。选择本身无绝对优劣，而取决于应用场景对解码延迟、模型大小和压缩率的相对权重。
+
+未来的研究方向包括：（1）探索更大规模模型在 MSPA 框架下的压缩性能极限，验证 VAR 报告的 AR scaling law 在无损压缩任务上是否成立；（2）将 MSPA 扩展到 ImageNet 64×64 / 256×256 等更高分辨率，对比 L3C、IDF、BB-ANS 等现代基线；（3）研究自回归压缩模型通过 linear probe 暴露的表征在下游视觉任务中的迁移能力，评估"一次训练、双重用途（压缩+预训练）"的可行性；（4）结合投机解码（speculative decoding）或 block-wise 并行解码缓解 AR 的串行解码瓶颈。
+
+
+参考文献
+
+[1]  Shannon C E. A mathematical theory of communication[J]. Bell System Technical Journal, 1948, 27(3): 379-423.
+[2]  Rissanen J. Modeling by shortest data description[J]. Automatica, 1978, 14(5): 465-471.
+[3]  Grünwald P D. The minimum description length principle[M]. MIT Press, 2007.
+[4]  Delétang G, Ruoss A, Duquenne P A, et al. Language modeling is compression[C]. ICLR, 2024.
+[5]  Duda J. Asymmetric numeral systems: Entropy coding combining speed of Huffman coding with compression rate of arithmetic coding[J]. arXiv:1311.2540, 2013.
+
+[6]  van den Oord A, Kalchbrenner N, Kavukcuoglu K. Pixel recurrent neural networks[C]. ICML, 2016.
+[7]  Salimans T, Karpathy A, Chen X, Kingma D P. PixelCNN++: Improving the PixelCNN with discretized logistic mixture likelihood[C]. ICLR, 2017.
+[8]  Chen X, Mishra N, Rohaninejad M, Abbeel P. PixelSNAIL: An improved autoregressive generative model[C]. ICML, 2018.
+[9]  Parmar N, Vaswani A, Uszkoreit J, et al. Image Transformer[C]. ICML, 2018.
+[10] Chen M, Radford A, Child R, et al. Generative pretraining from pixels[C]. ICML, 2020.
+[11] Alain G, Bengio Y. Understanding intermediate layers using linear classifier probes[C]. ICLR Workshop, 2017.
+
+[12] Burt P J, Adelson E H. The Laplacian pyramid as a compact image code[J]. IEEE Transactions on Communications, 1983, 31(4): 532-540.
+[13] Mallat S G. A theory for multiresolution signal decomposition[J]. IEEE TPAMI, 1989, 11(7): 674-693.
+[14] Field D J. Relations between the statistics of natural images and the response properties of cortical cells[J]. JOSA A, 1987, 4(12): 2379-2394.
+[15] Ruderman D L. The statistics of natural images[J]. Network: Computation in Neural Systems, 1994, 5(4): 517-548.
+[16] Cover T M, Thomas J A. Elements of information theory[M]. 2nd ed. Wiley, 2006.
+[17] Equitz W H R, Cover T M. Successive refinement of information[J]. IEEE Trans. Information Theory, 1991, 37(2): 269-275.
+[18] Menick J, Kalchbrenner N. Generating high fidelity images with Subscale Pixel Networks and multidimensional upscaling[C]. ICLR, 2019.
+[19] van den Oord A, Vinyals O, Kavukcuoglu K. Neural discrete representation learning[C]. NeurIPS, 2017.
+[20] Tian K, Jiang Y, Yuan Z, Peng B, Wang L. Visual autoregressive modeling: Scalable image generation via next-scale prediction[C]. NeurIPS, 2024.
+
+[21] Townsend J, Bird T, Barber D. Practical lossless compression with latent variables using bits back coding[C]. ICLR, 2019.
+[22] Mentzer F, Agustsson E, Tschannen M, Timofte R, Van Gool L. Practical full resolution learned lossless image compression[C]. CVPR, 2019.
+[23] Hoogeboom E, Peters J W T, van den Berg R, Welling M. Integer discrete flows and lossless compression[C]. NeurIPS, 2019.
+[24] Ho J, Lohn E, Abbeel P. Compression with flows via local bits-back coding[C]. NeurIPS, 2019.
+
+[25] Su J, Lu Y, Pan S, Murtadha A, Wen B, Liu Y. RoFormer: Enhanced transformer with rotary position embedding[J]. Neurocomputing, 2024, 568: 127063.
+[26] Zhang B, Sennrich R. Root mean square layer normalization[C]. NeurIPS, 2019.
+[27] Shazeer N. GLU variants improve transformer[J]. arXiv:2002.05202, 2020.
+[28] Dehghani M, Djolonga J, Mustafa B, et al. Scaling vision transformers to 22 billion parameters[C]. ICML, 2023.
+[29] Press O, Wolf L. Using the output embedding to improve language models[C]. EACL, 2017.
+[30] Inan H, Khosravi K, Socher R. Tying word vectors and word classifiers: A loss framework for language modeling[C]. ICLR, 2017.
+[31] Chowdhery A, Narang S, Devlin J, et al. PaLM: Scaling language modeling with pathways[J]. JMLR, 2023, 24(240): 1-113.
+[32] OLMo 2 Team. OLMo 2: Open language model[J]. arXiv:2501.00656, 2025.
+[33] Touvron H, Lavril T, Izcard G, et al. LLaMA: Open and efficient foundation language models[J]. arXiv:2302.13971, 2023.
+[34] Vaswani A, Shazeer N, Parmar N, et al. Attention is all you need[C]. NeurIPS, 2017.
+[35] Radford A, Wu J, Child R, et al. Language models are unsupervised multitask learners[R]. OpenAI Technical Report, 2019.
+
+[36] Dao T, Fu D Y, Ermon S, Rudra A, Ré C. FlashAttention: Fast and memory-efficient exact attention with IO-awareness[C]. NeurIPS, 2022.
+[37] Dao T. FlashAttention-2: Faster attention with better parallelism and work partitioning[C]. ICLR, 2024.
+[38] Milakov M, Gimelshein N. Online normalizer calculation for softmax[J]. arXiv:1805.02867, 2018.
+[39] Hsu P, Dai Y, Kothapalli V, et al. Liger-Kernel: Efficient Triton kernels for LLM training[J]. arXiv:2410.10989, 2024.
+[40] Tillet P, Kung H T, Cox D. Triton: An intermediate language and compiler for tiled neural network computations[C]. MAPL, 2019.
+
+[41] Hu S, Tu Y, Han X, et al. MiniCPM: Unveiling the potential of small language models with scalable training strategies[J]. arXiv:2404.06395, 2024.
+[42] Izmailov P, Podoprikhin D, Garipov T, Vetrov D, Wilson A G. Averaging weights leads to wider optima and better generalization[C]. UAI, 2018.
+[43] Yang G, Hu E J, Babuschkin I, et al. Tensor programs V: Tuning large neural networks via zero-shot hyperparameter transfer[C]. NeurIPS, 2022.
+[44] Jordan K. Muon: An optimizer for hidden layers in neural networks[J]. 2024.
+[45] Micikevicius P, Narang S, Alben J, et al. Mixed precision training[C]. ICLR, 2018.
+[46] Li S, Zhao Y, Varma R, et al. PyTorch distributed: Experiences on accelerating data parallel training[C]. VLDB, 2020.
+[47] Chen T, Xu B, Zhang C, Guestrin C. Training deep nets with sublinear memory cost[J]. arXiv:1604.06174, 2016.

@@ -134,10 +134,6 @@ def evaluate_per_channel(model, loader, device, amp_dtype=None,
     """
     Per-channel BPP 分解 — 分别计算 Y/Cb/Cr (或 R/G/B) 各通道的 BPP。
 
-    注意: DMOL (loss_type="dmol") 模式下，跨通道条件化使 per-channel BPP
-    分解数学上不可分（联合分布非独立乘积），此函数跳过并打印警告。
-    CE 模式下正常工作。
-
     原理:
       模型预测整个 token 序列，将 logits 和 targets 按通道拆分后分别计算 CE loss。
 
@@ -160,10 +156,6 @@ def evaluate_per_channel(model, loader, device, amp_dtype=None,
       channel_bpps: dict[str, (float, float)] — {通道名: (bpp_mean, bpp_std)}
       total_bpp: (float, float) — 总 BPP (mean, std)
     """
-    # DMOL 模式跳过 per-channel 分解
-    if hasattr(model, 'loss_type') and model.loss_type == "dmol":
-        print("  [WARN] DMOL 模式下跨通道条件化使 per-channel BPP 分解不可分，跳过。")
-        return {}, (0.0, 0.0)
     model.eval()
     use_amp = amp_dtype is not None and device.type == 'cuda'
     channel_names = ["Y", "Cb", "Cr"] if use_ycbcr else ["R", "G", "B"]
@@ -201,15 +193,8 @@ def evaluate_per_channel(model, loader, device, amp_dtype=None,
         # 按通道拆分: 根据序列布局提取每通道的 token
         for i, ch_name in enumerate(channel_names):
             if use_subpixel_ar:
-                # pixel-first: 通道 i 的 token 在位置 i, i+C, i+2*C, ...
-                # target_tokens 相对于 tokens 偏移了 1
-                # 需要找到 target 中属于通道 i 的位置
+                # pixel-first: target_tokens[t] 对应 tokens[t+1]，通道 = (t+1) % C
                 T = target_tokens.shape[1]
-                # tokens 中通道 i 的位置: i, i+C, i+2C, ...
-                # target_tokens[t] = tokens[t+1]，其通道 = (t+1) % C
-                ch_mask = torch.arange(T, device=device) % C == ((i - 1) % C if i > 0 else (C - 1))
-                # 更准确: target_tokens[t] 对应 tokens[t+1]，
-                # tokens[t+1] 的通道 = (t+1) % C
                 ch_mask = ((torch.arange(T, device=device) + 1) % C) == i
                 if not ch_mask.any():
                     continue
@@ -219,11 +204,10 @@ def evaluate_per_channel(model, loader, device, amp_dtype=None,
                 # channel-first: 通道 i 占连续 pixels_per_channel 个 token
                 start = i * pixels_per_channel
                 end = (i + 1) * pixels_per_channel
-                # 注意 target 偏移了 1，所以通道边界也偏移
-                # target_tokens[t] 对应 logits[t] 的预测
-                # 通道 i 的 target 范围: [start, end) 但受限于 T = seq_len-1
-                ch_start = max(0, start - 1)   # logits index 对应 target index
-                ch_end = min(end - 1, logits.shape[1])
+                # NTP 偏移已在 logits[:,:-1] / target_tokens[:,1:] 处理,
+                # 通道边界无需额外偏移
+                ch_start = start
+                ch_end = min(end, logits.shape[1])
                 if ch_start >= ch_end:
                     continue
                 ch_logits = logits[:, ch_start:ch_end]    # (B, ch_len, vocab)
@@ -261,8 +245,6 @@ def evaluate_position_bpp(model, loader, device, amp_dtype=None,
     """
     Per-position BPP 热力图 — 计算每个像素位置的平均 BPP。
 
-    注意: DMOL 模式下暂不支持 per-position 分解，跳过并返回空。
-
     对于 CIFAR-100 32×32×3，每个位置有一个 token，
     将 per-token CE loss 重新 reshape 回 (H, W, C) 并对 batch 取平均。
     最终输出 (H, W) 的 BPP 热力图（C 通道求和）。
@@ -286,12 +268,9 @@ def evaluate_position_bpp(model, loader, device, amp_dtype=None,
       channel_heatmaps: dict[str, np.ndarray] — 每通道 (H, W) BPP 热力图
     """
     model.eval()
-    # DMOL 模式下暂不支持 per-position 分解
-    if hasattr(model, 'loss_type') and model.loss_type == "dmol":
-        print("  [WARN] DMOL 模式下 per-position BPP 热力图暂不支持，跳过。")
-        return np.zeros((image_size, image_size)), {}
     use_amp = amp_dtype is not None and device.type == 'cuda'
     C = in_channels
+    H = W = image_size
     seq_len = H * W * C
     channel_names = ["Y", "Cb", "Cr"] if use_ycbcr else ["R", "G", "B"]
 

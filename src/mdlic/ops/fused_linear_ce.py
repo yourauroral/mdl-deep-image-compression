@@ -201,56 +201,46 @@ def _fused_linear_ce_bwd_kernel(
     scale = 1.0 + 2.0 * z_loss_weight * lse
 
     # ── Pass 2: 计算 d_logits 并累加 d_hidden ──
-    # d_hidden = Σ_v d_logits[v] * W[v, :]
-    d_hidden = tl.zeros([BLOCK_D], dtype=tl.float32)
+    # d_hidden[d] = Σ_v d_logits[v] * W[v, d]
+    # 以 D 为外层循环，每个 D-block 遍历全部 V-block 累加，然后立即写出
+    for d_start in range(0, D, BLOCK_D):
+        d_offs = d_start + tl.arange(0, BLOCK_D)
+        d_m = d_offs < D
+        d_hidden_chunk = tl.zeros([BLOCK_D], dtype=tl.float32)
 
-    for v_start in range(0, V, BLOCK_V):
-        v_offsets = v_start + tl.arange(0, BLOCK_V)
-        v_mask = v_offsets < V
+        for v_start in range(0, V, BLOCK_V):
+            v_offsets = v_start + tl.arange(0, BLOCK_V)
+            v_mask = v_offsets < V
 
-        # 重新计算 logits（第二趟）
-        logit_block = tl.zeros([BLOCK_V], dtype=tl.float32)
-        for d_start in range(0, D, BLOCK_D):
-            d_offs = d_start + tl.arange(0, BLOCK_D)
-            d_m = d_offs < D
-            h_chunk = tl.load(HIDDEN_ptr + row * stride_hidden + d_offs,
-                              mask=d_m, other=0.0).to(tl.float32)
-            w_chunk = tl.load(WEIGHT_ptr + v_offsets[:, None] * stride_weight + d_offs[None, :],
-                              mask=v_mask[:, None] & d_m[None, :],
-                              other=0.0).to(tl.float32)
-            logit_block += tl.sum(w_chunk * h_chunk[None, :], axis=1)
+            # 重新计算 logits（需要完整 D 维度的 hidden 和 weight）
+            logit_block = tl.zeros([BLOCK_V], dtype=tl.float32)
+            for dd_start in range(0, D, BLOCK_D):
+                dd_offs = dd_start + tl.arange(0, BLOCK_D)
+                dd_m = dd_offs < D
+                h_chunk = tl.load(HIDDEN_ptr + row * stride_hidden + dd_offs,
+                                  mask=dd_m, other=0.0).to(tl.float32)
+                w_chunk = tl.load(WEIGHT_ptr + v_offsets[:, None] * stride_weight + dd_offs[None, :],
+                                  mask=v_mask[:, None] & dd_m[None, :],
+                                  other=0.0).to(tl.float32)
+                logit_block += tl.sum(w_chunk * h_chunk[None, :], axis=1)
 
-        # softmax
-        softmax_block = tl.exp(logit_block - lse)
-        softmax_block = tl.where(v_mask, softmax_block, 0.0)
+            # softmax
+            softmax_block = tl.exp(logit_block - lse)
+            softmax_block = tl.where(v_mask, softmax_block, 0.0)
 
-        # d_logits = inv_M * (scale * softmax - indicator)
-        indicator = tl.where(v_offsets == target, 1.0, 0.0)
-        d_logits_block = inv_M * (scale * softmax_block - indicator)
+            # d_logits = inv_M * (scale * softmax - indicator)
+            indicator = tl.where(v_offsets == target, 1.0, 0.0)
+            d_logits_block = inv_M * (scale * softmax_block - indicator)
 
-        # d_hidden += d_logits_block @ W_block
-        # d_hidden[d] += Σ_v d_logits[v] * W[v, d]
-        for d_start in range(0, D, BLOCK_D):
-            d_offs = d_start + tl.arange(0, BLOCK_D)
-            d_m = d_offs < D
-            w_chunk = tl.load(WEIGHT_ptr + v_offsets[:, None] * stride_weight + d_offs[None, :],
-                              mask=v_mask[:, None] & d_m[None, :],
-                              other=0.0).to(tl.float32)
-            # (BLOCK_V,) @ (BLOCK_V, BLOCK_D) → 逐元素: Σ_v d_logits[v] * W[v, d]
-            d_h_chunk = tl.sum(d_logits_block[:, None] * w_chunk, axis=0)
-            if v_start == 0:
-                # 第一个 vocab 块: 初始化
-                if d_start == 0:
-                    d_hidden = d_h_chunk
-                else:
-                    # 这种情况在 BLOCK_D >= D 时不会发生
-                    pass
-            else:
-                d_hidden += d_h_chunk
+            # 累加当前 D-block: d_hidden_chunk[d] += Σ_v d_logits[v] * W[v, d]
+            w_chunk_d = tl.load(WEIGHT_ptr + v_offsets[:, None] * stride_weight + d_offs[None, :],
+                                mask=v_mask[:, None] & d_m[None, :],
+                                other=0.0).to(tl.float32)
+            d_hidden_chunk += tl.sum(d_logits_block[:, None] * w_chunk_d, axis=0)
 
-    # 写回 d_hidden
-    tl.store(D_HIDDEN_ptr + row * stride_dhidden + d_offsets,
-             d_hidden, mask=d_mask)
+        # 写回当前 D-block
+        tl.store(D_HIDDEN_ptr + row * stride_dhidden + d_offs,
+                 d_hidden_chunk, mask=d_m)
 
 
 # ─── Autograd Function ──────────────────────────────────────────
@@ -311,6 +301,7 @@ class FusedLinearCrossEntropyFunction(torch.autograd.Function):
         ctx.V = V
         ctx.BLOCK_V = BLOCK_V
         ctx.BLOCK_D = BLOCK_D
+        ctx.weight_requires_grad = weight.requires_grad
 
         return ce_loss, z_loss
 
@@ -335,7 +326,7 @@ class FusedLinearCrossEntropyFunction(torch.autograd.Function):
             hidden.contiguous(), weight.contiguous(),
             targets.contiguous(),
             d_hidden,
-            None,  # dW 在 Python 侧计算
+            None,
             stride_hidden=hidden.stride(0),
             stride_weight=weight.stride(0),
             stride_dhidden=d_hidden.stride(0),
@@ -348,11 +339,23 @@ class FusedLinearCrossEntropyFunction(torch.autograd.Function):
 
         d_hidden = d_hidden * grad_ce_val
 
-        # d_W: 通过重新计算 d_logits 然后 d_W = d_logits^T @ hidden
-        # 为简化，使用 PyTorch 计算（kernel 内已算完 d_hidden）
-        # d_W 通过 autograd 的 weight tying 自动传播
-        # 这里返回 None 让 PyTorch 自动处理
-        return d_hidden, None, None, None
+        # d_W: 必须显式累加 head 投影 logits=hidden @ W^T 的梯度贡献。
+        # 仅依赖 weight-tying 经 token_embed 查表的梯度会遗漏 head 路径，导致
+        # 输出头权重欠训练。此处用 PyTorch 重算 softmax 再做一次 matmul —
+        # 与 Triton 反向相比多一次 (M,V) 矩阵，但在 V=256 时显存充裕。
+        d_weight = None
+        if ctx.weight_requires_grad:
+            logits = hidden.float() @ weight.float().t()
+            log_z = torch.logsumexp(logits, dim=-1, keepdim=True)
+            softmax = torch.exp(logits - log_z)
+            indicator = torch.zeros_like(softmax)
+            indicator.scatter_(1, targets.unsqueeze(1), 1.0)
+            scale = 1.0 + 2.0 * effective_w * log_z
+            d_logits = inv_M * grad_ce_val * (scale * softmax - indicator)
+            d_weight = d_logits.t() @ hidden.float()
+            d_weight = d_weight.to(weight.dtype)
+
+        return d_hidden, d_weight, None, None
 
 
 def fused_linear_cross_entropy(

@@ -22,64 +22,10 @@ Fused 流程（2 步 HBM IO）:
   [3] Hsu et al., "Liger Kernel," arXiv:2410.10989, 2024. Fused pattern.
 """
 
-import torch
 import math
 
 from .fused_rope import fused_apply_rotary_emb
 from .flash_attn import TritonAttention
-
-
-class FusedAttnRoPEFunction(torch.autograd.Function):
-    """
-    合并 RoPE + Flash Attention 的 autograd Function。
-
-    Forward:
-      1. 就地 RoPE 旋转 Q/K（fused_rope kernel）
-      2. Flash Attention forward（TritonAttention）
-      返回 O = FlashAttn(RoPE(Q), RoPE(K), V)
-
-    Backward:
-      autograd 自动处理（委托给 TritonAttention.backward + RoPE 反旋转）。
-      反旋转: Q_orig = Q' * cos + rotate_half(Q') * (-sin)
-              等价于用 -sin 再次调用 RoPE。
-
-    注意: 此实现使用 autograd Function 组合两个操作，
-    而非修改 flash_attn 内核（960 行），保持代码可维护性。
-    """
-
-    @staticmethod
-    def forward(ctx, q, k, v, cos, sin, causal, softmax_scale):
-        """
-        参数:
-          q: (B, h, T, d_k) — query，必须 contiguous
-          k: (B, h, T, d_k) — key，必须 contiguous
-          v: (B, h, T, d_k) — value
-          cos: (T, d_k) — RoPE cos
-          sin: (T, d_k) — RoPE sin
-          causal: bool
-          softmax_scale: float = 1/√d_k
-        返回:
-          O: (B, h, T, d_k)
-        """
-        # 1. 就地 RoPE 旋转 Q/K（零中间张量）
-        q, k = fused_apply_rotary_emb(q, k, cos, sin)
-
-        # 2. Flash Attention（使用旋转后的 Q/K）
-        o = TritonAttention.apply(q, k, v, causal, softmax_scale)
-
-        # 保存 cos/sin 供 backward 使用（RoPE 反旋转需要 -sin）
-        ctx.save_for_backward(cos, sin)
-        ctx.causal = causal
-        ctx.softmax_scale = softmax_scale
-
-        return o
-
-    # backward 不需要手写 — 因为 fused_apply_rotary_emb 是就地操作
-    # 且 TritonAttention 已经有 backward。
-    # PyTorch autograd 会自动将 TritonAttention.backward 的 dQ/dK
-    # 通过 RoPE 反旋转传播回原始 Q/K。
-    # 但由于 fused_rope 是就地的且没有 autograd Function，
-    # 我们需要在 forward 中记录旋转信息，backward 中手动反旋转。
 
 
 def fused_attn_rope(q, k, v, cos, sin, causal=True, softmax_scale=None):

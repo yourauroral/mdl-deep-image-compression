@@ -84,52 +84,10 @@ except ImportError:
     _USE_FUSED_ATTN_ROPE = False
 
 
-def _build_sliding_window_mask(seq_len: int, window_size: int,
-                               device: torch.device) -> torch.Tensor:
-    """
-    构建 sliding window causal attention mask。
-
-    每个 token i 只能看到 [max(0, i-window_size+1), i] 范围内的 token。
-    同时保持 causal 约束（不能看到未来 token）。
-
-    动机:
-      图像具有空间局部性 — 相邻像素相关性最强，远距离像素相关性弱。
-      限制注意力范围可将 capacity 集中在局部细节，同时减少计算量。
-
-    参考:
-      [1] Beltagy et al., "Longformer: The Long-Document Transformer,"
-          arXiv:2004.05150, 2020 — sliding window attention
-      [2] Jiang et al., "Mistral 7B," arXiv:2310.06825, 2023 —
-          每层 sliding window，部分层 full attention
-
-    参数:
-      seq_len: int — 序列长度
-      window_size: int — 窗口大小（包含当前 token）
-      device: torch.device
-    返回:
-      (seq_len, seq_len) float tensor，0.0 = 允许，-inf = 屏蔽
-    """
-    # diff[i][j] = i - j；causal: diff >= 0；window: diff < window_size
-    row = torch.arange(seq_len, device=device).unsqueeze(1)
-    col = torch.arange(seq_len, device=device).unsqueeze(0)
-    diff = row - col
-    mask = torch.where(
-        (diff >= 0) & (diff < window_size),
-        torch.tensor(0.0, device=device),
-        torch.tensor(float('-inf'), device=device),
-    )
-    return mask
-
-
 def get_fused_kernel_status() -> dict:
     """
     返回各 fused Triton kernel 的可用状态，方便训练启动时打印诊断信息。
-
-    返回:
-      dict[str, bool]，key 为 kernel 名称，value 为是否可用。
     """
-    # 导入 igpt.py 中注册的 kernel 状态（fused_ce_zloss, fused_linear_ce）
-    from .igpt import _USE_FUSED_CE, _USE_FUSED_LINEAR_CE
     return {
         "fused_rms_norm": _USE_FUSED_RMSNORM,
         "fused_swiglu": _USE_FUSED_SWIGLU,
@@ -137,8 +95,6 @@ def get_fused_kernel_status() -> dict:
         "fused_rope": _USE_FUSED_ROPE,
         "fused_add_rms_norm": _USE_FUSED_ADD_RMSNORM,
         "fused_attn_rope": _USE_FUSED_ATTN_ROPE,
-        "fused_ce_zloss": _USE_FUSED_CE,
-        "fused_linear_ce": _USE_FUSED_LINEAR_CE,
     }
 
 class RotaryEmbedding(nn.Module):
@@ -166,14 +122,21 @@ class RotaryEmbedding(nn.Module):
     # θ_i = base^{-2i/d_k}，shape: (dim//2,)  [1] Eq.(15)
     inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
     self.register_buffer('inv_freq', inv_freq)
-  
+    # (seq_len, device) → (cos, sin)；避免每次 forward 重算 arange/outer/cat
+    self._cache_key = None
+    self._cache_cos = None
+    self._cache_sin = None
+
   def forward(self, seq_len: int, device: torch.device):
-    # positions: (seq_len,)
-    t = torch.arange(seq_len, device=device).float()
-    # outer product → (seq_len, dim//2)，再 cat 成 (seq_len, dim)  [1] Eq.(34)
-    freqs = torch.outer(t, self.inv_freq)
-    emb = torch.cat([freqs, freqs], dim=-1)
-    return emb.cos(), emb.sin()
+    key = (seq_len, device)
+    if self._cache_key != key:
+      t = torch.arange(seq_len, device=device, dtype=self.inv_freq.dtype)
+      freqs = torch.outer(t, self.inv_freq)
+      emb = torch.cat([freqs, freqs], dim=-1)
+      self._cache_cos = emb.cos()
+      self._cache_sin = emb.sin()
+      self._cache_key = key
+    return self._cache_cos, self._cache_sin
 
 def rotate_half(x):
   """将向量后半段取负后与前半段拼接，实现 90° 旋转。[1] Eq.(34) 的等价实现。"""
@@ -323,20 +286,12 @@ class MultiHeadAttentionBlock(nn.Module):
         - Post-norm 架构
   """
   def __init__(self, d_model: int, h: int, dropout: float,
-               use_rope: bool = True, use_qk_norm: bool = True,
-               window_size: int = -1) -> None:
+               use_rope: bool = True, use_qk_norm: bool = True) -> None:
       super().__init__()
       self.d_model = d_model # Embedding vector size
       self.h = h # Number of heads
       self.use_rope = use_rope
       self.use_qk_norm = use_qk_norm
-      # Sliding window attention: 限制每个 token 只关注最近 window_size 个 token
-      # -1 = full causal attention；> 0 = sliding window
-      # 启用时绕过 Triton Flash Attention，使用 PyTorch SDPA + 显式 mask
-      # Ref: Beltagy et al., "Longformer," arXiv:2004.05150, 2020
-      # Ref: Jiang et al., "Mistral 7B," arXiv:2310.06825, 2023
-      self.window_size = window_size
-      self._sw_mask_cache = None  # sliding window mask 缓存
       # Make sure d_model is divisible by h
       assert d_model % h == 0, "d_model is not divisible by h"
 
@@ -352,7 +307,7 @@ class MultiHeadAttentionBlock(nn.Module):
       if use_rope:
           self.rope = RotaryEmbedding(self.d_k)
 
-  def forward(self, q, k, v, mask=None, position_ids=None):
+  def forward(self, q, k, v, mask=None, position_ids=None, attn_mask=None):
     """
     参数:
       q, k, v: (batch, seq_len, d_model)
@@ -362,6 +317,10 @@ class MultiHeadAttentionBlock(nn.Module):
                     使 RoPE 只编码像素间的空间关系。
                     None 时使用默认 0,1,2,...,seq_len-1。
                     Ref: PixelCNN++ [Salimans 2017] — 通道间条件依赖
+      attn_mask: 可选 (seq_len, seq_len) float tensor，显式注意力掩码。
+                 0.0 = 允许，-inf = 屏蔽。用于 VAR block-causal attention。
+                 提供时绕过 Triton Flash Attention，使用 PyTorch SDPA。
+                 Ref: Tian et al., arXiv:2404.02905 — VAR block-causal mask
     """
     batch_size, seq_len, _ = q.shape
 
@@ -377,40 +336,32 @@ class MultiHeadAttentionBlock(nn.Module):
         # 子像素自回归模式下，使用像素级 position_ids 生成 RoPE
         # 同一像素内的通道 token 共享同一位置编码
         if position_ids is not None:
-            max_pos = int(position_ids.max().item()) + 1
+            # position_ids 由调用方构造（如 igpt 子像素 AR 的 floor-div），
+            # 上界可由 tensor.size 推断，避免 .item() 引起 GPU→CPU 同步
+            max_pos = int(position_ids.shape[0])
             cos_full, sin_full = self.rope(max_pos, q.device)
-            cos = cos_full[position_ids]  # (seq_len, d_k)
+            cos = cos_full[position_ids]
             sin = sin_full[position_ids]
         else:
             cos, sin = self.rope(seq_len, q.device)
 
-        # Sliding window 模式: 绕过 Triton Flash Attention，
-        # 只使用 Fused/PyTorch RoPE + PyTorch SDPA（支持显式 mask）。
-        # Triton Flash Attention 只支持 full causal mask，不支持 sliding window。
-        # Ref: Beltagy et al., "Longformer," arXiv:2004.05150
-        if self.window_size > 0:
-            # RoPE 旋转（与 full attention 路径一致）
+        # 显式 attn_mask 模式 (VAR block-causal): 绕过 Triton Flash Attention，
+        # 使用 Fused/PyTorch RoPE + PyTorch SDPA（支持显式 mask）。
+        # Ref: Tian et al., arXiv:2404.02905 — VAR block-causal attention
+        if attn_mask is not None:
             if _USE_FUSED_ROPE and query.is_cuda:
                 query, key = _fused_rope(query, key, cos, sin)
             else:
                 query, key = apply_rotary_emb(query, key, cos, sin)
-            # 构建/缓存 sliding window causal mask
-            if (self._sw_mask_cache is None
-                    or self._sw_mask_cache.shape[0] != seq_len
-                    or self._sw_mask_cache.device != query.device):
-                self._sw_mask_cache = _build_sliding_window_mask(
-                    seq_len, self.window_size, query.device
-                )
             attn_output = F.scaled_dot_product_attention(
                 query, key, value,
-                attn_mask=self._sw_mask_cache,
+                attn_mask=attn_mask,
                 dropout_p=0.0,
-                is_causal=False,  # mask 已包含 causal 约束
+                is_causal=False,
             )
         # Full causal attention 路径（原有逻辑不变）
         # Fused Attn+RoPE: 将 RoPE 和 Flash Attention 合并为一次操作，
         # 减少 Q/K 的 HBM 读写（RoPE 就地修改后直接被 Attn 读取）。
-        # Ref: Su et al., arXiv:2104.09864; Dao, arXiv:2307.08691
         elif _USE_FUSED_ATTN_ROPE and query.is_cuda:
             softmax_scale = 1.0 / math.sqrt(self.d_k)
             attn_output = _fused_attn_rope(query, key, value, cos, sin,
@@ -420,15 +371,14 @@ class MultiHeadAttentionBlock(nn.Module):
             attn_output = self.dropout(attn_output)
             return self.w_o(attn_output)
         elif _USE_FUSED_ROPE and query.is_cuda:
-            # Fused RoPE: 就地旋转 Q/K，零中间张量分配
             query, key = _fused_rope(query, key, cos, sin)
         else:
             query, key = apply_rotary_emb(query, key, cos, sin)
 
-    # 选择注意力后端（仅非 sliding window 路径到达此处）：
+    # 选择注意力后端（仅非 attn_mask 路径到达此处）：
     # 1. Triton 手写 Flash Attention（CUDA + triton 可用时）
     # 2. F.scaled_dot_product_attention（PyTorch 内置后端）
-    if self.window_size <= 0:
+    if attn_mask is None:
       if _USE_TRITON_ATTN and query.is_cuda:
         softmax_scale = 1.0 / math.sqrt(self.d_k)
         attn_output = _TritonAttention.apply(query, key, value, True, softmax_scale)
@@ -440,7 +390,6 @@ class MultiHeadAttentionBlock(nn.Module):
           is_causal=True
         )
 
-    # 合并多头: (batch, h, seq_len, d_k) -> (batch, seq_len, h, d_k) -> (batch, seq_len, d_model)
     attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, self.d_model)
     attn_output = self.dropout(attn_output)
 
@@ -450,8 +399,7 @@ class GPTBlock(nn.Module):
   def __init__(self, d_model, h, d_ff, dropout,
                use_post_norm: bool = True, use_swiglu: bool = True,
                use_qk_norm: bool = True, use_rope: bool = True,
-               activation_checkpointing: bool = False,
-               window_size: int = -1):
+               activation_checkpointing: bool = False):
     super().__init__()
     self.use_post_norm = use_post_norm
     self.activation_checkpointing = activation_checkpointing
@@ -459,19 +407,17 @@ class GPTBlock(nn.Module):
     self.norm2 = RMSNorm(d_model)
     self.attn = MultiHeadAttentionBlock(d_model, h, dropout,
                                          use_rope=use_rope,
-                                         use_qk_norm=use_qk_norm,
-                                         window_size=window_size)
+                                         use_qk_norm=use_qk_norm)
     if use_swiglu:
         self.ff = FeedForwardBlock(d_model, d_ff, dropout)
     else:
-        # 消融 fallback: 标准 ReLU FFN
         self.ff = ReLUFeedForwardBlock(d_model, d_ff, dropout)
 
-  def _attn_forward(self, x, mask, position_ids=None):
+  def _attn_forward(self, x, mask, position_ids=None, attn_mask=None):
     """Attention sublayer，可被 activation checkpoint 包裹。"""
-    return self.attn(x, x, x, mask, position_ids=position_ids)
+    return self.attn(x, x, x, mask, position_ids=position_ids, attn_mask=attn_mask)
 
-  def forward(self, x, mask=None, position_ids=None):
+  def forward(self, x, mask=None, position_ids=None, attn_mask=None):
     if self.use_post_norm:
         # OLMo 2 post-norm: x = x + RMSNorm(sublayer(x))
         if self.activation_checkpointing and self.training:
@@ -479,9 +425,9 @@ class GPTBlock(nn.Module):
             # Ref: Chen et al., "Training Deep Nets with Sublinear Memory Cost,"
             #      arXiv:1604.06174, 2016.
             attn_out = torch_checkpoint(self._attn_forward, x, mask,
-                                        position_ids, use_reentrant=False)
+                                        position_ids, attn_mask, use_reentrant=False)
         else:
-            attn_out = self._attn_forward(x, mask, position_ids)
+            attn_out = self._attn_forward(x, mask, position_ids, attn_mask=attn_mask)
         # Fused Add+RMSNorm: residual + RMSNorm(sublayer_out) 一次 kernel
         if _USE_FUSED_ADD_RMSNORM and x.is_cuda:
             x = _fused_add_rms_norm(x, attn_out, self.norm1.weight, self.norm1.eps)
@@ -499,9 +445,10 @@ class GPTBlock(nn.Module):
         if self.activation_checkpointing and self.training:
             attn_out = torch_checkpoint(self._attn_forward,
                                         self.norm1(x), mask,
-                                        position_ids, use_reentrant=False)
+                                        position_ids, attn_mask, use_reentrant=False)
         else:
-            attn_out = self._attn_forward(self.norm1(x), mask, position_ids)
+            attn_out = self._attn_forward(self.norm1(x), mask,
+                                          position_ids, attn_mask=attn_mask)
         x = x + attn_out
         x = x + self.ff(self.norm2(x))
     return x

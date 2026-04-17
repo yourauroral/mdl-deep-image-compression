@@ -29,3 +29,7 @@ assets/
 # AI files (DO NOT COMMIT)
 CLAUDE.md
 future.md
+
+# 论文 PDF/DOCX
+*.docx
+*.pdf

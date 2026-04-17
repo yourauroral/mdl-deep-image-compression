@@ -9,9 +9,8 @@ model:
   N: 12
   h: 8
   d_ff: 1376      # SwiGLU hidden dim: (8/3)*512=1365, 向上取整到16的倍数=1376
-                  # Ref: Shazeer arXiv:2002.05202; LLaMA arXiv:2302.13971; CS336
-  dropout: 0.0    # CIFAR-10 数据量足够，去掉 dropout 提升拟合能力
-  use_mtp: false
+                  # Ref: Shazeer arXiv:2002.05202; LLaMA arXiv:2302.13971
+  dropout: 0.0
   # 消融开关（Ablation toggles）：设为 false 可单独关闭对应组件
   use_ycbcr: true           # E1: RGB→YCbCr 预处理
   use_rope: true            # E2: Rotary Position Embedding
@@ -21,33 +20,10 @@ model:
   use_depth_scaled_init: true  # E6: 深度缩放初始化
   use_zloss: true           # E7: z-loss 正则
   # 子像素自回归 (Sub-pixel Autoregression):
-  # pixel-first 序列排列 [Y0,Cb0,Cr0, Y1,Cb1,Cr1, ...]，
-  # 使同一像素内的通道能相互条件化 p(Cb|Y) 和 p(Cr|Y,Cb)。
+  # pixel-first 序列排列 [Y0,Cb0,Cr0, Y1,Cb1,Cr1, ...]
   # Ref: Salimans et al., "PixelCNN++," ICLR 2017
-  # Ref: van den Oord et al., NeurIPS 2016
   use_subpixel_ar: true
   activation_checkpointing: false
-  logit_soft_cap: 0.0
-  # Sliding Window Attention: 限制每个 token 只关注最近 W 个 token
-  # -1 = full causal attention（默认）; 推荐 512 或 1024
-  # Ref: Beltagy et al., "Longformer," arXiv:2004.05150
-  # Ref: Jiang et al., "Mistral 7B," arXiv:2310.06825
-  sliding_window_size: -1
-  # Full attention 穿插频率: 每 N 层 1 层 full causal，其余 windowed
-  # 0 = 全部 windowed; 4 = 每 4 层 1 层 full (Mistral 风格)
-  full_attn_every_n: 0
-
-  # Loss 类型: "ce" = categorical cross-entropy (vocab=256, 标准自回归)
-  #            "dmol" = Discretized Mixture of Logistics
-  # DMOL 用 logistic 混合分布建模像素值的连续性，利用序数结构:
-  #   邻近像素值(如 127 vs 128)获得高概率，远距离值(如 127 vs 0)获得低概率。
-  # CE 将 256 值视为无序类别，无法利用这一结构。
-  # Ref: Salimans et al., "PixelCNN++," ICLR 2017
-  loss_type: "ce"
-  # DMOL 混合分量数 K（仅 loss_type="dmol" 时生效）
-  # 每个 token 输出 3K 参数 (per-token) 或 10K 参数 (跨通道条件化)
-  # K=10 是 PixelCNN++ 标准设置; K=5 可作为轻量替代
-  num_mixtures: 10
 
 data:
   dataset: "cifar10"
@@ -59,33 +35,24 @@ train:
   amp_dtype: "bf16"
   batch_size: 256
   grad_accum_steps: 4       # effective batch = 1024
-  lr: 3e-4                  # 更大模型+更大 batch，适当提高 LR
+  lr: 3e-4
   eps: 1e-8
   epochs: 300
   log_freq: 50
   clip_max_norm: 1.0
   z_loss_weight: 1e-4
-  mtp_weight: 0.1
-  # Gaussian Label Smoothing: 用高斯分布软化 target，保留像素值的序数关系
-  # sigma=0.0 禁用（使用 hard categorical CE）; 推荐 sigma=1.0
-  # 启用时训练绕过 fused CE kernel，验证自动用 hard targets
-  # Ref: Szegedy et al., arXiv:1512.00567 — label smoothing
-  label_smoothing_sigma: 0.0
   lr_schedule: "cosine"
   warmup_epochs: 10
   # WSD (Warmup-Stable-Decay) 参数（lr_schedule: "wsd" 时生效）
-  # Ref: MiniCPM arXiv:2404.06395; Hagele et al. arXiv:2405.18392
   stable_epochs: 200
   decay_beta: 1.0
   compile: false
   # SWA (Stochastic Weight Averaging)
-  # Ref: Izmailov et al., arXiv:1803.05407
   swa:
     enabled: true
     start_epoch: 260
     update_interval: 1
   # muP (Maximal Update Parameterization)
-  # Ref: Yang et al., arXiv:2203.03466
   mup:
     enabled: false
     base_width: 64

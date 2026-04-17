@@ -1,0 +1,37 @@
+exp_name: "vqvae_cifar10"
+
+model:
+  type: vqvae
+  image_size: 32
+  in_channels: 3
+  hidden_dim: 128       # Encoder/Decoder 基础通道数
+  embed_dim: 256        # Codebook embedding 维度
+  num_embeddings: 512   # Codebook 大小 K
+  num_scales: 6         # 尺度数: 1×1, 2×2, 4×4, 8×8, 16×16, 32×32
+  commitment_weight: 0.25  # β — commitment loss 权重 [van den Oord 2017]
+  ema_decay: 0.99       # EMA codebook 更新衰减率
+
+data:
+  dataset: "cifar10"
+  train: datasets/
+  valid: datasets/
+  num_workers: 8
+
+train:
+  amp_dtype: "bf16"
+  batch_size: 128
+  grad_accum_steps: 1
+  lr: 3e-4
+  eps: 1e-8
+  epochs: 200
+  log_freq: 50
+  clip_max_norm: 1.0
+  lr_schedule: "cosine"
+  warmup_epochs: 5
+  compile: false
+
+eval:
+  interval: 5
+
+checkpoint:
+  save_interval: 20
