@@ -1,0 +1,68 @@
+exp_name: "igpt_cifar10_s"
+
+# iGPT-S 级别架构: N=24, d_model=512, ~76M 参数
+# Ref: Chen et al., "Generative Pretraining from Pixels," ICML 2020
+# 对比原 iGPT-S (ImageNet 预训练) —— 本实验在 CIFAR-10 上专门化训练，
+# 目标 BPP ≤ 3.0 (PixelCNN++ baseline 2.92)
+
+model:
+  type: igpt
+  image_size: 32
+  in_channels: 3
+  vocab_size: 256
+  d_model: 512
+  N: 24             # iGPT-S 层数
+  h: 8
+  d_ff: 1376        # SwiGLU hidden dim: (8/3)*512≈1365, 向上取整到16倍数
+  dropout: 0.0
+  use_ycbcr: true
+  use_rope: true
+  use_post_norm: true
+  use_swiglu: true
+  use_qk_norm: true
+  use_depth_scaled_init: true
+  use_zloss: true
+  use_subpixel_ar: true
+  activation_checkpointing: true   # N=24 必须开，否则 OOM
+
+data:
+  dataset: "cifar10"
+  train: datasets/
+  valid: datasets/
+  num_workers: 8
+
+train:
+  amp_dtype: "bf16"
+  # 2×H800 DDP: per-GPU batch=64, world_size=2, grad_accum=2
+  # effective batch = 64 * 2 * 2 = 256（与原 iGPT batch=128 同量级）
+  batch_size: 64
+  grad_accum_steps: 2
+  lr: 3e-4
+  eps: 1e-8
+  epochs: 300
+  log_freq: 50
+  clip_max_norm: 1.0
+  z_loss_weight: 1e-4
+  lr_schedule: "cosine"
+  warmup_epochs: 10
+  stable_epochs: 200
+  decay_beta: 1.0
+  compile: false
+  swa:
+    enabled: true
+    start_epoch: 260
+    update_interval: 1
+  mup:
+    enabled: false
+    base_width: 64
+  muon:
+    enabled: false
+    lr: 0.02
+    momentum: 0.95
+    ns_steps: 5
+
+eval:
+  interval: 5
+
+checkpoint:
+  save_interval: 10

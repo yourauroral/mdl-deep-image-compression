@@ -253,7 +253,7 @@ def train_one_epoch(model, loader, optimizer, scaler, device,
 
         with sync_context:
             # AMP autocast：有 scaler 时启用 fp16/bf16 混合精度
-            amp_ctx = autocast(device_type="cuda", dtype=amp_dtype) if scaler is not None else nullcontext()
+            amp_ctx = autocast(device_type="cuda", dtype=amp_dtype) if amp_dtype is not None else nullcontext()
             with amp_ctx:
                 out = model(x, z_loss_weight=z_loss_weight)
                 loss = out["loss"]
@@ -368,7 +368,7 @@ def train_vqvae_one_epoch(model, loader, optimizer, scaler, device,
 
         is_accumulating = (i + 1) % grad_accum_steps != 0
 
-        amp_ctx = autocast(device_type="cuda", dtype=amp_dtype) if scaler is not None else nullcontext()
+        amp_ctx = autocast(device_type="cuda", dtype=amp_dtype) if amp_dtype is not None else nullcontext()
         log_step = (i + 1) % log_freq == 0
         with amp_ctx:
             out = model(x, compute_usage=log_step)
@@ -459,7 +459,7 @@ def train_var_one_epoch(model, vqvae, loader, optimizer, scaler, device,
             x = batch
         x = x.to(device)
 
-        amp_ctx = autocast(device_type="cuda", dtype=amp_dtype) if scaler is not None else nullcontext()
+        amp_ctx = autocast(device_type="cuda", dtype=amp_dtype) if amp_dtype is not None else nullcontext()
         with amp_ctx:
             # Frozen VQVAE encode
             with torch.no_grad():
