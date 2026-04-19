@@ -33,8 +33,8 @@ data:
 
 train:
   amp_dtype: "bf16"
-  batch_size: 128
-  grad_accum_steps: 8       # effective batch = 1024
+  batch_size: 64
+  grad_accum_steps: 16      # effective batch = 1024
   lr: 3e-4
   eps: 1e-8
   epochs: 300

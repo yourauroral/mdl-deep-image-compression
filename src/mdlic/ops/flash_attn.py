@@ -693,6 +693,15 @@ class TritonAttention(torch.autograd.Function):
             V = torch.nn.functional.pad(V, (0, 0, 0, PAD))
         SEQ_LEN_PADDED = SEQ_LEN + PAD
 
+        import os
+        if os.environ.get("DEBUG_MEM"):
+            free, total = torch.cuda.mem_get_info()
+            alloc = torch.cuda.memory_allocated() / 1024**3
+            reserved = torch.cuda.memory_reserved() / 1024**3
+            print(f"[flash_attn] Q.shape={tuple(Q.shape)} dtype={Q.dtype} "
+                  f"Q_size={Q.numel()*Q.element_size()/1024**2:.1f}MB | "
+                  f"alloc={alloc:.2f}GB reserved={reserved:.2f}GB "
+                  f"free={free/1024**3:.2f}GB/{total/1024**3:.2f}GB", flush=True)
         O = torch.empty_like(Q)
         stage = 3 if causal else 1
 
