@@ -23,7 +23,7 @@ model:
   # pixel-first 序列排列 [Y0,Cb0,Cr0, Y1,Cb1,Cr1, ...]
   # Ref: Salimans et al., "PixelCNN++," ICLR 2017
   use_subpixel_ar: true
-  activation_checkpointing: false
+  activation_checkpointing: true
 
 data:
   dataset: "cifar10"
@@ -33,8 +33,8 @@ data:
 
 train:
   amp_dtype: "bf16"
-  batch_size: 256
-  grad_accum_steps: 4       # effective batch = 1024
+  batch_size: 128
+  grad_accum_steps: 8       # effective batch = 1024
   lr: 3e-4
   eps: 1e-8
   epochs: 300
