@@ -23,7 +23,7 @@ model:
   # pixel-first 序列排列 [Y0,Cb0,Cr0, Y1,Cb1,Cr1, ...]
   # Ref: Salimans et al., "PixelCNN++," ICLR 2017
   use_subpixel_ar: true
-  activation_checkpointing: true
+  activation_checkpointing: false
 
 data:
   dataset: "cifar10"
