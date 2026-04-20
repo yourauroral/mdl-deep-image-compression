@@ -246,8 +246,15 @@ def train_one_epoch(model, loader, optimizer, scaler, device,
         x = x.to(device)
         _, C, _, _ = x.shape
 
-        # DDP no_sync: 梯度累积中间步跳过 AllReduce，只在同步步通信
-        # Ref: PyTorch DDP 文档 — model.no_sync() 跳过梯度 AllReduce
+        # DDP no_sync: 梯度累积中间步跳过 AllReduce，只在同步步通信。
+        # Ref: PyTorch DDP 文档 — `DistributedDataParallel.no_sync()` 上下文
+        #      在退出前不会触发梯度 AllReduce，省去 N-1 次跨卡通信。
+        #
+        # is_last_step: 当 len(loader) 不能被 grad_accum_steps 整除时，
+        # epoch 末尾会残留若干个仅完成 backward、未 step 的 micro-batch；
+        # 若不强制 flush，下一轮 zero_grad 会把它们清掉，造成梯度信息丢失
+        # （等价于每 epoch 训练样本少了 (len(loader) % grad_accum_steps) 个）。
+        # 因此最后一步一律视为同步步：执行 step + zero_grad，并打开 AllReduce。
         is_last_step = (i + 1) == steps
         is_accumulating = ((i + 1) % grad_accum_steps != 0) and (not is_last_step)
         sync_context = model.no_sync() if (distributed and is_accumulating) else nullcontext()
@@ -268,6 +275,7 @@ def train_one_epoch(model, loader, optimizer, scaler, device,
             else:
                 loss_scaled.backward()
 
+        # 同步步：完整的累积窗口完成 OR epoch 末尾残余 micro-batch（见上方 is_last_step 注释）
         if (i + 1) % grad_accum_steps == 0 or (i + 1) == steps:
             # Unscale → clip → step → update（统一 scaler/非 scaler 路径）
             if scaler is not None:
@@ -798,13 +806,23 @@ def main():
     best_bpp = float('inf')
     start_epoch = 1
 
-    # 统一解包 DDP wrapper，保证保存/加载的 state_dict 不带 `module.` 前缀
+    # ── DDP state_dict 统一处理 ──
+    # DistributedDataParallel 会在所有参数名前加 `module.` 前缀
+    # (torch/nn/parallel/distributed.py: DDP.__init__ 将原 module 挂到 self.module)，
+    # 若直接保存 `model.state_dict()`，单卡评测/线性探测脚本加载时所有 key 都将不匹配。
+    # 这里统一用 raw_model（DDP 解包后的原始 nn.Module）来保存；加载时再用
+    # _strip_module_prefix 兼容历史遗留的 `module.` 前缀 checkpoint。
+    #
+    # Ref: PyTorch DDP Tutorial
+    #      https://docs.pytorch.org/tutorials/intermediate/ddp_tutorial.html
+    #      ("Save and Load Checkpoints" 小节推荐 `model.module.state_dict()`)
     raw_model = model.module if distributed else model
 
     def _strip_module_prefix(sd):
-        # 兼容历史遗留 / 外部传入带 `module.` 前缀的 state_dict
+        """兼容历史遗留 / 外部传入带 `module.` 前缀的 state_dict。"""
         if any(k.startswith('module.') for k in sd.keys()):
-            return {(k[len('module.'):] if k.startswith('module.') else k): v for k, v in sd.items()}
+            return {(k[len('module.'):] if k.startswith('module.') else k): v
+                    for k, v in sd.items()}
         return sd
 
     if args.resume:

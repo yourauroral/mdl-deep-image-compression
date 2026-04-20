@@ -160,8 +160,16 @@ def evaluate_per_channel(model, loader, device, amp_dtype=None,
     use_amp = amp_dtype is not None and device.type == 'cuda'
     channel_names = ["Y", "Cb", "Cr"] if use_ycbcr else ["R", "G", "B"]
 
-    # per-channel 评测需要实例化完整 logits，临时关闭 fused linear CE
-    # （训练用的 fused 路径不实例化 logits，会导致 out["logits"] 为 None）
+    # ── Fused Linear CE 路径与 per-channel 评测不兼容 ──
+    # 训练期开启 _USE_FUSED_LINEAR_CE 时，IGPT.forward 会直接用 Triton kernel
+    # 算 (hidden @ W.T → logsumexp → CE) 融合输出 loss，不实例化完整 (B*T, V)
+    # logits 张量以节省显存；因此 out["logits"] 为 None。
+    # per-channel 评测需要按通道切分 logits 后分别做 CE，必须拿到完整 logits，
+    # 所以此处临时关闭 fused 开关，评测完在 finally 里复位（try/finally 确保
+    # 即便异常退出也不会污染全局状态，影响后续评测命令）。
+    #
+    # Ref: Hsu et al., "Liger Kernel: Efficient Triton Kernels for LLM Training,"
+    #      arXiv:2410.10989 — Fused Linear Cross Entropy pattern 的出处。
     from src.mdlic.models import igpt as _igpt_mod
     _saved_fused_linear_ce = _igpt_mod._USE_FUSED_LINEAR_CE
     _igpt_mod._USE_FUSED_LINEAR_CE = False
