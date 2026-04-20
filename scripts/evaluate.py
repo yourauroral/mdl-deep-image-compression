@@ -160,10 +160,17 @@ def evaluate_per_channel(model, loader, device, amp_dtype=None,
     use_amp = amp_dtype is not None and device.type == 'cuda'
     channel_names = ["Y", "Cb", "Cr"] if use_ycbcr else ["R", "G", "B"]
 
+    # per-channel 评测需要实例化完整 logits，临时关闭 fused linear CE
+    # （训练用的 fused 路径不实例化 logits，会导致 out["logits"] 为 None）
+    from src.mdlic.models import igpt as _igpt_mod
+    _saved_fused_linear_ce = _igpt_mod._USE_FUSED_LINEAR_CE
+    _igpt_mod._USE_FUSED_LINEAR_CE = False
+
     # 每个通道的 CE loss 列表
     channel_ce = {ch: [] for ch in channel_names}
 
-    for batch in loader:
+    try:
+     for batch in loader:
         if isinstance(batch, (list, tuple)):
             x = batch[0]
         else:
@@ -175,6 +182,11 @@ def evaluate_per_channel(model, loader, device, amp_dtype=None,
         with autocast(device_type="cuda", dtype=amp_dtype) if use_amp else nullcontext():
             out = model(x)
 
+        if out["logits"] is None:
+            raise RuntimeError(
+                "evaluate_per_channel: model returned logits=None even after disabling "
+                "fused linear CE. Please check igpt.py forward path."
+            )
         logits = out["logits"].float()  # (B, T, vocab_size), T = seq_len - 1
 
         # 重建 target tokens（与 model forward 一致）
@@ -219,6 +231,8 @@ def evaluate_per_channel(model, loader, device, amp_dtype=None,
                 reduction="mean"
             )
             channel_ce[ch_name].append(ch_ce.item())
+    finally:
+        _igpt_mod._USE_FUSED_LINEAR_CE = _saved_fused_linear_ce
 
     # 汇总
     channel_bpps = {}

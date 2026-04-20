@@ -248,7 +248,8 @@ def train_one_epoch(model, loader, optimizer, scaler, device,
 
         # DDP no_sync: 梯度累积中间步跳过 AllReduce，只在同步步通信
         # Ref: PyTorch DDP 文档 — model.no_sync() 跳过梯度 AllReduce
-        is_accumulating = (i + 1) % grad_accum_steps != 0
+        is_last_step = (i + 1) == steps
+        is_accumulating = ((i + 1) % grad_accum_steps != 0) and (not is_last_step)
         sync_context = model.no_sync() if (distributed and is_accumulating) else nullcontext()
 
         with sync_context:
@@ -267,7 +268,7 @@ def train_one_epoch(model, loader, optimizer, scaler, device,
             else:
                 loss_scaled.backward()
 
-        if (i + 1) % grad_accum_steps == 0:
+        if (i + 1) % grad_accum_steps == 0 or (i + 1) == steps:
             # Unscale → clip → step → update（统一 scaler/非 scaler 路径）
             if scaler is not None:
                 for opt in all_opts:
@@ -366,7 +367,8 @@ def train_vqvae_one_epoch(model, loader, optimizer, scaler, device,
             x = batch
         x = x.to(device)
 
-        is_accumulating = (i + 1) % grad_accum_steps != 0
+        is_last_step = (i + 1) == steps
+        is_accumulating = ((i + 1) % grad_accum_steps != 0) and (not is_last_step)
 
         amp_ctx = autocast(device_type="cuda", dtype=amp_dtype) if amp_dtype is not None else nullcontext()
         log_step = (i + 1) % log_freq == 0
@@ -380,7 +382,7 @@ def train_vqvae_one_epoch(model, loader, optimizer, scaler, device,
         else:
             loss_scaled.backward()
 
-        if (i + 1) % grad_accum_steps == 0:
+        if (i + 1) % grad_accum_steps == 0 or (i + 1) == steps:
             if scaler is not None:
                 scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), clip_max_norm)
@@ -476,7 +478,7 @@ def train_var_one_epoch(model, vqvae, loader, optimizer, scaler, device,
         else:
             loss_scaled.backward()
 
-        if (i + 1) % grad_accum_steps == 0:
+        if (i + 1) % grad_accum_steps == 0 or (i + 1) == steps:
             if scaler is not None:
                 scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), clip_max_norm)
@@ -796,17 +798,27 @@ def main():
     best_bpp = float('inf')
     start_epoch = 1
 
+    # 统一解包 DDP wrapper，保证保存/加载的 state_dict 不带 `module.` 前缀
+    raw_model = model.module if distributed else model
+
+    def _strip_module_prefix(sd):
+        # 兼容历史遗留 / 外部传入带 `module.` 前缀的 state_dict
+        if any(k.startswith('module.') for k in sd.keys()):
+            return {(k[len('module.'):] if k.startswith('module.') else k): v for k, v in sd.items()}
+        return sd
+
     if args.resume:
         ckpt = torch.load(args.resume, map_location=device, weights_only=False)
         if 'model_state_dict' not in ckpt:
             # 允许 resume 参数指向裸 state_dict
-            model.load_state_dict(ckpt)
+            raw_model.load_state_dict(_strip_module_prefix(ckpt))
             start_epoch = 1
             if rank == 0:
                 print(f"Loaded bare state_dict from '{args.resume}' (resume 将从 epoch 1 开始)")
         else:
-            model_keys = set(model.state_dict().keys())
-            ckpt_keys = set(ckpt['model_state_dict'].keys())
+            sd = _strip_module_prefix(ckpt['model_state_dict'])
+            model_keys = set(raw_model.state_dict().keys())
+            ckpt_keys = set(sd.keys())
             missing = model_keys - ckpt_keys
             unexpected = ckpt_keys - model_keys
             if missing or unexpected:
@@ -816,9 +828,9 @@ def main():
                     if unexpected:
                         print(f"WARNING: checkpoint 多余 {len(unexpected)} 个参数: {list(unexpected)[:5]}...")
                     print("尝试 non-strict 加载（missing 参数保持随机初始化）...")
-                model.load_state_dict(ckpt['model_state_dict'], strict=False)
+                raw_model.load_state_dict(sd, strict=False)
             else:
-                model.load_state_dict(ckpt['model_state_dict'])
+                raw_model.load_state_dict(sd)
             if 'optimizer_state_dict' in ckpt:
                 optimizer.load_state_dict(ckpt['optimizer_state_dict'])
             if optimizers and 'optimizers_state_dict' in ckpt:
@@ -914,7 +926,7 @@ def main():
                 if val_recon < best_bpp:
                     best_bpp = val_recon
                     if rank == 0:
-                        torch.save(model.state_dict(), os.path.join(checkpoint_dir, 'best.pth'))
+                        torch.save(raw_model.state_dict(), os.path.join(checkpoint_dir, 'best.pth'))
 
             elif model_type == "var":
                 val_ce, val_loss = validate_var(
@@ -931,7 +943,7 @@ def main():
                 if val_ce < best_bpp:
                     best_bpp = val_ce
                     if rank == 0:
-                        torch.save(model.state_dict(), os.path.join(checkpoint_dir, 'best.pth'))
+                        torch.save(raw_model.state_dict(), os.path.join(checkpoint_dir, 'best.pth'))
 
             else:  # igpt
                 bpp_avg, std_bpp, loss_avg = validate(model, valid_loader, device, amp_dtype=amp_dtype)
@@ -951,7 +963,7 @@ def main():
                 if bpp_avg < best_bpp:
                     best_bpp = bpp_avg
                     if rank == 0:
-                        torch.save(model.state_dict(), os.path.join(checkpoint_dir, 'best.pth'))
+                        torch.save(raw_model.state_dict(), os.path.join(checkpoint_dir, 'best.pth'))
 
         if scheduler is not None:
             scheduler.step()
@@ -985,7 +997,7 @@ def main():
             # 完整保存训练状态，确保 --resume 后所有组件正确恢复
             ckpt_data = {
                 'epoch': epoch,
-                'model_state_dict': model.state_dict(),
+                'model_state_dict': raw_model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'loss': avg_loss,
                 'best_bpp': best_bpp,
@@ -1015,7 +1027,7 @@ def main():
                 model, valid_loader, device, amp_dtype=amp_dtype)
             if rank == 0:
                 print(f"SWA Validation: Loss {val_loss:.4f} | Recon: {val_recon:.4f}")
-                torch.save(model.state_dict(), os.path.join(checkpoint_dir, 'swa.pth'))
+                torch.save(raw_model.state_dict(), os.path.join(checkpoint_dir, 'swa.pth'))
         elif model_type == "var":
             val_ce, val_loss = validate_var(
                 model, vqvae, valid_loader, device, amp_dtype=amp_dtype)
@@ -1023,12 +1035,12 @@ def main():
             if rank == 0:
                 print(f"SWA Validation: Loss {val_loss:.4f} | CE: {val_ce:.4f} "
                       f"| BPP/token: {val_bpp:.4f}")
-                torch.save(model.state_dict(), os.path.join(checkpoint_dir, 'swa.pth'))
+                torch.save(raw_model.state_dict(), os.path.join(checkpoint_dir, 'swa.pth'))
         else:
             bpp_avg, std_bpp, loss_avg = validate(model, valid_loader, device, amp_dtype=amp_dtype)
             if rank == 0:
                 print(f"SWA Validation: Loss {loss_avg:.4f} | BPP {bpp_avg:.4f} ± {std_bpp:.4f}")
-                torch.save(model.state_dict(), os.path.join(checkpoint_dir, 'swa.pth'))
+                torch.save(raw_model.state_dict(), os.path.join(checkpoint_dir, 'swa.pth'))
                 if writer:
                     writer.add_scalar('val/swa_bpp', bpp_avg, total_epochs)
 
