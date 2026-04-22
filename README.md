@@ -77,13 +77,13 @@ pytest tests/ -v
 
 # ========== AutoDL: 训练 ==========
 # 单卡
-python scripts/train.py --config configs/igpt_cifar10_baseline.yaml
+python scripts/train.py --config configs/configs/igpt_cifar10_s.yaml
 
 # 多卡 (按实例 GPU 数调整 nproc_per_node)
-torchrun --nproc_per_node=4 scripts/train.py --config configs/igpt_cifar10_baseline.yaml
+torchrun --nproc_per_node=2 scripts/train.py --config configs/igpt_cifar10_s.yaml
 
 # 后台挂起 (断开 SSH 不中断)
-nohup python scripts/train.py --config configs/igpt_cifar10_baseline.yaml \
+nohup python scripts/train.py --config configs/configs/igpt_cifar10_s.yaml \
     > train.log 2>&1 &
 tail -f train.log
 
