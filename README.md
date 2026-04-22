@@ -1,6 +1,6 @@
 # MDL Deep Image Compression
 
-基于 **Minimum Description Length (MDL)** 原则的深度图像压缩。核心命题：**压缩即预测** — CE loss 直接对应 Shannon 最优编码长度 (Shannon 1948, Delétang et al. 2024)。
+基于 **Minimum Description Length (MDL)** 原则的深度图像压缩系统设计与实现。核心命题：**压缩即预测** — CE loss 直接对应 Shannon 最优编码长度 (Shannon 1948, Delétang et al. 2024)。
 
 - **Phase A (完成)**: iGPT token-level 自回归压缩 + 8 个手写 Triton Kernel (~2,400 行)
 - **Phase B (当前)**: MSPA 多尺度像素无损自回归 (借鉴 VAR next-scale prediction) + Linear Probe 表征评估
