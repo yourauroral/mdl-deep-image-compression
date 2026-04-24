@@ -3,7 +3,8 @@
 基于 **Minimum Description Length (MDL)** 原则的深度图像压缩系统设计与实现。核心命题：**压缩即预测** — CE loss 直接对应 Shannon 最优编码长度 (Shannon 1948, Delétang et al. 2024)。
 
 - **Phase A (完成)**: iGPT token-level 自回归压缩 + 8 个手写 Triton Kernel (~2,400 行)
-- **Phase B (当前)**: MSPA 多尺度像素无损自回归 (借鉴 VAR next-scale prediction) + Linear Probe 表征评估
+- **Phase B (完成)**: MSPA 多尺度像素无损自回归 (借鉴 VAR next-scale prediction) + Linear Probe 表征评估
+- **Phase C (完成)**: Demo 前端可视化系统 (FastAPI + Chart.js, 5 个展示面板)
 
 ## Baseline 对比
 
@@ -33,17 +34,20 @@ pip install torch torchvision pyyaml numpy pillow tensorboard
 
 ```bash
 # 训练 iGPT
-python scripts/train.py --config configs/igpt_cifar10_baseline.yaml
+python scripts/train.py --config configs/igpt_cifar10_s.yaml
 
-# 多卡分布式
-torchrun --nproc_per_node=4 scripts/train.py --config configs/igpt_cifar10_baseline.yaml
+# 训练 MSPA (Phase B)
+python scripts/train.py --config configs/mspa_cifar10_baseline.yaml
+
+# 多卡分布式 (按 GPU 数调整 nproc_per_node)
+torchrun --nproc_per_node=2 scripts/train.py --config configs/igpt_cifar10_s.yaml
 
 # 评测
-python scripts/evaluate.py --config configs/igpt_cifar10_baseline.yaml \
-    --checkpoint experiments/igpt_cifar10_baseline/checkpoints/best.pth
+python scripts/evaluate.py --config configs/igpt_cifar10_s.yaml \
+    --checkpoint experiments/igpt_cifar10_s/checkpoints/best.pth
 
 # Linear Probe (各层表征分类准确率)
-python scripts/linear_probe.py --config configs/igpt_cifar10_baseline.yaml \
+python scripts/linear_probe.py --config configs/igpt_cifar10_s.yaml \
     --checkpoint best.pth --layers all
 
 # Kernel Profiling
@@ -51,6 +55,10 @@ python scripts/profile_kernels.py --roofline
 
 # 测试
 pytest tests/ -v
+
+# Demo 前端
+pip install fastapi uvicorn python-multipart
+cd demo && uvicorn server:app --reload --port 8000
 ```
 
 ### AutoDL 训练流程
@@ -76,14 +84,17 @@ python scripts/dryrun_forward.py
 pytest tests/ -v
 
 # ========== AutoDL: 训练 ==========
-# 单卡
-python scripts/train.py --config configs/configs/igpt_cifar10_s.yaml
+# 单卡 (iGPT)
+python scripts/train.py --config configs/igpt_cifar10_s.yaml
 
 # 多卡 (按实例 GPU 数调整 nproc_per_node)
 torchrun --nproc_per_node=2 scripts/train.py --config configs/igpt_cifar10_s.yaml
 
+# MSPA (Phase B)
+torchrun --nproc_per_node=2 scripts/train.py --config configs/mspa_cifar10_baseline.yaml
+
 # 后台挂起 (断开 SSH 不中断)
-nohup python scripts/train.py --config configs/configs/igpt_cifar10_s.yaml \
+nohup python scripts/train.py --config configs/igpt_cifar10_s.yaml \
     > train.log 2>&1 &
 tail -f train.log
 
@@ -95,12 +106,12 @@ tensorboard --logdir experiments/ --port 6006 --host 0.0.0.0
 
 # ========== AutoDL → 本地: 回收 checkpoint ==========
 # 本地 WSL 执行：
-scp -P <port> root@<autodl-host>:/root/autodl-tmp/mdl-deep-image-compression/experiments/igpt_cifar10_baseline/checkpoints/best.pth \
-    ./experiments/igpt_cifar10_baseline/checkpoints/
+scp -P <port> root@<autodl-host>:/root/autodl-tmp/mdl-deep-image-compression/experiments/igpt_cifar10_s/checkpoints/best.pth \
+    ./experiments/igpt_cifar10_s/checkpoints/
 
 # ========== 断点续训 ==========
-python scripts/train.py --config configs/igpt_cifar10_baseline.yaml \
-    --resume experiments/igpt_cifar10_baseline/checkpoints/last.pth
+python scripts/train.py --config configs/igpt_cifar10_s.yaml \
+    --resume experiments/igpt_cifar10_s/checkpoints/last.pth
 ```
 
 ## 架构
@@ -232,9 +243,9 @@ pixel-first:    [Y₀ Cb₀ Cr₀ | Y₁ Cb₁ Cr₁ | ... | Y₁₀₂₃ Cb₁
 | Mixed Precision | bf16/fp16 自动混合精度训练 | PyTorch AMP |
 | torch.compile | PyTorch 2.0+ 图编译优化 (fullgraph=True) | PyTorch 2.0+ |
 
-### VQVAE (`models/vqvae.py`) + VAR (`models/var.py`)
+### VQVAE/VAR 路线（已删除）
 
-多尺度 VQVAE (6 scales, K=512, EMA codebook) + VAR next-scale prediction (block-causal attention: scale 内双向、跨 scale 因果)。
+早期曾考虑 VQVAE + VAR 有损路线，现已删除（毕设聚焦 YCbCr 域无损，side-path 不保留）。MSPA 继承了 VAR 的 next-scale 思路，但在像素空间做无损自回归。
 
 ### 共享层 (`models/layers.py`)
 
@@ -264,13 +275,17 @@ GPTBlock, MultiHeadAttentionBlock (RoPE + QK-Norm + Flash Attention + attn_mask)
 
 ```
 src/mdlic/
-├── models/    igpt.py, vqvae.py, var.py, layers.py
+├── models/    igpt.py, mspa.py, layers.py
 ├── ops/       8 个 Triton kernels (flash_attn, fused_rms_norm, ...)
 ├── optim/     muon.py (Muon optimizer)
 └── utils/     seed, BPP
-scripts/       train.py, evaluate.py, linear_probe.py, profile_kernels.py
-configs/       igpt_cifar10_baseline.yaml, vqvae_cifar10.yaml, var_cifar10.yaml
+scripts/       train.py, evaluate.py, linear_probe.py, dryrun_forward.py, profile_kernels.py
+configs/       igpt_cifar10_s.yaml, igpt_cifar100_s.yaml, mspa_cifar10_baseline.yaml
 tests/         8 个 kernel 单元测试
+demo/
+├── server.py          FastAPI 后端 (predict, metrics, probe, kernels, scales)
+├── static/            HTML + JS (Chart.js) + CSS 前端
+└── data/              预计算 JSON 数据 (训练后替换为真实结果)
 ```
 
 **参考文献**

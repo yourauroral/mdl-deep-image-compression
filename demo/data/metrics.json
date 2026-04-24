@@ -1,0 +1,12 @@
+{
+  "dataset": "CIFAR-10",
+  "methods": [
+    {"name": "PNG (lossless)", "bpp": 5.87, "std": 0.42, "note": "传统方法"},
+    {"name": "WebP (lossless)", "bpp": 5.02, "std": 0.38, "note": "传统方法"},
+    {"name": "PixelCNN++", "bpp": 2.92, "std": null, "note": "Salimans 2017"},
+    {"name": "Image Transformer", "bpp": 2.90, "std": null, "note": "Parmar 2018"},
+    {"name": "PixelSNAIL", "bpp": 2.85, "std": null, "note": "Chen 2018"},
+    {"name": "iGPT (Ours)", "bpp": 3.77, "std": 0.02, "note": "Phase A"},
+    {"name": "MSPA (Ours)", "bpp": null, "std": null, "note": "Phase B — 训练中"}
+  ]
+}

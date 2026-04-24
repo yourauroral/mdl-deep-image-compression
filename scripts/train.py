@@ -3,9 +3,9 @@
 Training script for iGPT autoregressive image compression.
 
 Usage:
-    python scripts/train.py --config configs/igpt_cifar100_baseline.yaml
-    python scripts/train.py --config configs/igpt_cifar100_baseline.yaml --resume experiments/.../epoch_10.pth
-    torchrun --nproc_per_node=4 scripts/train.py --config configs/igpt_cifar100_baseline.yaml
+    python scripts/train.py --config configs/igpt_cifar10_s.yaml
+    python scripts/train.py --config configs/igpt_cifar10_s.yaml --resume experiments/.../epoch_10.pth
+    torchrun --nproc_per_node=2 scripts/train.py --config configs/igpt_cifar10_s.yaml
 """
 
 import os
@@ -32,8 +32,7 @@ from torchvision import transforms
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from src.mdlic.models.igpt import IGPT
-from src.mdlic.models.vqvae import MultiScaleVQVAE
-from src.mdlic.models.var import VARTransformer
+from src.mdlic.models.mspa import MSPA
 from src.mdlic.models.layers import get_fused_kernel_status
 from src.mdlic.utils import seed_everything, compute_bpp
 
@@ -57,7 +56,7 @@ def _validate_config(config: dict):
     mcfg = config['model']
     model_type = mcfg.get('type', 'igpt')
 
-    if model_type == 'igpt':
+    if model_type in ('igpt', 'mspa'):
         required_model = ['image_size', 'in_channels', 'vocab_size', 'd_model', 'N', 'h', 'd_ff', 'dropout']
         for key in required_model:
             assert key in mcfg, f"Config model 缺少必填字段: 'model.{key}'"
@@ -71,15 +70,8 @@ def _validate_config(config: dict):
         assert mcfg['d_ff'] > 0, f"model.d_ff 必须 > 0，got {mcfg['d_ff']}"
         assert 0.0 <= mcfg['dropout'] < 1.0, f"model.dropout 必须在 [0, 1)，got {mcfg['dropout']}"
         assert mcfg['vocab_size'] > 0, f"model.vocab_size 必须 > 0，got {mcfg['vocab_size']}"
-    elif model_type == 'vqvae':
-        for key in ['image_size', 'num_scales', 'num_embeddings', 'embed_dim']:
-            assert key in mcfg, f"Config model 缺少必填字段: 'model.{key}'"
-    elif model_type == 'var':
-        for key in ['num_embeddings', 'd_model', 'N', 'h', 'd_ff', 'num_scales']:
-            assert key in mcfg, f"Config model 缺少必填字段: 'model.{key}'"
-        assert 'vqvae_checkpoint' in mcfg, "VAR config 需要 model.vqvae_checkpoint"
     else:
-        raise ValueError(f"未知 model.type: '{model_type}'，支持 igpt/vqvae/var")
+        raise ValueError(f"未知 model.type: '{model_type}'，支持 igpt/mspa")
 
     # ── train 字段 ──
     tcfg = config['train']
@@ -97,8 +89,8 @@ def _validate_config(config: dict):
         f"train.lr_schedule 必须是 cosine/wsd/multistep，got '{lr_schedule}'"
     )
 
-    # 以下校验仅适用于 iGPT
-    if model_type == 'igpt':
+    # 以下校验仅适用于自回归模型 (iGPT / MSPA)
+    if model_type in ('igpt', 'mspa'):
         z_w = float(tcfg.get('z_loss_weight', 1e-4))
         assert z_w >= 0, f"train.z_loss_weight 必须 >= 0，got {z_w}"
 
@@ -126,31 +118,19 @@ def _build_model_from_config(mcfg: dict, device) -> IGPT:
     ).to(device)
 
 
-def _build_vqvae_from_config(mcfg: dict, device) -> MultiScaleVQVAE:
-    """从 config['model'] 构建 MultiScaleVQVAE 模型。"""
-    return MultiScaleVQVAE(
+def _build_mspa_from_config(mcfg: dict, device) -> MSPA:
+    """从 config['model'] 构建 MSPA 模型。"""
+    return MSPA(
         image_size=mcfg["image_size"],
-        in_channels=mcfg.get("in_channels", 3),
-        hidden_dim=mcfg.get("hidden_dim", 128),
-        embed_dim=mcfg.get("embed_dim", 256),
-        num_embeddings=mcfg["num_embeddings"],
-        num_scales=mcfg["num_scales"],
-        commitment_weight=float(mcfg.get("commitment_weight", 0.25)),
-        ema_decay=float(mcfg.get("ema_decay", 0.99)),
-    ).to(device)
-
-
-def _build_var_from_config(mcfg: dict, device) -> VARTransformer:
-    """从 config['model'] 构建 VARTransformer 模型。"""
-    return VARTransformer(
-        num_embeddings=mcfg["num_embeddings"],
+        in_channels=mcfg["in_channels"],
+        vocab_size=mcfg["vocab_size"],
         d_model=mcfg["d_model"],
         N=mcfg["N"],
         h=mcfg["h"],
         d_ff=mcfg["d_ff"],
-        dropout=mcfg.get("dropout", 0.0),
-        num_scales=mcfg["num_scales"],
-        image_size=mcfg.get("image_size", 32),
+        dropout=mcfg["dropout"],
+        num_scales=mcfg.get("num_scales", 6),
+        use_ycbcr=mcfg.get("use_ycbcr", True),
         use_rope=mcfg.get("use_rope", True),
         use_post_norm=mcfg.get("use_post_norm", True),
         use_swiglu=mcfg.get("use_swiglu", True),
@@ -159,22 +139,6 @@ def _build_var_from_config(mcfg: dict, device) -> VARTransformer:
         use_zloss=mcfg.get("use_zloss", True),
         activation_checkpointing=mcfg.get("activation_checkpointing", False),
     ).to(device)
-
-
-def _load_frozen_vqvae(mcfg: dict, device):
-    """加载预训练 VQVAE 并冻结参数（VAR 训练用）。"""
-    vqvae_cfg = mcfg["vqvae"]
-    vqvae = _build_vqvae_from_config(vqvae_cfg, device)
-    ckpt_path = mcfg["vqvae_checkpoint"]
-    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
-    if 'model_state_dict' in ckpt:
-        vqvae.load_state_dict(ckpt['model_state_dict'])
-    else:
-        vqvae.load_state_dict(ckpt)
-    vqvae.eval()
-    for p in vqvae.parameters():
-        p.requires_grad_(False)
-    return vqvae
 
 
 def _get_param_groups(model, weight_decay=0.1, mup_enabled=False,
@@ -187,10 +151,11 @@ def _get_param_groups(model, weight_decay=0.1, mup_enabled=False,
     no_decay = set()
     mup_hidden = set()
     for name, _ in model.named_parameters():
-        if any(nd in name for nd in ['token_embed', 'pos_embed', 'norm', 'bias']):
+        if any(nd in name for nd in ['token_embed', 'pos_embed', 'scale_embed', 'channel_embed', 'norm', 'bias']):
             no_decay.add(name)
         if mup_enabled and not name.endswith('head.weight') \
-           and 'token_embed' not in name and 'pos_embed' not in name:
+           and 'token_embed' not in name and 'pos_embed' not in name \
+           and 'scale_embed' not in name and 'channel_embed' not in name:
             mup_hidden.add(name)
 
     if mup_enabled:
@@ -266,9 +231,13 @@ def train_one_epoch(model, loader, optimizer, scaler, device,
                 out = model(x, z_loss_weight=z_loss_weight)
                 loss = out["loss"]
                 ce_loss = out["ce_loss"]
-                # BPP 只用 ce_loss（纯交叉熵），不含 z_loss 正则项。
+                # BPP：优先使用模型返回的 bpp（MSPA 需自行按 H·W·C 归一化，
+                # 因为序列长度 4095 ≠ H·W·C=3072），否则按 iGPT 约定计算。
                 # Ref: Shannon, "A Mathematical Theory of Communication," 1948
-                bpp = compute_bpp(ce_loss, C)
+                if "bpp" in out and out["bpp"] is not None:
+                    bpp = out["bpp"]
+                else:
+                    bpp = compute_bpp(ce_loss, C)
             loss_scaled = loss / grad_accum_steps
             if scaler is not None:
                 scaler.scale(loss_scaled).backward()
@@ -345,8 +314,11 @@ def validate(model, loader, device, amp_dtype=None):
             out = model(x)
         loss = out["loss"]
         ce_loss = out["ce_loss"]
-        # 验证 BPP：同训练一样，只用 ce_loss 计算，排除 z_loss 正则项
-        bpp = compute_bpp(ce_loss, C)
+        # 验证 BPP：优先使用模型返回的 bpp（MSPA），否则按 iGPT 约定计算
+        if "bpp" in out and out["bpp"] is not None:
+            bpp = out["bpp"]
+        else:
+            bpp = compute_bpp(ce_loss, C)
         bpp_list.append(bpp.item())
         total_loss += loss.item()
     avg_bpp = float(np.mean(bpp_list))
@@ -354,194 +326,6 @@ def validate(model, loader, device, amp_dtype=None):
     avg_loss = total_loss / len(bpp_list)
     return avg_bpp, std_bpp, avg_loss
 
-
-# ==================== VQVAE Training ====================
-def train_vqvae_one_epoch(model, loader, optimizer, scaler, device,
-                          epoch, log_freq, writer, clip_max_norm,
-                          amp_dtype=torch.float16, grad_accum_steps=1):
-    """VQVAE 训练一个 epoch: reconstruction loss + commitment loss。"""
-    model.train()
-    total_loss = 0
-    total_recon = 0
-    total_usage = 0
-    steps = len(loader)
-
-    optimizer.zero_grad(set_to_none=True)
-
-    for i, batch in enumerate(loader):
-        if isinstance(batch, (list, tuple)):
-            x = batch[0]
-        else:
-            x = batch
-        x = x.to(device)
-
-        is_last_step = (i + 1) == steps
-        is_accumulating = ((i + 1) % grad_accum_steps != 0) and (not is_last_step)
-
-        amp_ctx = autocast(device_type="cuda", dtype=amp_dtype) if amp_dtype is not None else nullcontext()
-        log_step = (i + 1) % log_freq == 0
-        with amp_ctx:
-            out = model(x, compute_usage=log_step)
-            loss = out["loss"]
-
-        loss_scaled = loss / grad_accum_steps
-        if scaler is not None:
-            scaler.scale(loss_scaled).backward()
-        else:
-            loss_scaled.backward()
-
-        if (i + 1) % grad_accum_steps == 0 or (i + 1) == steps:
-            if scaler is not None:
-                scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), clip_max_norm)
-            if scaler is not None:
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                optimizer.step()
-            optimizer.zero_grad(set_to_none=True)
-
-        total_loss += loss.detach()
-        total_recon += out["recon_loss"].detach()
-
-        if log_step:
-            loss_val = loss.item()
-            recon_val = out["recon_loss"].item()
-            usage_val = out["codebook_usage"]
-            total_usage += usage_val
-            print(f"Epoch {epoch} Step {i+1}/{steps} | Loss: {loss_val:.4f} "
-                  f"| Recon: {recon_val:.4f} | Usage: {usage_val:.2%}")
-            if writer:
-                step = epoch * steps + i
-                writer.add_scalar('train/loss', loss_val, step)
-                writer.add_scalar('train/recon_loss', recon_val, step)
-                writer.add_scalar('train/codebook_usage', usage_val, step)
-
-    # 注意: total_usage 只在日志步累计，除以日志步数
-    usage_steps = max(1, steps // log_freq)
-    return (total_loss.item() / steps, total_recon.item() / steps,
-            total_usage / usage_steps)
-
-
-@torch.no_grad()
-def validate_vqvae(model, loader, device, amp_dtype=None):
-    """VQVAE 验证: 返回 (avg_loss, avg_recon_loss, avg_usage)。"""
-    model.eval()
-    total_loss = 0
-    total_recon = 0
-    total_usage = 0
-    n = 0
-    use_amp = amp_dtype is not None and device.type == 'cuda'
-    for batch in loader:
-        if isinstance(batch, (list, tuple)):
-            x = batch[0]
-        else:
-            x = batch
-        x = x.to(device)
-        with autocast(device_type="cuda", dtype=amp_dtype) if use_amp else nullcontext():
-            out = model(x, compute_usage=True)
-        total_loss += out["loss"].item()
-        total_recon += out["recon_loss"].item()
-        total_usage += out["codebook_usage"]
-        n += 1
-    return total_loss / n, total_recon / n, total_usage / n
-
-
-# ==================== VAR Training ====================
-def train_var_one_epoch(model, vqvae, loader, optimizer, scaler, device,
-                        epoch, log_freq, writer, clip_max_norm,
-                        amp_dtype=torch.float16, grad_accum_steps=1,
-                        z_loss_weight=1e-4):
-    """
-    VAR 训练一个 epoch: frozen VQVAE encode → VAR forward。
-    """
-    model.train()
-    total_loss = 0
-    total_ce = 0
-    steps = len(loader)
-
-    optimizer.zero_grad(set_to_none=True)
-
-    for i, batch in enumerate(loader):
-        if isinstance(batch, (list, tuple)):
-            x = batch[0]
-        else:
-            x = batch
-        x = x.to(device)
-
-        amp_ctx = autocast(device_type="cuda", dtype=amp_dtype) if amp_dtype is not None else nullcontext()
-        with amp_ctx:
-            # Frozen VQVAE encode
-            with torch.no_grad():
-                indices_list, _, _, _ = vqvae.encode(x)
-            # VAR forward；per-scale CE 只在日志步计算，避免 6× .item() 同步
-            log_step = (i + 1) % log_freq == 0
-            out = model(indices_list, z_loss_weight=z_loss_weight,
-                        compute_per_scale=log_step)
-            loss = out["loss"]
-
-        loss_scaled = loss / grad_accum_steps
-        if scaler is not None:
-            scaler.scale(loss_scaled).backward()
-        else:
-            loss_scaled.backward()
-
-        if (i + 1) % grad_accum_steps == 0 or (i + 1) == steps:
-            if scaler is not None:
-                scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), clip_max_norm)
-            if scaler is not None:
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                optimizer.step()
-            optimizer.zero_grad(set_to_none=True)
-
-        total_loss += loss.detach()
-        total_ce += out["ce_loss"].detach()
-
-        if (i + 1) % log_freq == 0:
-            loss_val = loss.item()
-            ce_val = out["ce_loss"].item()
-            bpp = ce_val / math.log(2)
-            print(f"Epoch {epoch} Step {i+1}/{steps} | Loss: {loss_val:.4f} "
-                  f"| CE: {ce_val:.4f} | BPP/token: {bpp:.4f}")
-            if writer:
-                step = epoch * steps + i
-                writer.add_scalar('train/loss', loss_val, step)
-                writer.add_scalar('train/ce_loss', ce_val, step)
-                writer.add_scalar('train/bpp_per_token', bpp, step)
-                if out.get("per_scale_loss") is not None:
-                    for si, sl in enumerate(out["per_scale_loss"]):
-                        writer.add_scalar(f'train/scale_{si}_loss', sl, step)
-
-    return total_loss.item() / steps, total_ce.item() / steps
-
-
-@torch.no_grad()
-def validate_var(model, vqvae, loader, device, amp_dtype=None,
-                 z_loss_weight=1e-4):
-    """VAR 验证: 返回 (avg_ce_loss, avg_loss)。"""
-    model.eval()
-    total_loss = 0
-    total_ce = 0
-    n = 0
-    use_amp = amp_dtype is not None and device.type == 'cuda'
-    for batch in loader:
-        if isinstance(batch, (list, tuple)):
-            x = batch[0]
-        else:
-            x = batch
-        x = x.to(device)
-        with autocast(device_type="cuda", dtype=amp_dtype) if use_amp else nullcontext():
-            indices_list, _, _, _ = vqvae.encode(x)
-            out = model(indices_list, z_loss_weight=z_loss_weight)
-        total_loss += out["loss"].item()
-        total_ce += out["ce_loss"].item()
-        n += 1
-    avg_ce = total_ce / n
-    avg_loss = total_loss / n
-    return avg_ce, avg_loss
 
 
 # ==================== Main ====================
@@ -633,29 +417,19 @@ def main():
     # Model — 根据 type 分发构建
     mcfg = config["model"]
     model_type = mcfg.get("type", "igpt")
-    vqvae = None  # VAR 训练时用到的 frozen VQVAE
 
-    if model_type == "vqvae":
-        model = _build_vqvae_from_config(mcfg, device)
+    if model_type == "mspa":
+        model = _build_mspa_from_config(mcfg, device)
         if rank == 0:
             n_params = sum(p.numel() for p in model.parameters())
-            print(f"VQVAE model: {n_params:,} params, "
-                  f"{mcfg['num_scales']} scales, "
-                  f"codebook K={mcfg['num_embeddings']}")
-    elif model_type == "var":
-        model = _build_var_from_config(mcfg, device)
-        vqvae = _load_frozen_vqvae(mcfg, device)
-        if rank == 0:
-            n_params = sum(p.numel() for p in model.parameters())
-            print(f"VAR Transformer: {n_params:,} params, "
-                  f"{mcfg['num_scales']} scales, "
-                  f"total tokens/image={model.total_tokens}")
-            print(f"Frozen VQVAE loaded from: {mcfg['vqvae_checkpoint']}")
+            print(f"MSPA model: {n_params:,} params, "
+                  f"{mcfg.get('num_scales', 6)} scales, "
+                  f"total tokens/image={model.seq_len}")
     else:
         model = _build_model_from_config(mcfg, device)
 
-    # Fused kernel 状态日志（iGPT/VAR 使用 Triton kernels）
-    if rank == 0 and model_type in ('igpt', 'var'):
+    # Fused kernel 状态日志（iGPT/MSPA 使用 Triton kernels）
+    if rank == 0 and model_type in ('igpt', 'mspa'):
         kernel_status = get_fused_kernel_status()
         active = sum(kernel_status.values())
         print(f"Fused Triton kernels: {active}/{len(kernel_status)} active")
@@ -665,7 +439,7 @@ def main():
     # muP 初始化（仅 iGPT）
     # Ref: Yang et al., "Tensor Programs V," arXiv:2203.03466, 2022.
     mup_cfg = config["train"].get("mup", {})
-    mup_enabled = mup_cfg.get("enabled", False) and model_type == 'igpt'
+    mup_enabled = mup_cfg.get("enabled", False) and model_type in ('igpt', 'mspa')
     mup_base_width = mup_cfg.get("base_width", 64)
     if mup_enabled:
         model._init_weights_mup(mup_base_width)
@@ -687,11 +461,11 @@ def main():
     # Optimizer with parameter groups (no weight decay for embeddings/norm/bias)
     # muP 启用时: hidden 层 LR 按 base_width/d_model 缩放 [1] Table 8
     base_lr = float(config["train"]["lr"])
-    d_model = mcfg.get("d_model", 128)  # VQVAE 无 d_model，用默认值
+    d_model = mcfg.get("d_model", 128)
 
-    # Muon 优化器（仅 iGPT/VAR）
+    # Muon 优化器（仅 iGPT/MSPA）
     muon_cfg = config["train"].get("muon", {})
-    muon_enabled = muon_cfg.get("enabled", False) and model_type in ('igpt', 'var')
+    muon_enabled = muon_cfg.get("enabled", False) and model_type in ('igpt', 'mspa')
 
     if muon_enabled:
         from src.mdlic.optim.muon import build_muon_adamw
@@ -704,7 +478,7 @@ def main():
             adamw_betas=(0.9, 0.95),
             adamw_eps=float(config["train"].get("eps", 1e-8)),
             adamw_wd=0.1,
-            no_decay_keywords=['token_embed', 'pos_embed', 'norm', 'bias'],
+            no_decay_keywords=['token_embed', 'pos_embed', 'scale_embed', 'channel_embed', 'norm', 'bias'],
         )
         # 包装成统一接口：optimizer 是一个 list，后续代码统一处理
         optimizers = [opt for opt in [muon_opt, adamw_opt] if opt is not None]
@@ -870,118 +644,45 @@ def main():
         if distributed:
             train_sampler.set_epoch(epoch)
 
-        # ── 训练一个 epoch（根据 model_type 分发）──
-        if model_type == "vqvae":
-            avg_loss, avg_recon, avg_usage = train_vqvae_one_epoch(
-                model, train_loader, optimizer, scaler,
-                device=device, epoch=epoch,
-                log_freq=config['train']['log_freq'],
-                writer=writer,
-                clip_max_norm=config['train']['clip_max_norm'],
-                amp_dtype=amp_dtype,
-                grad_accum_steps=grad_accum_steps,
-            )
-            if rank == 0:
-                current_lr = optimizer.param_groups[0]['lr']
-                print(f"Epoch {epoch} | Loss: {avg_loss:.4f} | Recon: {avg_recon:.4f} "
-                      f"| Usage: {avg_usage:.2%} | LR: {current_lr:.2e}")
-                if writer:
-                    writer.add_scalar('train/lr', current_lr, epoch)
+        # ── 训练一个 epoch (iGPT/MSPA 共用 NTP 训练循环) ──
+        avg_loss, avg_bpp = train_one_epoch(
+            model, train_loader, optimizer, scaler,
+            device=device,
+            epoch=epoch,
+            log_freq=config['train']['log_freq'],
+            writer=writer,
+            clip_max_norm=config['train']['clip_max_norm'],
+            amp_dtype=amp_dtype,
+            grad_accum_steps=grad_accum_steps,
+            z_loss_weight=float(config["train"].get("z_loss_weight", 1e-4)),
+            distributed=distributed,
+            optimizers=optimizers,
+        )
 
-        elif model_type == "var":
-            avg_loss, avg_ce = train_var_one_epoch(
-                model, vqvae, train_loader, optimizer, scaler,
-                device=device, epoch=epoch,
-                log_freq=config['train']['log_freq'],
-                writer=writer,
-                clip_max_norm=config['train']['clip_max_norm'],
-                amp_dtype=amp_dtype,
-                grad_accum_steps=grad_accum_steps,
-                z_loss_weight=float(config["train"].get("z_loss_weight", 1e-4)),
-            )
-            if rank == 0:
-                current_lr = optimizer.param_groups[0]['lr']
-                bpp = avg_ce / math.log(2)
-                print(f"Epoch {epoch} | Loss: {avg_loss:.4f} | CE: {avg_ce:.4f} "
-                      f"| BPP/token: {bpp:.4f} | LR: {current_lr:.2e}")
-                if writer:
-                    writer.add_scalar('train/lr', current_lr, epoch)
+        if rank == 0:
+            current_lr = optimizer.param_groups[0]['lr']
+            print(f"Epoch {epoch} | Loss: {avg_loss:.4f} | BPP: {avg_bpp:.4f} | LR: {current_lr:.2e}")
+            if writer:
+                writer.add_scalar('train/lr', current_lr, epoch)
 
-        else:  # igpt
-            avg_loss, avg_bpp = train_one_epoch(
-                model, train_loader, optimizer, scaler,
-                device=device,
-                epoch=epoch,
-                log_freq=config['train']['log_freq'],
-                writer=writer,
-                clip_max_norm=config['train']['clip_max_norm'],
-                amp_dtype=amp_dtype,
-                grad_accum_steps=grad_accum_steps,
-                z_loss_weight=float(config["train"].get("z_loss_weight", 1e-4)),
-                distributed=distributed,
-                optimizers=optimizers,
-            )
-
-            if rank == 0:
-                current_lr = optimizer.param_groups[0]['lr']
-                print(f"Epoch {epoch} | Loss: {avg_loss:.4f} | BPP: {avg_bpp:.4f} | LR: {current_lr:.2e}")
-                if writer:
-                    writer.add_scalar('train/lr', current_lr, epoch)
-
-        # ── 验证（根据 model_type 分发）──
+        # ── 验证 (iGPT/MSPA 共用 BPP 评测, 仅 rank 0 执行避免冗余计算) ──
         if epoch % config['eval']['interval'] == 0:
-            if model_type == "vqvae":
-                val_loss, val_recon, val_usage = validate_vqvae(
-                    model, valid_loader, device, amp_dtype=amp_dtype)
-                if rank == 0:
-                    print(f"Validation: Loss {val_loss:.4f} | Recon: {val_recon:.4f} "
-                          f"| Usage: {val_usage:.2%}")
-                    if writer:
-                        writer.add_scalar('val/loss', val_loss, epoch)
-                        writer.add_scalar('val/recon_loss', val_recon, epoch)
-                        writer.add_scalar('val/codebook_usage', val_usage, epoch)
-                # VQVAE: 用 recon_loss 作为 best 指标
-                if val_recon < best_bpp:
-                    best_bpp = val_recon
-                    if rank == 0:
-                        torch.save(raw_model.state_dict(), os.path.join(checkpoint_dir, 'best.pth'))
-
-            elif model_type == "var":
-                val_ce, val_loss = validate_var(
-                    model, vqvae, valid_loader, device, amp_dtype=amp_dtype,
-                    z_loss_weight=float(config["train"].get("z_loss_weight", 1e-4)))
-                val_bpp = val_ce / math.log(2)
-                if rank == 0:
-                    print(f"Validation: Loss {val_loss:.4f} | CE: {val_ce:.4f} "
-                          f"| BPP/token: {val_bpp:.4f}")
-                    if writer:
-                        writer.add_scalar('val/loss', val_loss, epoch)
-                        writer.add_scalar('val/ce_loss', val_ce, epoch)
-                        writer.add_scalar('val/bpp_per_token', val_bpp, epoch)
-                if val_ce < best_bpp:
-                    best_bpp = val_ce
-                    if rank == 0:
-                        torch.save(raw_model.state_dict(), os.path.join(checkpoint_dir, 'best.pth'))
-
-            else:  # igpt
+            if rank == 0:
                 bpp_avg, std_bpp, loss_avg = validate(model, valid_loader, device, amp_dtype=amp_dtype)
-                if rank == 0:
-                    print(f"Validation: Loss {loss_avg:.4f} | BPP {bpp_avg:.4f} ± {std_bpp:.4f}")
-                    if writer:
-                        writer.add_scalar('val/loss', loss_avg, epoch)
-                        writer.add_scalar('val/bpp', bpp_avg, epoch)
-                        writer.add_scalar('val/bpp_std', std_bpp, epoch)
-                    # CSV 导出
-                    if csv_writer:
-                        current_lr = optimizer.param_groups[0]['lr']
-                        csv_writer.writerow([epoch, f'{avg_loss:.6f}', f'{avg_bpp:.6f}',
-                                             f'{loss_avg:.6f}', f'{bpp_avg:.6f}',
-                                             f'{std_bpp:.6f}', f'{current_lr:.2e}'])
-                        csv_file.flush()
+                print(f"Validation: Loss {loss_avg:.4f} | BPP {bpp_avg:.4f} ± {std_bpp:.4f}")
+                if writer:
+                    writer.add_scalar('val/loss', loss_avg, epoch)
+                    writer.add_scalar('val/bpp', bpp_avg, epoch)
+                    writer.add_scalar('val/bpp_std', std_bpp, epoch)
+                if csv_writer:
+                    current_lr = optimizer.param_groups[0]['lr']
+                    csv_writer.writerow([epoch, f'{avg_loss:.6f}', f'{avg_bpp:.6f}',
+                                         f'{loss_avg:.6f}', f'{bpp_avg:.6f}',
+                                         f'{std_bpp:.6f}', f'{current_lr:.2e}'])
+                    csv_file.flush()
                 if bpp_avg < best_bpp:
                     best_bpp = bpp_avg
-                    if rank == 0:
-                        torch.save(raw_model.state_dict(), os.path.join(checkpoint_dir, 'best.pth'))
+                    torch.save(raw_model.state_dict(), os.path.join(checkpoint_dir, 'best.pth'))
 
         if scheduler is not None:
             scheduler.step()
@@ -990,25 +691,20 @@ def main():
         # swa_state[name] = swa_state[name] + (param - swa_state[name]) / (n+1)
         #                  = swa_state[name].lerp_(param, 1/(n+1))
         # Ref: Izmailov et al., arXiv:1803.05407
-        if swa_enabled and epoch >= swa_start_epoch and epoch % swa_update_interval == 0:
-            raw_model = model.module if distributed else model
-            # NaN 防护：检查当前参数是否包含 NaN，避免污染 SWA 平均权重
-            # Ref: Izmailov et al., arXiv:1803.05407 — SWA 依赖各 checkpoint 权重的质量
+        if swa_enabled and rank == 0 and epoch >= swa_start_epoch and epoch % swa_update_interval == 0:
+            # SWA 仅在 rank 0 维护，避免非主进程浪费显存
             has_nan = any(torch.isnan(p.data).any().item() for p in raw_model.parameters())
             if has_nan:
-                if rank == 0:
-                    print(f"  WARNING: skipping SWA update at epoch {epoch} — model contains NaN weights")
+                print(f"  WARNING: skipping SWA update at epoch {epoch} — model contains NaN weights")
             elif swa_state is None:
-                # 第一次 SWA 更新：初始化为当前权重的 clone
                 swa_state = {name: param.data.clone()
                              for name, param in raw_model.named_parameters()}
                 swa_n = 1
             else:
                 swa_n += 1
                 for name, param in raw_model.named_parameters():
-                    # lerp_: swa = swa + (param - swa) / n = running mean
                     swa_state[name].lerp_(param.data, 1.0 / swa_n)
-            if rank == 0 and not has_nan:
+            if not has_nan:
                 print(f"  SWA update #{swa_n} at epoch {epoch}")
 
         if rank == 0 and epoch % config['checkpoint']['save_interval'] == 0:
@@ -1032,35 +728,17 @@ def main():
                 ckpt_data['swa_n'] = swa_n
             torch.save(ckpt_data, os.path.join(checkpoint_dir, f'epoch_{epoch}.pth'))
 
-    # SWA 后处理：替换权重 → 重新验证 → 保存
-    if swa_enabled and swa_state is not None:
-        raw_model = model.module if distributed else model
+    # SWA 后处理：替换权重 → 重新验证 → 保存（仅 rank 0 维护 swa_state）
+    if swa_enabled and swa_state is not None and rank == 0:
         for name, param in raw_model.named_parameters():
             param.data.copy_(swa_state[name])
-        if rank == 0:
-            print(f"SWA: replaced model weights (averaged over {swa_n} checkpoints)")
-        # 用 SWA 权重重新验证
-        if model_type == "vqvae":
-            val_loss, val_recon, val_usage = validate_vqvae(
-                model, valid_loader, device, amp_dtype=amp_dtype)
-            if rank == 0:
-                print(f"SWA Validation: Loss {val_loss:.4f} | Recon: {val_recon:.4f}")
-                torch.save(raw_model.state_dict(), os.path.join(checkpoint_dir, 'swa.pth'))
-        elif model_type == "var":
-            val_ce, val_loss = validate_var(
-                model, vqvae, valid_loader, device, amp_dtype=amp_dtype)
-            val_bpp = val_ce / math.log(2)
-            if rank == 0:
-                print(f"SWA Validation: Loss {val_loss:.4f} | CE: {val_ce:.4f} "
-                      f"| BPP/token: {val_bpp:.4f}")
-                torch.save(raw_model.state_dict(), os.path.join(checkpoint_dir, 'swa.pth'))
-        else:
-            bpp_avg, std_bpp, loss_avg = validate(model, valid_loader, device, amp_dtype=amp_dtype)
-            if rank == 0:
-                print(f"SWA Validation: Loss {loss_avg:.4f} | BPP {bpp_avg:.4f} ± {std_bpp:.4f}")
-                torch.save(raw_model.state_dict(), os.path.join(checkpoint_dir, 'swa.pth'))
-                if writer:
-                    writer.add_scalar('val/swa_bpp', bpp_avg, total_epochs)
+        print(f"SWA: replaced model weights (averaged over {swa_n} checkpoints)")
+        # 用 SWA 权重重新验证 (iGPT/MSPA)
+        bpp_avg, std_bpp, loss_avg = validate(model, valid_loader, device, amp_dtype=amp_dtype)
+        print(f"SWA Validation: Loss {loss_avg:.4f} | BPP {bpp_avg:.4f} ± {std_bpp:.4f}")
+        torch.save(raw_model.state_dict(), os.path.join(checkpoint_dir, 'swa.pth'))
+        if writer:
+            writer.add_scalar('val/swa_bpp', bpp_avg, total_epochs)
 
     if rank == 0:
         if csv_file:
@@ -1069,6 +747,9 @@ def main():
         if writer:
             writer.close()
         print("Training finished.")
+
+    if distributed:
+        dist.destroy_process_group()
 
 
 if __name__ == '__main__':

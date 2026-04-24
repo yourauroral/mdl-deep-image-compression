@@ -1,0 +1,13 @@
+{
+  "kernels": [
+    {"name": "Flash Attention v2", "triton_ms": 0.42, "pytorch_ms": 1.85, "speedup": 4.4},
+    {"name": "Fused RMSNorm", "triton_ms": 0.08, "pytorch_ms": 0.22, "speedup": 2.75},
+    {"name": "Fused CE+z-loss", "triton_ms": 0.15, "pytorch_ms": 0.38, "speedup": 2.53},
+    {"name": "Fused SwiGLU", "triton_ms": 0.11, "pytorch_ms": 0.29, "speedup": 2.64},
+    {"name": "Fused RoPE", "triton_ms": 0.06, "pytorch_ms": 0.14, "speedup": 2.33},
+    {"name": "Fused Add+RMSNorm", "triton_ms": 0.09, "pytorch_ms": 0.24, "speedup": 2.67},
+    {"name": "Fused Attn+RoPE", "triton_ms": 0.45, "pytorch_ms": 1.92, "speedup": 4.27},
+    {"name": "Fused Linear+CE", "triton_ms": 0.18, "pytorch_ms": 0.52, "speedup": 2.89}
+  ],
+  "note": "示例数据 — 实际结果需运行 profile_kernels.py 生成"
+}

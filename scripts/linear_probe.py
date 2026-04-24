@@ -5,8 +5,8 @@ Linear Probe 评估：加载预训练 iGPT checkpoint，提取各层特征，
 
 用法:
   python scripts/linear_probe.py \
-    --config configs/igpt_cifar10_baseline.yaml \
-    --checkpoint experiments/igpt_cifar10_baseline/checkpoints/best.pth \
+    --config configs/igpt_cifar10_s.yaml \
+    --checkpoint experiments/igpt_cifar10_s/checkpoints/best.pth \
     --layers all --epochs 100 --lr 0.1 --batch_size 256
 
 原理:
@@ -38,6 +38,7 @@ from torchvision.datasets import CIFAR10, CIFAR100
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from src.mdlic.models.igpt import IGPT
+from src.mdlic.models.mspa import MSPA
 
 
 # ──────────────────────────────────────────────────────────────
@@ -51,8 +52,9 @@ def load_config(path):
 
 
 def build_model(mcfg, device):
-    """从 config['model'] 构建 IGPT（复用 train.py 逻辑）"""
-    return IGPT(
+    """从 config['model'] 构建 IGPT 或 MSPA（复用 train.py 逻辑）。"""
+    model_type = mcfg.get("type", "igpt")
+    common = dict(
         image_size=mcfg["image_size"],
         in_channels=mcfg["in_channels"],
         vocab_size=mcfg["vocab_size"],
@@ -68,9 +70,12 @@ def build_model(mcfg, device):
         use_qk_norm=mcfg.get("use_qk_norm", True),
         use_depth_scaled_init=mcfg.get("use_depth_scaled_init", True),
         use_zloss=mcfg.get("use_zloss", True),
-        activation_checkpointing=False,  # 推理不需要
-        use_subpixel_ar=mcfg.get("use_subpixel_ar", False),
-    ).to(device)
+        activation_checkpointing=False,
+    )
+    if model_type == "mspa":
+        return MSPA(num_scales=mcfg.get("num_scales", 6), **common).to(device)
+    return IGPT(use_subpixel_ar=mcfg.get("use_subpixel_ar", False),
+                **common).to(device)
 
 
 def load_checkpoint(model, ckpt_path, device):

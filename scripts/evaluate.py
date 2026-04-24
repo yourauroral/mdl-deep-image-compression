@@ -14,23 +14,23 @@
 
 Usage:
     # 单模型评测
-    python scripts/evaluate.py --config configs/igpt_cifar10_baseline.yaml \
-        --checkpoint experiments/igpt_cifar10_baseline/checkpoints/best.pth
+    python scripts/evaluate.py --config configs/igpt_cifar10_s.yaml \
+        --checkpoint experiments/igpt_cifar10_s/checkpoints/best.pth
 
     # 消融批量评测（扫描目录下所有实验）
-    python scripts/evaluate.py --config configs/igpt_cifar10_baseline.yaml \
+    python scripts/evaluate.py --config configs/igpt_cifar10_s.yaml \
         --ablation_dir experiments/
 
     # Per-channel BPP 分解
-    python scripts/evaluate.py --config configs/igpt_cifar10_baseline.yaml \
+    python scripts/evaluate.py --config configs/igpt_cifar10_s.yaml \
         --checkpoint best.pth --per_channel
 
     # SWA vs best 对比
-    python scripts/evaluate.py --config configs/igpt_cifar10_baseline.yaml \
+    python scripts/evaluate.py --config configs/igpt_cifar10_s.yaml \
         --checkpoint experiments/exp/checkpoints/best.pth --swa
 
     # 传统方法对比
-    python scripts/evaluate.py --config configs/igpt_cifar10_baseline.yaml \
+    python scripts/evaluate.py --config configs/igpt_cifar10_s.yaml \
         --checkpoint best.pth --traditional
 
 参考:
@@ -58,8 +58,17 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from torch.amp import autocast
 from torch.utils.data import DataLoader
 from src.mdlic.models.igpt import IGPT, rgb_to_ycbcr_int
+from src.mdlic.models.mspa import MSPA
 from src.mdlic.utils import compute_bpp
-from scripts.train import _build_model_from_config
+from scripts.train import _build_model_from_config, _build_mspa_from_config
+
+
+def _build_from_config(mcfg: dict, device):
+    """根据 model.type 分发到 IGPT / MSPA 构建函数。"""
+    model_type = mcfg.get("type", "igpt")
+    if model_type == "mspa":
+        return _build_mspa_from_config(mcfg, device)
+    return _build_model_from_config(mcfg, device)
 
 
 # ── 学术 Baseline（直接引用论文数字）──
@@ -117,10 +126,12 @@ def evaluate_model(model, loader, device, amp_dtype=None):
         with autocast(device_type="cuda", dtype=amp_dtype) if use_amp else nullcontext():
             out = model(x)
 
-        ce_loss = out["ce_loss"]
-        # BPP = CE_loss / ln(2) × C
-        # Ref: Shannon 1948 [1] — 最优编码长度 = -log₂ p(x)
-        bpp = compute_bpp(ce_loss, C)
+        # BPP：优先使用模型返回的 bpp（MSPA 在 forward 中按 H·W·C 归一化），
+        # 否则按 iGPT 约定 CE × C / ln2 计算
+        if "bpp" in out and out["bpp"] is not None:
+            bpp = out["bpp"]
+        else:
+            bpp = compute_bpp(out["ce_loss"], C)
         bpp_list.append(bpp.item())
 
     bpp_mean = float(np.mean(bpp_list))
@@ -481,7 +492,7 @@ def compute_traditional_bpp(dataset, method="png"):
 
 def print_results_table(dataset_name, model_bpp, model_std,
                          traditional_results=None,
-                         channel_bpps=None):
+                         channel_bpps=None, model_label="iGPT (Ours)"):
     """
     打印 Markdown 格式的结果表格。
 
@@ -509,7 +520,7 @@ def print_results_table(dataset_name, model_bpp, model_std,
         print(f"| {name} | {bpp:.2f} | 论文报告值 |")
 
     # 本文
-    print(f"| **iGPT (Ours)** | **{model_bpp:.4f} ± {model_std:.4f}** | **本文** |")
+    print(f"| **{model_label}** | **{model_bpp:.4f} ± {model_std:.4f}** | **本文** |")
 
     # Per-channel BPP
     if channel_bpps:
@@ -590,9 +601,10 @@ def cmd_single(args, config, device):
     print(f"Dataset: {dataset_name} test ({len(test_dataset)} images)")
 
     mcfg = config["model"]
-    model = _build_model_from_config(mcfg, device)
+    model_type = mcfg.get("type", "igpt")
+    model = _build_from_config(mcfg, device)
     epoch = _load_checkpoint(model, args.checkpoint, device)
-    print(f"Loaded checkpoint: epoch {epoch}")
+    print(f"Loaded checkpoint: epoch {epoch} (model_type={model_type})")
 
     amp_dtype, amp_dtype_str = _get_amp_dtype(config)
 
@@ -600,21 +612,24 @@ def cmd_single(args, config, device):
     print(f"\n评测中... (AMP: {amp_dtype_str})")
     bpp_mean, bpp_std, _ = evaluate_model(model, test_loader, device,
                                             amp_dtype=amp_dtype)
-    print(f"iGPT BPP: {bpp_mean:.4f} ± {bpp_std:.4f}")
+    print(f"{model_type.upper()} BPP: {bpp_mean:.4f} ± {bpp_std:.4f}")
 
-    # Per-channel BPP（可选）
+    # Per-channel BPP（可选，仅 iGPT 支持；MSPA 序列跨多尺度非 H·W·C 规整，暂不支持）
     channel_bpps = None
     if args.per_channel:
-        print("\n计算 per-channel BPP...")
-        use_ycbcr = mcfg.get("use_ycbcr", True)
-        use_subpixel_ar = mcfg.get("use_subpixel_ar", False)
-        channel_bpps, (total_bpp, total_std) = evaluate_per_channel(
-            model, test_loader, device, amp_dtype=amp_dtype,
-            use_ycbcr=use_ycbcr, use_subpixel_ar=use_subpixel_ar
-        )
-        for ch_name, (ch_bpp, ch_std) in channel_bpps.items():
-            print(f"  {ch_name}: {ch_bpp:.4f} ± {ch_std:.4f}")
-        print(f"  Total: {total_bpp:.4f} ± {total_std:.4f}")
+        if model_type == "mspa":
+            print("\n[跳过 per_channel] MSPA 序列跨 6 个尺度（4095 tokens），与单尺度通道切分不兼容。")
+        else:
+            print("\n计算 per-channel BPP...")
+            use_ycbcr = mcfg.get("use_ycbcr", True)
+            use_subpixel_ar = mcfg.get("use_subpixel_ar", False)
+            channel_bpps, (total_bpp, total_std) = evaluate_per_channel(
+                model, test_loader, device, amp_dtype=amp_dtype,
+                use_ycbcr=use_ycbcr, use_subpixel_ar=use_subpixel_ar
+            )
+            for ch_name, (ch_bpp, ch_std) in channel_bpps.items():
+                print(f"  {ch_name}: {ch_bpp:.4f} ± {ch_std:.4f}")
+            print(f"  Total: {total_bpp:.4f} ± {total_std:.4f}")
 
     # 传统方法（可选）
     traditional_results = None
@@ -634,30 +649,34 @@ def cmd_single(args, config, device):
             print(f"  WebP: 跳过 ({e})")
 
     print_results_table(dataset_name, bpp_mean, bpp_std,
-                         traditional_results, channel_bpps)
+                         traditional_results, channel_bpps,
+                         model_label=f"{model_type.upper()} (Ours)")
 
-    # Per-position BPP 热力图（可选）
+    # Per-position BPP 热力图（可选，仅 iGPT — MSPA 序列非 H·W·C 规整）
     if args.heatmap:
-        print("\n生成 per-position BPP 热力图...")
-        use_ycbcr = mcfg.get("use_ycbcr", True)
-        use_subpixel_ar = mcfg.get("use_subpixel_ar", False)
-        image_size = mcfg.get("image_size", 32)
-        in_channels = mcfg.get("in_channels", 3)
-        heatmap, channel_heatmaps = evaluate_position_bpp(
-            model, test_loader, device, amp_dtype=amp_dtype,
-            image_size=image_size, in_channels=in_channels,
-            use_ycbcr=use_ycbcr, use_subpixel_ar=use_subpixel_ar
-        )
-        # 保存到 checkpoint 同目录
-        ckpt_dir = os.path.dirname(args.checkpoint) or "."
-        save_heatmap(heatmap, os.path.join(ckpt_dir, "bpp_heatmap_total.png"),
-                     title=f"BPP Heatmap — {dataset_name}")
-        for ch_name, ch_hm in channel_heatmaps.items():
-            save_heatmap(ch_hm, os.path.join(ckpt_dir, f"bpp_heatmap_{ch_name}.png"),
-                         title=f"BPP Heatmap — {ch_name}")
-        # 打印统计
-        print(f"  Total BPP range: [{heatmap.min():.4f}, {heatmap.max():.4f}]")
-        print(f"  Mean: {heatmap.mean():.4f}, Std: {heatmap.std():.4f}")
+        if model_type == "mspa":
+            print("\n[跳过 heatmap] MSPA 多尺度序列不适配 (H, W) 热力图。")
+        else:
+            print("\n生成 per-position BPP 热力图...")
+            use_ycbcr = mcfg.get("use_ycbcr", True)
+            use_subpixel_ar = mcfg.get("use_subpixel_ar", False)
+            image_size = mcfg.get("image_size", 32)
+            in_channels = mcfg.get("in_channels", 3)
+            heatmap, channel_heatmaps = evaluate_position_bpp(
+                model, test_loader, device, amp_dtype=amp_dtype,
+                image_size=image_size, in_channels=in_channels,
+                use_ycbcr=use_ycbcr, use_subpixel_ar=use_subpixel_ar
+            )
+            # 保存到 checkpoint 同目录
+            ckpt_dir = os.path.dirname(args.checkpoint) or "."
+            save_heatmap(heatmap, os.path.join(ckpt_dir, "bpp_heatmap_total.png"),
+                         title=f"BPP Heatmap — {dataset_name}")
+            for ch_name, ch_hm in channel_heatmaps.items():
+                save_heatmap(ch_hm, os.path.join(ckpt_dir, f"bpp_heatmap_{ch_name}.png"),
+                             title=f"BPP Heatmap — {ch_name}")
+            # 打印统计
+            print(f"  Total BPP range: [{heatmap.min():.4f}, {heatmap.max():.4f}]")
+            print(f"  Mean: {heatmap.mean():.4f}, Std: {heatmap.std():.4f}")
 
 
 def cmd_swa(args, config, device):
@@ -682,7 +701,7 @@ def cmd_swa(args, config, device):
     results = []
 
     # 评测 best
-    model = _build_model_from_config(mcfg, device)
+    model = _build_from_config(mcfg, device)
     _load_checkpoint(model, best_path, device)
     bpp_best, std_best, _ = evaluate_model(model, test_loader, device,
                                             amp_dtype=amp_dtype)
@@ -690,7 +709,7 @@ def cmd_swa(args, config, device):
     print(f"best.pth  BPP: {bpp_best:.4f} ± {std_best:.4f}")
 
     # 评测 swa
-    model = _build_model_from_config(mcfg, device)
+    model = _build_from_config(mcfg, device)
     _load_checkpoint(model, swa_path, device)
     bpp_swa, std_swa, _ = evaluate_model(model, test_loader, device,
                                            amp_dtype=amp_dtype)
@@ -759,7 +778,7 @@ def cmd_ablation(args, config, device):
                 desc = ", ".join(removed) if removed else exp_name
 
             print(f"\n评测 {exp_id} ({desc})...")
-            model = _build_model_from_config(mcfg_ablation, device)
+            model = _build_from_config(mcfg_ablation, device)
             _load_checkpoint(model, ckpt_path, device)
             bpp, std, _ = evaluate_model(model, test_loader, device,
                                           amp_dtype=amp_dtype)
@@ -784,7 +803,7 @@ def cmd_ablation(args, config, device):
             desc = os.path.basename(os.path.dirname(os.path.dirname(ckpt_path)))
 
             print(f"\n评测 {exp_id} ({desc})...")
-            model = _build_model_from_config(mcfg, device)
+            model = _build_from_config(mcfg, device)
             _load_checkpoint(model, ckpt_path, device)
             bpp, std, _ = evaluate_model(model, test_loader, device,
                                           amp_dtype=amp_dtype)
@@ -813,19 +832,19 @@ def main():
         epilog="""
 示例:
   # 单模型
-  python scripts/evaluate.py --config configs/igpt_cifar10_baseline.yaml \\
+  python scripts/evaluate.py --config configs/igpt_cifar10_s.yaml \\
       --checkpoint best.pth
 
   # 消融批量
-  python scripts/evaluate.py --config configs/igpt_cifar10_baseline.yaml \\
+  python scripts/evaluate.py --config configs/igpt_cifar10_s.yaml \\
       --ablation_dir experiments/
 
   # Per-channel + 传统方法
-  python scripts/evaluate.py --config configs/igpt_cifar10_baseline.yaml \\
+  python scripts/evaluate.py --config configs/igpt_cifar10_s.yaml \\
       --checkpoint best.pth --per_channel --traditional
 
   # SWA 对比
-  python scripts/evaluate.py --config configs/igpt_cifar10_baseline.yaml \\
+  python scripts/evaluate.py --config configs/igpt_cifar10_s.yaml \\
       --checkpoint experiments/exp/checkpoints/best.pth --swa
         """
     )

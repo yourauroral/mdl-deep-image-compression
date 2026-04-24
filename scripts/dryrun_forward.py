@@ -12,7 +12,7 @@ Quick forward pass sanity check — 验证模型构建和 forward 是否正常�
 
 Usage:
     python scripts/dryrun_forward.py
-    python scripts/dryrun_forward.py --config configs/igpt_cifar10_baseline.yaml
+    python scripts/dryrun_forward.py --config configs/igpt_cifar10_s.yaml
 """
 
 import os
@@ -25,7 +25,8 @@ import torch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from src.mdlic.models.igpt import IGPT
-from scripts.train import _build_model_from_config
+from src.mdlic.models.mspa import MSPA
+from scripts.train import _build_model_from_config, _build_mspa_from_config
 from src.mdlic.models.layers import get_fused_kernel_status
 
 
@@ -43,7 +44,7 @@ def _check_finite(out: dict, tag: str):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config', type=str, default='configs/igpt_cifar10_baseline.yaml')
+    parser.add_argument('--config', type=str, default='configs/igpt_cifar10_s.yaml')
     args = parser.parse_args()
 
     with open(args.config, 'r') as f:
@@ -132,6 +133,28 @@ def main():
     grad_ok4 = all(p.grad is not None for p in model4.parameters() if p.requires_grad)
     assert grad_ok4, "Some parameters missing gradients after backward (subpixel-ar)"
     print("  [backward] all grads computed: OK")
+
+    # ── 5. MSPA smoke ──
+    print("\n=== Test 5: MSPA Multi-Scale Pixel AR ===")
+    model5 = MSPA(
+        image_size=32, in_channels=3, vocab_size=256,
+        d_model=mcfg["d_model"], N=2, h=mcfg["h"], d_ff=mcfg["d_ff"],
+        dropout=0.0, num_scales=6,
+    ).to(device)
+    out5 = model5(x)
+    bpp5 = out5["bpp"].item()
+    loss5 = out5["loss"].item()
+    ce5 = out5["ce_loss"].item()
+    assert math.isfinite(loss5) and math.isfinite(ce5), "MSPA loss NaN/Inf"
+    assert 0.0 < bpp5 < 50.0, f"MSPA BPP={bpp5:.2f} 超出合理范围"
+    assert model5.seq_len == 4095, f"MSPA seq_len 应为 4095, got {model5.seq_len}"
+    print(f"  [mspa] loss={loss5:.4f}  ce={ce5:.4f}  bpp={bpp5:.2f}  seq_len={model5.seq_len}")
+    out5["loss"].backward()
+    grad_ok5 = all(p.grad is not None for p in model5.parameters() if p.requires_grad)
+    assert grad_ok5, "MSPA: some params missing gradients"
+    enc5 = model5.encode(x, max_layer=1)
+    assert enc5[-1].shape == (2, 4094, mcfg["d_model"]), f"MSPA encode shape mismatch: {enc5[-1].shape}"
+    print(f"  [mspa.encode] {len(enc5)} layers, last={tuple(enc5[-1].shape)}")
 
     print("\nAll checks passed!")
 

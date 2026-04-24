@@ -1,0 +1,14 @@
+{
+  "model": "MSPA",
+  "image_size": 32,
+  "scales": [
+    {"scale": "S0 (1x1)", "resolution": "1x1", "tokens": 3, "bpp_share": null},
+    {"scale": "S1 (2x2)", "resolution": "2x2", "tokens": 12, "bpp_share": null},
+    {"scale": "S2 (4x4)", "resolution": "4x4", "tokens": 48, "bpp_share": null},
+    {"scale": "S3 (8x8)", "resolution": "8x8", "tokens": 192, "bpp_share": null},
+    {"scale": "S4 (16x16)", "resolution": "16x16", "tokens": 768, "bpp_share": null},
+    {"scale": "S5 (32x32)", "resolution": "32x32", "tokens": 3072, "bpp_share": null}
+  ],
+  "total_tokens": 4095,
+  "note": "示例数据 — bpp_share 需训练后填充"
+}

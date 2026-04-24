@@ -13,7 +13,7 @@ sys.path.insert(0, project_root)
 from src.mdlic.models.igpt import rgb_to_ycbcr_int
 
 if __name__ == "__main__":
-  config_path = os.path.join(project_root, "configs/igpt_cifar100_baseline.yaml")
+  config_path = os.path.join(project_root, "configs/igpt_cifar10_s.yaml")
   print(f"Using config file: {config_path}")
 
   with open(config_path, "r") as f:

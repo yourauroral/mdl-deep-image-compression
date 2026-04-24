@@ -318,9 +318,8 @@ class MultiHeadAttentionBlock(nn.Module):
                     None 时使用默认 0,1,2,...,seq_len-1。
                     Ref: PixelCNN++ [Salimans 2017] — 通道间条件依赖
       attn_mask: 可选 (seq_len, seq_len) float tensor，显式注意力掩码。
-                 0.0 = 允许，-inf = 屏蔽。用于 VAR block-causal attention。
-                 提供时绕过 Triton Flash Attention，使用 PyTorch SDPA。
-                 Ref: Tian et al., arXiv:2404.02905 — VAR block-causal mask
+                 0.0 = 允许，-inf = 屏蔽。提供时绕过 Triton Flash Attention，
+                 使用 PyTorch SDPA（支持任意显式 mask）。
     """
     batch_size, seq_len, _ = q.shape
 
@@ -345,9 +344,8 @@ class MultiHeadAttentionBlock(nn.Module):
         else:
             cos, sin = self.rope(seq_len, q.device)
 
-        # 显式 attn_mask 模式 (VAR block-causal): 绕过 Triton Flash Attention，
+        # 显式 attn_mask 模式: 绕过 Triton Flash Attention，
         # 使用 Fused/PyTorch RoPE + PyTorch SDPA（支持显式 mask）。
-        # Ref: Tian et al., arXiv:2404.02905 — VAR block-causal attention
         if attn_mask is not None:
             if _USE_FUSED_ROPE and query.is_cuda:
                 query, key = _fused_rope(query, key, cos, sin)

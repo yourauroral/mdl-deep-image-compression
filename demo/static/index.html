@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MDL 深度图像压缩系统</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<header>
+  <h1>MDL 深度图像压缩系统</h1>
+  <p class="subtitle">基于最小描述长度原则的自回归无损图像压缩 — 毕业设计演示</p>
+</header>
+
+<main>
+
+<!-- Panel 1: 图片上传 + BPP 热力图 -->
+<section class="panel" id="panel-predict">
+  <h2>图像压缩分析</h2>
+  <div class="predict-layout">
+    <div class="upload-area" id="upload-area">
+      <input type="file" id="file-input" accept="image/*" hidden>
+      <div class="upload-placeholder" id="upload-placeholder">
+        <span class="upload-icon">+</span>
+        <p>点击或拖拽上传图片</p>
+        <p class="hint">支持 PNG / JPG，将缩放至 32×32</p>
+      </div>
+      <img id="preview-img" class="preview-img" hidden>
+    </div>
+    <div class="result-area">
+      <div class="metric-cards">
+        <div class="metric-card">
+          <span class="metric-label">BPP</span>
+          <span class="metric-value" id="result-bpp">—</span>
+        </div>
+        <div class="metric-card">
+          <span class="metric-label">CE Loss</span>
+          <span class="metric-value" id="result-ce">—</span>
+        </div>
+        <div class="metric-card">
+          <span class="metric-label">模型</span>
+          <span class="metric-value" id="result-model">—</span>
+        </div>
+      </div>
+      <div class="heatmap-container">
+        <p class="heatmap-title">Per-position BPP 热力图</p>
+        <img id="heatmap-img" class="heatmap-img" hidden>
+        <p id="heatmap-placeholder" class="hint">上传图片后生成（仅 iGPT 模型支持）</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Panel 2: BPP 对比表 -->
+<section class="panel" id="panel-metrics">
+  <h2>BPP 方法对比</h2>
+  <div class="chart-container">
+    <canvas id="chart-metrics"></canvas>
+  </div>
+  <table id="table-metrics" class="data-table">
+    <thead><tr><th>方法</th><th>BPP ↓</th><th>备注</th></tr></thead>
+    <tbody></tbody>
+  </table>
+</section>
+
+<!-- Panel 3: Linear Probe -->
+<section class="panel" id="panel-probe">
+  <h2>Linear Probe 各层分类准确率</h2>
+  <p class="panel-desc">冻结预训练模型，在各层 hidden state 上训练线性分类器，衡量表征质量 (Chen et al., 2020)</p>
+  <div class="chart-container">
+    <canvas id="chart-probe"></canvas>
+  </div>
+</section>
+
+<!-- Panel 4: Kernel 性能 -->
+<section class="panel" id="panel-kernels">
+  <h2>Triton Kernel 性能对比</h2>
+  <p class="panel-desc">8 个手写 Triton Kernel vs PyTorch 原生实现</p>
+  <div class="chart-container">
+    <canvas id="chart-kernels"></canvas>
+  </div>
+</section>
+
+<!-- Panel 5: MSPA 多尺度 bit 分配 -->
+<section class="panel" id="panel-scales">
+  <h2>MSPA 多尺度 Token 分配</h2>
+  <p class="panel-desc">6 个尺度 (1×1 → 32×32) 共 4095 tokens，粗尺度提供全局上下文</p>
+  <div class="chart-container">
+    <canvas id="chart-scales"></canvas>
+  </div>
+  <table id="table-scales" class="data-table">
+    <thead><tr><th>尺度</th><th>分辨率</th><th>Token 数</th><th>占比</th></tr></thead>
+    <tbody></tbody>
+  </table>
+</section>
+
+</main>
+
+<footer>
+  <p>MDL Deep Image Compression &copy; 2026 — 压缩即预测 (Shannon 1948, Delétang 2024)</p>
+</footer>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
