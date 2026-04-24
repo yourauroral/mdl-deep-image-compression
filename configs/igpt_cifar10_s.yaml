@@ -39,7 +39,6 @@ train:
   grad_accum_steps: 2
   lr: 3e-4
   eps: 1e-8
-  # 训练 schedule 已按 200 epochs 等比缩放（原 300 epochs × 2/3）
   epochs: 200
   log_freq: 50
   clip_max_norm: 1.0
@@ -51,7 +50,7 @@ train:
   compile: false
   swa:
     enabled: true
-    start_epoch: 180        # 最后 20 epoch 启动 SWA（原 260/300 → 180/200）
+    start_epoch: 180        # 最后 20 epoch 启动 SWA
     update_interval: 1
   mup:
     enabled: false

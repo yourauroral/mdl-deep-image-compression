@@ -1,19 +1,20 @@
-exp_name: "igpt_cifar100_s"
+exp_name: "mspa_cifar10_s"
 
-# iGPT-S 级别架构: N=24, d_model=512, ~76M 参数
-# 与 igpt_cifar10_s.yaml 结构一致，仅数据集切换为 CIFAR-100
-# CIFAR-100 训练集同为 50k 图像 (32×32×3)，可直接复用 schedule
+# MSPA-S (Multi-Scale Pixel Autoregression) on CIFAR-10, iGPT-S 同参数量级
+# 6 scales: 1+4+16+64+256+1024 = 1365 pixels × 3 ch = 4095 tokens, vocab=256
+# 目标 BPP < 3.2（借助粗尺度全局上下文，相对 iGPT 3.77 降低）
 
 model:
-  type: igpt
+  type: mspa
   image_size: 32
   in_channels: 3
   vocab_size: 256
   d_model: 512
-  N: 24             # iGPT-S 层数
+  N: 24
   h: 8
-  d_ff: 1376        # SwiGLU hidden dim: (8/3)*512≈1365, 向上取整到16倍数
+  d_ff: 1376             # (8/3)*512≈1365, 向上取整到 16 倍数
   dropout: 0.0
+  num_scales: 6
   use_ycbcr: true
   use_rope: true
   use_post_norm: true
@@ -21,21 +22,18 @@ model:
   use_qk_norm: true
   use_depth_scaled_init: true
   use_zloss: true
-  use_subpixel_ar: true
-  activation_checkpointing: true   # N=24 必须开，否则 OOM
+  activation_checkpointing: true   # seq_len=4094 比 iGPT 大, 必开
 
 data:
-  dataset: "cifar100"
+  dataset: "cifar10"
   train: datasets/
   valid: datasets/
   num_workers: 8
 
 train:
   amp_dtype: "bf16"
-  # 2×H800 DDP: per-GPU batch=64, world_size=2, grad_accum=2
-  # effective batch = 64 * 2 * 2 = 256
-  batch_size: 64
-  grad_accum_steps: 2
+  batch_size: 32          # seq_len 比 iGPT 大 1/3, 相应降 batch
+  grad_accum_steps: 4     # effective batch = 32 * 2 * 4 = 256
   lr: 3e-4
   eps: 1e-8
   epochs: 200

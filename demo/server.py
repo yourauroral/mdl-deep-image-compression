@@ -143,7 +143,7 @@ def _get_cached_model(device):
     configs_dir = ROOT / "configs"
     experiments_dir = ROOT / "experiments"
 
-    for cfg_name in ["mspa_cifar10_baseline.yaml", "igpt_cifar10_s.yaml"]:
+    for cfg_name in ["mspa_cifar10_s.yaml", "igpt_cifar10_s.yaml"]:
         cfg_path = configs_dir / cfg_name
         if not cfg_path.exists():
             continue

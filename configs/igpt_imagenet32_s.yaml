@@ -1,8 +1,9 @@
-exp_name: "igpt_cifar100_s"
+exp_name: "igpt_imagenet32_s"
 
-# iGPT-S 级别架构: N=24, d_model=512, ~76M 参数
-# 与 igpt_cifar10_s.yaml 结构一致，仅数据集切换为 CIFAR-100
-# CIFAR-100 训练集同为 50k 图像 (32×32×3)，可直接复用 schedule
+# iGPT-S on ImageNet 32×32 (downsampled)
+# ImageNet 32×32: ~1.28M train / 50k val, 1000 classes
+# 序列长度 3072 (32×32×3)，与 CIFAR 相同，但数据量大 25 倍
+# Ref: Chrabaszcz et al., "A Downsampled Variant of ImageNet," 2017
 
 model:
   type: igpt
@@ -10,9 +11,9 @@ model:
   in_channels: 3
   vocab_size: 256
   d_model: 512
-  N: 24             # iGPT-S 层数
+  N: 24
   h: 8
-  d_ff: 1376        # SwiGLU hidden dim: (8/3)*512≈1365, 向上取整到16倍数
+  d_ff: 1376
   dropout: 0.0
   use_ycbcr: true
   use_rope: true
@@ -22,12 +23,12 @@ model:
   use_depth_scaled_init: true
   use_zloss: true
   use_subpixel_ar: true
-  activation_checkpointing: true   # N=24 必须开，否则 OOM
+  activation_checkpointing: true
 
 data:
-  dataset: "cifar100"
-  train: datasets/
-  valid: datasets/
+  dataset: "imagenet32"
+  train: datasets/imagenet32
+  valid: datasets/imagenet32
   num_workers: 8
 
 train:
@@ -38,18 +39,19 @@ train:
   grad_accum_steps: 2
   lr: 3e-4
   eps: 1e-8
-  epochs: 200
-  log_freq: 50
+  # ImageNet 数据量大，100 epochs 已足够（~500k steps）
+  epochs: 100
+  log_freq: 200
   clip_max_norm: 1.0
   z_loss_weight: 1e-4
   lr_schedule: "cosine"
-  warmup_epochs: 10
-  stable_epochs: 140
+  warmup_epochs: 5
+  stable_epochs: 70
   decay_beta: 1.0
   compile: false
   swa:
     enabled: true
-    start_epoch: 180
+    start_epoch: 90
     update_interval: 1
   mup:
     enabled: false

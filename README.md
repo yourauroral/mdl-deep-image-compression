@@ -37,7 +37,11 @@ pip install torch torchvision pyyaml numpy pillow tensorboard
 python scripts/train.py --config configs/igpt_cifar10_s.yaml
 
 # 训练 MSPA (Phase B)
-python scripts/train.py --config configs/mspa_cifar10_baseline.yaml
+python scripts/train.py --config configs/mspa_cifar10_s.yaml
+
+# 训练 ImageNet 32×32
+torchrun --nproc_per_node=2 scripts/train.py --config configs/igpt_imagenet32_s.yaml
+torchrun --nproc_per_node=2 scripts/train.py --config configs/mspa_imagenet32_s.yaml
 
 # 多卡分布式 (按 GPU 数调整 nproc_per_node)
 torchrun --nproc_per_node=2 scripts/train.py --config configs/igpt_cifar10_s.yaml
@@ -91,7 +95,7 @@ python scripts/train.py --config configs/igpt_cifar10_s.yaml
 torchrun --nproc_per_node=2 scripts/train.py --config configs/igpt_cifar10_s.yaml
 
 # MSPA (Phase B)
-torchrun --nproc_per_node=2 scripts/train.py --config configs/mspa_cifar10_baseline.yaml
+torchrun --nproc_per_node=2 scripts/train.py --config configs/mspa_cifar10_s.yaml
 
 # 后台挂起 (断开 SSH 不中断)
 nohup python scripts/train.py --config configs/igpt_cifar10_s.yaml \
@@ -280,7 +284,7 @@ src/mdlic/
 ├── optim/     muon.py (Muon optimizer)
 └── utils/     seed, BPP
 scripts/       train.py, evaluate.py, linear_probe.py, dryrun_forward.py, profile_kernels.py
-configs/       igpt_cifar10_s.yaml, igpt_cifar100_s.yaml, mspa_cifar10_baseline.yaml
+configs/       igpt_cifar10_s, igpt_cifar100_s, igpt_imagenet32_s, mspa_cifar10_s, mspa_imagenet32_s
 tests/         8 个 kernel 单元测试
 demo/
 ├── server.py          FastAPI 后端 (predict, metrics, probe, kernels, scales)

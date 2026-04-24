@@ -388,13 +388,20 @@ def main():
     device = torch.device(f'cuda:{local_rank}' if distributed else 'cuda' if torch.cuda.is_available() else 'cpu')
     writer = SummaryWriter(log_dir=log_dir) if rank == 0 else None
 
-    # Dataset: 根据 config 选择 CIFAR-10 或 CIFAR-100
-    from torchvision.datasets import CIFAR10, CIFAR100
+    # Dataset: 根据 config 选择 CIFAR-10 / CIFAR-100 / ImageNet
+    from torchvision.datasets import CIFAR10, CIFAR100, ImageFolder
     transform = transforms.ToTensor()
     dataset_name = config["data"].get("dataset", "cifar100")
-    DatasetClass = CIFAR10 if dataset_name == "cifar10" else CIFAR100
-    train_dataset = DatasetClass(root=config["data"]["train"], train=True,  download=False, transform=transform)
-    valid_dataset = DatasetClass(root=config["data"]["valid"], train=False, download=False, transform=transform)
+
+    if dataset_name in ("cifar10", "cifar100"):
+        DatasetClass = CIFAR10 if dataset_name == "cifar10" else CIFAR100
+        train_dataset = DatasetClass(root=config["data"]["train"], train=True,  download=False, transform=transform)
+        valid_dataset = DatasetClass(root=config["data"]["valid"], train=False, download=False, transform=transform)
+    elif dataset_name in ("imagenet", "imagenet32"):
+        train_dataset = ImageFolder(root=os.path.join(config["data"]["train"], "train"), transform=transform)
+        valid_dataset = ImageFolder(root=os.path.join(config["data"]["valid"], "val"),   transform=transform)
+    else:
+        raise ValueError(f"未知 dataset: '{dataset_name}'，支持 cifar10/cifar100/imagenet/imagenet32")
     if rank == 0:
         print(f"Dataset: {dataset_name} | Train: {len(train_dataset)} | Valid: {len(valid_dataset)}")
 
