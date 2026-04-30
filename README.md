@@ -8,14 +8,18 @@
 
 ## Baseline 对比
 
-| 方法 | CIFAR-10 bits/dim ↓ | 来源 |
-|------|---------------------|------|
-| PixelCNN++ | 2.92 | Salimans et al., ICLR 2017 |
-| Image Transformer | 2.90 | Parmar et al., ICML 2018 |
-| PixelSNAIL | 2.85 | Chen et al., ICML 2018 |
-| **iGPT-S (Ours)** | **2.97** | SWA, d_model=512, N=24, 200 epochs |
-| PNG (lossless) | ~5.87 | 传统方法 |
-| WebP (lossless) | ~5.02 | 传统方法 |
+| 方法 | Params | CIFAR-10 bits/dim ↓ | 来源 |
+|------|--------|---------------------|------|
+| PixelCNN++ | 52M | 2.92 | Salimans et al., ICLR 2017 |
+| Image Transformer | 95M | 2.90 | Parmar et al., ICML 2018 |
+| PixelSNAIL | 380M | 2.85 | Chen et al., ICML 2018 |
+| **iGPT-S (Ours, best)** | **76.05M** | **2.9792** | d_model=512, N=24, 200 epochs |
+| **iGPT-S (Ours, SWA)** | **76.05M** | **2.9739** | SWA averaged over 21 checkpoints |
+| PNG (lossless) | — | ~5.87 | 传统方法 |
+| WebP (lossless) | — | ~5.02 | 传统方法 |
+
+> iGPT-S 以 76M 参数达到 2.97 bits/dim，接近 PixelCNN++ (52M, 2.92) 水平，
+> 远优于同参数量级的 Image Transformer (95M, 2.90)，且仅为 PixelSNAIL (380M) 参数量的 1/5。
 
 ### 消融实验
 
