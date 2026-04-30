@@ -126,12 +126,10 @@ def extract_features(model, dataloader, layer_indices, device, amp_dtype=None):
         images = images.to(device)
 
         with autocast("cuda", dtype=amp_dtype) if use_amp else nullcontext():
-            # 只跑到 max_layer 且不经过 output head / loss，避免冗余计算
-            layer_outs = model.encode(images, max_layer=max_layer)
+            layer_outs = model.encode(images, max_layer=max_layer, pool=True)
 
         for idx in layer_indices:
-            # GPTBlock 输出 (B, T, d_model) → 全局平均池化 → (B, d_model)
-            all_features[idx].append(layer_outs[idx].float().mean(dim=1).cpu())
+            all_features[idx].append(layer_outs[idx])
         all_labels.append(targets)
 
     features = {idx: torch.cat(all_features[idx], dim=0) for idx in layer_indices}

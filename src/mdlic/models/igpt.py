@@ -285,11 +285,15 @@ class IGPT(nn.Module):
     }
 
   @torch.no_grad()
-  def encode(self, x, max_layer: int = None):
+  def encode(self, x, max_layer: int = None, pool: bool = False):
     """
-    仅走 embed + blocks 到 max_layer，不计算 head / loss，用于 linear probe 等
-    表征提取场景，避免 fused-linear-CE 的额外开销。
-    返回: list[Tensor(B, T, d_model)]，长度为 max_layer+1（含 embedding 前的输出）。
+    仅走 embed + blocks 到 max_layer，不计算 head / loss。
+
+    参数:
+      pool: True 时对每层输出做 GAP 并转 CPU，返回 (B, d_model)，大幅节省显存。
+            False 时返回完整 (B, T, d_model)（兼容旧调用）。
+    返回:
+      list[Tensor]，长度为 max_layer+1。
     """
     x = x.clamp(0, 1)
     B = x.size(0)
@@ -318,7 +322,10 @@ class IGPT(nn.Module):
     outputs = []
     for i, block in enumerate(self.blocks):
       hidden = block(hidden, mask=None, position_ids=position_ids)
-      outputs.append(hidden)
+      if pool:
+        outputs.append(hidden.float().mean(dim=1).cpu())
+      else:
+        outputs.append(hidden)
       if i >= max_layer:
         break
     return outputs
