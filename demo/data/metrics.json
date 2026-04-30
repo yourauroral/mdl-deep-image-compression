@@ -6,7 +6,7 @@
     {"name": "PixelCNN++", "bpp": 2.92, "std": null, "note": "Salimans 2017"},
     {"name": "Image Transformer", "bpp": 2.90, "std": null, "note": "Parmar 2018"},
     {"name": "PixelSNAIL", "bpp": 2.85, "std": null, "note": "Chen 2018"},
-    {"name": "iGPT (Ours)", "bpp": 3.77, "std": 0.02, "note": "Phase A"},
+    {"name": "iGPT-S (Ours)", "bpp": 2.97, "std": 0.07, "note": "SWA, d=512, N=24, 200ep"},
     {"name": "MSPA (Ours)", "bpp": null, "std": null, "note": "Phase B — 训练中"}
   ]
 }

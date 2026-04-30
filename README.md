@@ -13,7 +13,7 @@
 | PixelCNN++ | 2.92 | Salimans et al., ICLR 2017 |
 | Image Transformer | 2.90 | Parmar et al., ICML 2018 |
 | PixelSNAIL | 2.85 | Chen et al., ICML 2018 |
-| **iGPT (Ours)** | **3.77** | — |
+| **iGPT-S (Ours)** | **2.97** | SWA, d_model=512, N=24, 200 epochs |
 | PNG (lossless) | ~5.87 | 传统方法 |
 | WebP (lossless) | ~5.02 | 传统方法 |
 
@@ -21,7 +21,7 @@
 
 | 实验 | 配置 | BPP↓ | ΔBPP |
 |------|------|------|------|
-| E0 | Full Proposed Model | 3.77 | — |
+| E0 | Full Proposed Model (iGPT-S) | 2.97 | — |
 | E1 | w/o YCbCr | TBD | +? |
 | E2 | w/o SwiGLU (ReLU FFN) | TBD | +? |
 | E3 | w/ Sub-pixel AR | TBD | -? |

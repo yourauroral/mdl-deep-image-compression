@@ -23,20 +23,21 @@ def seed_everything(seed: int = 42):
     os.environ["PYTHONHASHSEED"] = str(seed)
 
 
-def compute_bpp(ce_loss: torch.Tensor, channels: int) -> torch.Tensor:
+def compute_bpp(ce_loss: torch.Tensor, channels: int = 3) -> torch.Tensor:
     """
-    从交叉熵损失计算 BPP (Bits Per Pixel)。
+    从交叉熵损失计算 bits/dim (bits per sub-pixel)。
 
-    BPP = CE_loss / ln(2) × C
+    bits/dim = CE_loss / ln(2)
 
     参考:
       [1] Shannon, "A Mathematical Theory of Communication," 1948 —
           最优编码长度 = -log₂ p(x) = -ln p(x) / ln(2)
+      [2] PixelCNN++ (Salimans 2017) — CIFAR-10: 2.92 bits/dim
 
     参数:
       ce_loss: scalar tensor — per-token 交叉熵（nats）
-      channels: int — 通道数（通常 3）
+      channels: int — 保留参数兼容性，不再使用
     返回:
-      scalar tensor — BPP（bits/pixel）
+      scalar tensor — bits/dim
     """
-    return (ce_loss / math.log(2)) * channels
+    return ce_loss / math.log(2)
