@@ -58,13 +58,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from torch.amp import autocast
 from torch.utils.data import DataLoader
 from src.mdlic.models.igpt import IGPT, rgb_to_ycbcr_int
+from src.mdlic.models.igpt_sparse import SparseIGPT
 from src.mdlic.models.mspa import MSPA
 from src.mdlic.utils import compute_bpp
 from scripts.train import _build_model_from_config, _build_mspa_from_config
 
 
 def _build_from_config(mcfg: dict, device):
-    """根据 model.type 分发到 IGPT / MSPA 构建函数。"""
+    """根据 model.type 分发到 IGPT / SparseIGPT / MSPA 构建函数。"""
     model_type = mcfg.get("type", "igpt")
     if model_type == "mspa":
         return _build_mspa_from_config(mcfg, device)
@@ -351,8 +352,16 @@ def evaluate_position_bpp(model, loader, device, amp_dtype=None,
             if use_subpixel_ar and model.use_rope:
                 T_in = tokens.shape[1] - 1
                 position_ids = torch.arange(T_in, device=device) // C
-            for block in model.blocks:
-                hidden = block(hidden, mask=None, position_ids=position_ids)
+            if hasattr(model, '_sparse_local_mask'):
+                for i, block in enumerate(model.blocks):
+                    attn_mask = (model._sparse_local_mask if i % 2 == 0
+                                 else model._sparse_strided_mask)
+                    attn_mask = attn_mask.to(device=hidden.device, dtype=hidden.dtype)
+                    hidden = block(hidden, mask=None, position_ids=position_ids,
+                                   attn_mask=attn_mask)
+            else:
+                for block in model.blocks:
+                    hidden = block(hidden, mask=None, position_ids=position_ids)
             if not model.use_post_norm:
                 hidden = model.final_norm(hidden)
             logits = model.head(hidden).float()

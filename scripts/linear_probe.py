@@ -38,6 +38,7 @@ from torchvision.datasets import CIFAR10, CIFAR100
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from src.mdlic.models.igpt import IGPT
+from src.mdlic.models.igpt_sparse import SparseIGPT
 from src.mdlic.models.mspa import MSPA
 
 
@@ -52,7 +53,7 @@ def load_config(path):
 
 
 def build_model(mcfg, device):
-    """从 config['model'] 构建 IGPT 或 MSPA（复用 train.py 逻辑）。"""
+    """从 config['model'] 构建 IGPT、SparseIGPT 或 MSPA（复用 train.py 逻辑）。"""
     model_type = mcfg.get("type", "igpt")
     common = dict(
         image_size=mcfg["image_size"],
@@ -74,6 +75,12 @@ def build_model(mcfg, device):
     )
     if model_type == "mspa":
         return MSPA(num_scales=mcfg.get("num_scales", 6), **common).to(device)
+    if model_type == "igpt_sparse":
+        return SparseIGPT(
+            use_subpixel_ar=mcfg.get("use_subpixel_ar", False),
+            sparse_stride=mcfg.get("sparse_stride", 128),
+            **common,
+        ).to(device)
     return IGPT(use_subpixel_ar=mcfg.get("use_subpixel_ar", False),
                 **common).to(device)
 

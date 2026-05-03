@@ -25,6 +25,7 @@ import torch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from src.mdlic.models.igpt import IGPT
+from src.mdlic.models.igpt_sparse import SparseIGPT
 from src.mdlic.models.mspa import MSPA
 from scripts.train import _build_model_from_config, _build_mspa_from_config
 from src.mdlic.models.layers import get_fused_kernel_status
@@ -155,6 +156,43 @@ def main():
     enc5 = model5.encode(x, max_layer=1)
     assert enc5[-1].shape == (2, 4094, mcfg["d_model"]), f"MSPA encode shape mismatch: {enc5[-1].shape}"
     print(f"  [mspa.encode] {len(enc5)} layers, last={tuple(enc5[-1].shape)}")
+
+    # ── 6. SparseIGPT 稀疏注意力 ──
+    print("\n=== Test 6: SparseIGPT (Sparse Transformer Attention) ===")
+    model6 = SparseIGPT(
+        image_size=32, in_channels=3, vocab_size=256,
+        d_model=mcfg["d_model"], N=4, h=mcfg["h"], d_ff=mcfg["d_ff"],
+        dropout=0.0, use_subpixel_ar=True,
+        sparse_stride=128,
+    ).to(device)
+    out6 = model6(x)
+    _check_finite(out6, "sparse-igpt")
+
+    # 验证 buffer 形状
+    T = 32 * 32 * 3 - 1  # 3071
+    assert model6._sparse_local_mask.shape == (T, T), \
+        f"local mask shape mismatch: {model6._sparse_local_mask.shape}"
+    assert model6._sparse_strided_mask.shape == (T, T), \
+        f"strided mask shape mismatch: {model6._sparse_strided_mask.shape}"
+    print(f"  [sparse masks] shape=({T},{T}) OK")
+
+    # 验证局部 mask 正确性：token 5 应能看到 token 2（距离3<128），不能看到 token 6（未来）
+    lm = model6._sparse_local_mask
+    assert lm[5, 2].item() == 0.0,        "local mask[5,2] 应为 0.0（允许）"
+    assert lm[5, 6].item() == float('-inf'), "local mask[5,6] 应为 -inf（未来）"
+    # 验证步幅 mask：token 256 应能看到 token 128（距离=128，整除），不能看到 token 127
+    sm = model6._sparse_strided_mask
+    assert sm[256, 128].item() == 0.0,      "strided mask[256,128] 应为 0.0（允许）"
+    assert sm[256, 127].item() == float('-inf'), "strided mask[256,127] 应为 -inf（不整除）"
+    print("  [mask correctness] local + strided pattern OK")
+
+    out6["loss"].backward()
+    grad_ok6 = all(p.grad is not None for p in model6.parameters() if p.requires_grad)
+    assert grad_ok6, "SparseIGPT: some params missing gradients"
+    grad_finite6 = all(torch.isfinite(p.grad).all().item()
+                       for p in model6.parameters() if p.grad is not None)
+    assert grad_finite6, "SparseIGPT: some gradients contain NaN/Inf"
+    print("  [backward] all grads computed and finite: OK")
 
     print("\nAll checks passed!")
 

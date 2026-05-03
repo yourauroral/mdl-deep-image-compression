@@ -18,9 +18,6 @@
 | PNG (lossless) | — | ~5.87 | 传统方法 |
 | WebP (lossless) | — | ~5.02 | 传统方法 |
 
-> iGPT-S 以 76M 参数达到 2.97 bits/dim，接近 PixelCNN++ (52M, 2.92) 水平，
-> 远优于同参数量级的 Image Transformer (95M, 2.90)，且仅为 PixelSNAIL (380M) 参数量的 1/5。
-
 ### 消融实验
 
 | 实验 | 配置 | BPP↓ | ΔBPP |

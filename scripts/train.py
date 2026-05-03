@@ -32,6 +32,7 @@ from torchvision import transforms
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from src.mdlic.models.igpt import IGPT
+from src.mdlic.models.igpt_sparse import SparseIGPT
 from src.mdlic.models.mspa import MSPA
 from src.mdlic.models.layers import get_fused_kernel_status
 from src.mdlic.utils import seed_everything, compute_bpp
@@ -56,7 +57,7 @@ def _validate_config(config: dict):
     mcfg = config['model']
     model_type = mcfg.get('type', 'igpt')
 
-    if model_type in ('igpt', 'mspa'):
+    if model_type in ('igpt', 'igpt_sparse', 'mspa'):
         required_model = ['image_size', 'in_channels', 'vocab_size', 'd_model', 'N', 'h', 'd_ff', 'dropout']
         for key in required_model:
             assert key in mcfg, f"Config model 缺少必填字段: 'model.{key}'"
@@ -71,7 +72,7 @@ def _validate_config(config: dict):
         assert 0.0 <= mcfg['dropout'] < 1.0, f"model.dropout 必须在 [0, 1)，got {mcfg['dropout']}"
         assert mcfg['vocab_size'] > 0, f"model.vocab_size 必须 > 0，got {mcfg['vocab_size']}"
     else:
-        raise ValueError(f"未知 model.type: '{model_type}'，支持 igpt/mspa")
+        raise ValueError(f"未知 model.type: '{model_type}'，支持 igpt/igpt_sparse/mspa")
 
     # ── train 字段 ──
     tcfg = config['train']
@@ -89,15 +90,16 @@ def _validate_config(config: dict):
         f"train.lr_schedule 必须是 cosine/wsd/multistep，got '{lr_schedule}'"
     )
 
-    # 以下校验仅适用于自回归模型 (iGPT / MSPA)
-    if model_type in ('igpt', 'mspa'):
+    # 以下校验仅适用于自回归模型 (iGPT / SparseIGPT / MSPA)
+    if model_type in ('igpt', 'igpt_sparse', 'mspa'):
         z_w = float(tcfg.get('z_loss_weight', 1e-4))
         assert z_w >= 0, f"train.z_loss_weight 必须 >= 0，got {z_w}"
 
 
-def _build_model_from_config(mcfg: dict, device) -> IGPT:
-    """从 config['model'] 构建 IGPT 模型（统一 train.py 和 dryrun_forward.py）。"""
-    return IGPT(
+def _build_model_from_config(mcfg: dict, device):
+    """从 config['model'] 构建 IGPT 或 SparseIGPT 模型（统一 train.py 和 dryrun_forward.py）。"""
+    model_type = mcfg.get("type", "igpt")
+    common_kwargs = dict(
         image_size=mcfg["image_size"],
         in_channels=mcfg["in_channels"],
         vocab_size=mcfg["vocab_size"],
@@ -115,7 +117,13 @@ def _build_model_from_config(mcfg: dict, device) -> IGPT:
         use_zloss=mcfg.get("use_zloss", True),
         activation_checkpointing=mcfg.get("activation_checkpointing", False),
         use_subpixel_ar=mcfg.get("use_subpixel_ar", False),
-    ).to(device)
+    )
+    if model_type == "igpt_sparse":
+        return SparseIGPT(
+            **common_kwargs,
+            sparse_stride=mcfg.get("sparse_stride", 128),
+        ).to(device)
+    return IGPT(**common_kwargs).to(device)
 
 
 def _build_mspa_from_config(mcfg: dict, device) -> MSPA:
@@ -187,7 +195,7 @@ def train_one_epoch(model, loader, optimizer, scaler, device,
                     epoch, log_freq, writer, clip_max_norm,
                     amp_dtype=torch.float16, grad_accum_steps=1,
                     z_loss_weight=1e-4,
-                    distributed=False, optimizers=None):
+                    distributed=False, optimizers=None, rank=0):
     """
     optimizers: Muon 模式下传入 [muon_opt, adamw_opt] 列表，
                 非 Muon 模式下为 None（仅使用 optimizer 参数）。
@@ -281,7 +289,8 @@ def train_one_epoch(model, loader, optimizer, scaler, device,
             if not math.isfinite(loss_val):
                 print(f"WARNING: loss is {loss_val} at epoch {epoch} step {i+1}/{steps}. "
                       f"LR={optimizer.param_groups[0]['lr']:.2e}. Training may diverge.")
-            print(f"Epoch {epoch} Step {i+1}/{steps} | Loss: {loss_val:.4f} | BPP: {bpp_val:.4f}")
+            if rank == 0:
+                print(f"Epoch {epoch} Step {i+1}/{steps} | Loss: {loss_val:.4f} | BPP: {bpp_val:.4f}")
             if writer:
                 step = epoch * steps + i
                 writer.add_scalar('train/loss', loss_val, step)
@@ -621,9 +630,18 @@ def main():
             missing = model_keys - ckpt_keys
             unexpected = ckpt_keys - model_keys
             if missing or unexpected:
+                critical_keys = {k for k in model_keys
+                                 if 'token_embed' in k or 'blocks.' in k or 'head.' in k}
+                critical_missing = missing & critical_keys
+                if critical_missing:
+                    raise RuntimeError(
+                        f"Checkpoint 缺少 {len(critical_missing)} 个关键参数: "
+                        f"{list(critical_missing)[:10]}。"
+                        "请确认 --resume 指向与当前 config 兼容的 checkpoint。"
+                    )
                 if rank == 0:
                     if missing:
-                        print(f"WARNING: checkpoint 缺少 {len(missing)} 个参数: {list(missing)[:5]}...")
+                        print(f"WARNING: checkpoint 缺少 {len(missing)} 个非关键参数: {list(missing)[:5]}...")
                     if unexpected:
                         print(f"WARNING: checkpoint 多余 {len(unexpected)} 个参数: {list(unexpected)[:5]}...")
                     print("尝试 non-strict 加载（missing 参数保持随机初始化）...")
@@ -644,8 +662,24 @@ def main():
             if swa_enabled and 'swa_state' in ckpt:
                 swa_state = ckpt['swa_state']
                 swa_n = ckpt.get('swa_n', 0)
+            # resume 后用 config 中的 lr 覆盖 checkpoint 里的旧值，
+            # 使得修改 yaml lr 后 resume 能立即生效
+            for pg in optimizer.param_groups:
+                pg['lr'] = base_lr
+                pg['initial_lr'] = base_lr
+            if optimizers:
+                for opt in optimizers:
+                    for pg in opt.param_groups:
+                        if 'initial_lr' in pg:
+                            pg['initial_lr'] = pg['lr']
+            if scheduler is not None:
+                scheduler.base_lrs = [base_lr] * len(scheduler.base_lrs)
+                scheduler.last_epoch = start_epoch - 1
+                scheduler.step()
+
             if rank == 0:
                 print(f"Resumed from checkpoint '{args.resume}' (epoch {ckpt.get('epoch', '?')}, best_bpp={best_bpp:.4f})")
+                print(f"  LR overridden to config value: {base_lr:.2e} (schedule continues from epoch {start_epoch})")
 
     for epoch in range(start_epoch, config['train']['epochs'] + 1):
         if distributed:
@@ -664,6 +698,7 @@ def main():
             z_loss_weight=float(config["train"].get("z_loss_weight", 1e-4)),
             distributed=distributed,
             optimizers=optimizers,
+            rank=rank,
         )
 
         if rank == 0:
