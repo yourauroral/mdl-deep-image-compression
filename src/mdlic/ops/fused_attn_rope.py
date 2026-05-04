@@ -55,7 +55,7 @@ def fused_attn_rope(q, k, v, cos, sin, causal=True, softmax_scale=None):
     if softmax_scale is None:
         softmax_scale = 1.0 / math.sqrt(q.shape[-1])
 
-    # 就地 RoPE
+    # RoPE（autograd-aware，out-of-place）
     q, k = fused_apply_rotary_emb(q, k, cos, sin)
     # Flash Attention
     o = TritonAttention.apply(q, k, v, causal, softmax_scale)

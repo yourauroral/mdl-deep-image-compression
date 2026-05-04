@@ -217,40 +217,41 @@ class FusedCrossEntropyZLossFunction(torch.autograd.Function):
         V = ctx.V
         BLOCK_V = ctx.BLOCK_V
 
-        # 分配 d_logits
-        d_logits = torch.empty_like(logits)
-
         # 梯度推导:
-        # forward 返回 (ce, z)，外部做 loss = f(ce, z)
-        # autograd 传入 grad_ce = ∂loss/∂ce, grad_zloss = ∂loss/∂z
-        # 需要: d_logits = grad_ce * ∂ce/∂x + grad_zloss * ∂z/∂x
-        #      = grad_ce * (softmax - indicator)/M + grad_zloss * 2*lse*softmax/M
-        #      = [(grad_ce + 2*grad_zloss*lse) * softmax - grad_ce*indicator] / M
-        # 这等价于 kernel 中用 effective_w = grad_zloss / grad_ce（当 grad_ce≠0）
-        # 然后整体乘 grad_ce。
-        # kernel 计算: inv_M * [(1 + 2*w*lse)*softmax - indicator]
-        # 令 w = grad_zloss / grad_ce，然后乘 grad_ce 即可。
+        # forward 返回 (ce, z)，外部 loss = α·ce + β·z
+        # d_logits = grad_ce * (softmax - indicator)/M + grad_zloss * 2*lse*softmax/M
+        # 完整形式:
+        #   d_logits = inv_M * [grad_ce*(softmax - indicator) + 2*grad_zloss*lse*softmax]
         grad_ce_val = grad_ce.item()
         grad_zloss_val = grad_zloss.item()
-        # 除零保护：当 grad_ce ≈ 0 时（如 loss 被 detach 或 stop_gradient），
-        # effective_w 无定义，此时 z_loss 梯度贡献也趋于零，安全跳过。
-        if abs(grad_ce_val) > 1e-12:
-            effective_w = grad_zloss_val / grad_ce_val
-        else:
-            effective_w = 0.0
         inv_M = 1.0 / M
 
-        _fused_ce_zloss_bwd_kernel[(M,)](
-            logits, targets, d_logits,
-            stride_logits=logits.stride(0),
-            stride_dlogits=d_logits.stride(0),
-            z_loss_weight=effective_w,
-            M=M, V=V,
-            inv_M=inv_M,
-            BLOCK_V=BLOCK_V,
-        )
-
-        d_logits = d_logits * grad_ce_val
+        # 快速路径: grad_ce 显著非零时（即标准 loss = ce + w·z 反传），
+        # kernel 用 effective_w 一次算出，然后整体乘 grad_ce。
+        # d = grad_ce * inv_M * [(1 + 2*(grad_zloss/grad_ce)*lse)*softmax - indicator]
+        #   = inv_M * [grad_ce*(softmax - indicator) + 2*grad_zloss*lse*softmax]   ✓
+        if abs(grad_ce_val) > 1e-12:
+            effective_w = grad_zloss_val / grad_ce_val
+            d_logits = torch.empty_like(logits)
+            _fused_ce_zloss_bwd_kernel[(M,)](
+                logits, targets, d_logits,
+                stride_logits=logits.stride(0),
+                stride_dlogits=d_logits.stride(0),
+                z_loss_weight=effective_w,
+                M=M, V=V,
+                inv_M=inv_M,
+                BLOCK_V=BLOCK_V,
+            )
+            d_logits = d_logits * grad_ce_val
+        else:
+            # 慢速路径: grad_ce ≈ 0（仅 z_loss 反传，如 ablation 调试场景）。
+            # 用 PyTorch 计算 d_logits = inv_M * 2 * grad_zloss * lse * softmax。
+            # 不调 kernel（kernel 把 z_loss 项耦合进了 effective_w，无法独立提取）。
+            x = logits.float()
+            lse = torch.logsumexp(x, dim=-1, keepdim=True)        # (M, 1)
+            softmax = torch.exp(x - lse)                          # (M, V)
+            d_logits = (inv_M * 2.0 * grad_zloss_val) * lse * softmax
+            d_logits = d_logits.to(logits.dtype)
 
         return d_logits, None, None  # None for targets, z_loss_weight
 

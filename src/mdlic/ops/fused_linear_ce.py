@@ -313,47 +313,56 @@ class FusedLinearCrossEntropyFunction(torch.autograd.Function):
 
         grad_ce_val = grad_ce.item()
         grad_zloss_val = grad_zloss.item()
+        inv_M = 1.0 / M
 
+        # 完整梯度: d_logits = inv_M * [grad_ce*(softmax - indicator) + 2*grad_zloss*lse*softmax]
+        # 快速路径（grad_ce ≠ 0）: kernel 用 effective_w 一次算完，外部乘 grad_ce
+        # 慢速路径（grad_ce ≈ 0）: 仅 z_loss 贡献，PyTorch 直算
         if abs(grad_ce_val) > 1e-12:
             effective_w = grad_zloss_val / grad_ce_val
+            d_hidden = torch.empty_like(hidden)
+
+            _fused_linear_ce_bwd_kernel[(M,)](
+                hidden.contiguous(), weight.contiguous(),
+                targets.contiguous(),
+                d_hidden,
+                None,
+                stride_hidden=hidden.stride(0),
+                stride_weight=weight.stride(0),
+                stride_dhidden=d_hidden.stride(0),
+                z_loss_weight=effective_w,
+                inv_M=inv_M,
+                M=M, D=D, V=V,
+                BLOCK_V=BLOCK_V,
+                BLOCK_D=BLOCK_D,
+            )
+            d_hidden = d_hidden * grad_ce_val
+
+            # d_W: 必须显式累加 head 投影 logits=hidden @ W^T 的梯度贡献。
+            # 仅依赖 weight-tying 经 token_embed 查表的梯度会遗漏 head 路径，导致
+            # 输出头权重欠训练。此处用 PyTorch 重算 softmax 再做一次 matmul —
+            # 与 Triton 反向相比多一次 (M,V) 矩阵，但在 V=256 时显存充裕。
+            d_weight = None
+            if ctx.weight_requires_grad:
+                logits = hidden.float() @ weight.float().t()
+                log_z = torch.logsumexp(logits, dim=-1, keepdim=True)
+                softmax = torch.exp(logits - log_z)
+                indicator = torch.zeros_like(softmax)
+                indicator.scatter_(1, targets.unsqueeze(1), 1.0)
+                scale = 1.0 + 2.0 * effective_w * log_z
+                d_logits = inv_M * grad_ce_val * (scale * softmax - indicator)
+                d_weight = d_logits.t() @ hidden.float()
+                d_weight = d_weight.to(weight.dtype)
         else:
-            effective_w = 0.0
-
-        inv_M = 1.0 / M
-        d_hidden = torch.empty_like(hidden)
-
-        _fused_linear_ce_bwd_kernel[(M,)](
-            hidden.contiguous(), weight.contiguous(),
-            targets.contiguous(),
-            d_hidden,
-            None,
-            stride_hidden=hidden.stride(0),
-            stride_weight=weight.stride(0),
-            stride_dhidden=d_hidden.stride(0),
-            z_loss_weight=effective_w,
-            inv_M=inv_M,
-            M=M, D=D, V=V,
-            BLOCK_V=BLOCK_V,
-            BLOCK_D=BLOCK_D,
-        )
-
-        d_hidden = d_hidden * grad_ce_val
-
-        # d_W: 必须显式累加 head 投影 logits=hidden @ W^T 的梯度贡献。
-        # 仅依赖 weight-tying 经 token_embed 查表的梯度会遗漏 head 路径，导致
-        # 输出头权重欠训练。此处用 PyTorch 重算 softmax 再做一次 matmul —
-        # 与 Triton 反向相比多一次 (M,V) 矩阵，但在 V=256 时显存充裕。
-        d_weight = None
-        if ctx.weight_requires_grad:
+            # 仅 z_loss 反传场景（少见，多见于 ablation）
             logits = hidden.float() @ weight.float().t()
             log_z = torch.logsumexp(logits, dim=-1, keepdim=True)
             softmax = torch.exp(logits - log_z)
-            indicator = torch.zeros_like(softmax)
-            indicator.scatter_(1, targets.unsqueeze(1), 1.0)
-            scale = 1.0 + 2.0 * effective_w * log_z
-            d_logits = inv_M * grad_ce_val * (scale * softmax - indicator)
-            d_weight = d_logits.t() @ hidden.float()
-            d_weight = d_weight.to(weight.dtype)
+            d_logits = (inv_M * 2.0 * grad_zloss_val) * log_z * softmax
+            d_hidden = (d_logits @ weight.float()).to(hidden.dtype)
+            d_weight = None
+            if ctx.weight_requires_grad:
+                d_weight = (d_logits.t() @ hidden.float()).to(weight.dtype)
 
         return d_hidden, d_weight, None, None
 

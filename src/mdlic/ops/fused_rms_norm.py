@@ -211,7 +211,7 @@ class FusedRMSNormFunction(torch.autograd.Function):
 
 
 # ─── 便捷函数 ────────────────────────────────────────────────────
-def fused_rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float = 1e-10):
+def fused_rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6):
     """函数式接口，直接调用 FusedRMSNormFunction。"""
     return FusedRMSNormFunction.apply(x, weight, eps)
 

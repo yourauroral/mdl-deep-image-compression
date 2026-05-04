@@ -243,8 +243,10 @@ class IGPT(nn.Module):
 
     # Fused Linear + CE + z-loss: 将 output head 投影和 CE loss 合并，
     # 避免实例化完整 (B*T, V) logits 张量。
+    # 小 vocab (V < 1024) 下 kernel 三层嵌套循环开销 >> fusion 收益，自动禁用。
     # Ref: Liger-Kernel arXiv:2410.10989（手写 Fused Linear CE pattern）
-    if _USE_FUSED_LINEAR_CE and hidden.is_cuda and z_w > 0:
+    _use_fused_linear = _USE_FUSED_LINEAR_CE and self.vocab_size >= 1024
+    if _use_fused_linear and hidden.is_cuda and z_w > 0:
         ce_loss, z_loss = _fused_linear_ce(
             hidden.reshape(-1, self.d_model),
             self.head.weight,

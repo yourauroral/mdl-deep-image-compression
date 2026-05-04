@@ -2,28 +2,33 @@
 公共工具函数 — 被 train.py、evaluate.py、dryrun_forward.py 等多处复用。
 """
 
-import os
 import math
 import random
 import torch
 import numpy as np
 
 
-def seed_everything(seed: int = 42):
+def seed_everything(seed: int = 42, deterministic: bool = False):
     """
     统一设置所有随机种子，确保实验可复现。
 
     参考:
       [1] PyTorch Reproducibility 文档 — "Controlling sources of randomness"
+
+    参数:
+      seed: 随机种子
+      deterministic: True 时启用 cudnn 确定性（性能下降，但完全可复现）
     """
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-    os.environ["PYTHONHASHSEED"] = str(seed)
+    if deterministic:
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
 
 
-def compute_bpp(ce_loss: torch.Tensor, channels: int = 3) -> torch.Tensor:
+def compute_bpp(ce_loss: torch.Tensor) -> torch.Tensor:
     """
     从交叉熵损失计算 bits/dim (bits per sub-pixel)。
 
@@ -33,11 +38,5 @@ def compute_bpp(ce_loss: torch.Tensor, channels: int = 3) -> torch.Tensor:
       [1] Shannon, "A Mathematical Theory of Communication," 1948 —
           最优编码长度 = -log₂ p(x) = -ln p(x) / ln(2)
       [2] PixelCNN++ (Salimans 2017) — CIFAR-10: 2.92 bits/dim
-
-    参数:
-      ce_loss: scalar tensor — per-token 交叉熵（nats）
-      channels: int — 保留参数兼容性，不再使用
-    返回:
-      scalar tensor — bits/dim
     """
     return ce_loss / math.log(2)

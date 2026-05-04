@@ -177,7 +177,7 @@ class RMSNorm(nn.Module):
   当 Triton 可用且输入在 CUDA 上时，自动委托给 fused_rms_norm 函数
   （forward + backward 合并为单次 kernel launch），否则使用 PyTorch 实现。
   """
-  def __init__(self, features: int, eps: float = 1e-10):
+  def __init__(self, features: int, eps: float = 1e-6):
     super().__init__()
     self.eps = eps
     self.weight = nn.Parameter(torch.ones(features))

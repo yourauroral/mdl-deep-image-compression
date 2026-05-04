@@ -44,6 +44,7 @@ Usage:
 import os
 import sys
 import io
+import re
 import argparse
 import yaml
 import math
@@ -58,14 +59,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from torch.amp import autocast
 from torch.utils.data import DataLoader
 from src.mdlic.models.igpt import IGPT, rgb_to_ycbcr_int
-from src.mdlic.models.igpt_sparse import SparseIGPT
 from src.mdlic.models.mspa import MSPA
 from src.mdlic.utils import compute_bpp
 from scripts.train import _build_model_from_config, _build_mspa_from_config
 
 
 def _build_from_config(mcfg: dict, device):
-    """根据 model.type 分发到 IGPT / SparseIGPT / MSPA 构建函数。"""
+    """根据 model.type 分发到 IGPT / MSPA 构建函数。"""
     model_type = mcfg.get("type", "igpt")
     if model_type == "mspa":
         return _build_mspa_from_config(mcfg, device)
@@ -113,7 +113,11 @@ def evaluate_model(model, loader, device, amp_dtype=None):
       bpp_list: list[float] — 每个 batch 的 BPP
     """
     model.eval()
-    bpp_list = []
+    # weighted mean: 累加 bpp * batch_size，除以总样本数。
+    # 避免最后一批样本不满 batch 时的偏差。
+    bpp_per_batch = []
+    bpp_weighted_sum = 0.0
+    n_total = 0
     use_amp = amp_dtype is not None and device.type == 'cuda'
 
     for batch in loader:
@@ -122,7 +126,7 @@ def evaluate_model(model, loader, device, amp_dtype=None):
         else:
             x = batch
         x = x.to(device)
-        _, C, _, _ = x.shape
+        B, C, _, _ = x.shape
 
         with autocast(device_type="cuda", dtype=amp_dtype) if use_amp else nullcontext():
             out = model(x)
@@ -132,12 +136,15 @@ def evaluate_model(model, loader, device, amp_dtype=None):
         if "bpp" in out and out["bpp"] is not None:
             bpp = out["bpp"]
         else:
-            bpp = compute_bpp(out["ce_loss"], C)
-        bpp_list.append(bpp.item())
+            bpp = compute_bpp(out["ce_loss"])
+        bpp_val = bpp.item()
+        bpp_per_batch.append(bpp_val)
+        bpp_weighted_sum += bpp_val * B
+        n_total += B
 
-    bpp_mean = float(np.mean(bpp_list))
-    bpp_std = float(np.std(bpp_list))
-    return bpp_mean, bpp_std, bpp_list
+    bpp_mean = bpp_weighted_sum / n_total
+    bpp_std = float(np.std(bpp_per_batch))
+    return bpp_mean, bpp_std, bpp_per_batch
 
 
 @torch.no_grad()
@@ -265,9 +272,14 @@ def evaluate_per_channel(model, loader, device, amp_dtype=None,
             bpp_std = ce_std / math.log(2)
             channel_bpps[ch_name] = (bpp_mean, bpp_std)
 
-    # 总 BPP = 三通道 BPP 之和
-    total_mean = sum(v[0] for v in channel_bpps.values())
-    total_std = math.sqrt(sum(v[1]**2 for v in channel_bpps.values()))
+    # 总 BPP = 三通道 BPP 的平均（保持 bits/dim 单位与主流程一致）。
+    # 三通道 token 数相等，sum/C 就是 token-level mean 的恢复。
+    n_channels = len(channel_bpps)
+    if n_channels > 0:
+        total_mean = sum(v[0] for v in channel_bpps.values()) / n_channels
+        total_std = math.sqrt(sum(v[1]**2 for v in channel_bpps.values())) / n_channels
+    else:
+        total_mean, total_std = 0.0, 0.0
 
     return channel_bpps, (total_mean, total_std)
 
@@ -352,16 +364,8 @@ def evaluate_position_bpp(model, loader, device, amp_dtype=None,
             if use_subpixel_ar and model.use_rope:
                 T_in = tokens.shape[1] - 1
                 position_ids = torch.arange(T_in, device=device) // C
-            if hasattr(model, '_sparse_local_mask'):
-                for i, block in enumerate(model.blocks):
-                    attn_mask = (model._sparse_local_mask if i % 2 == 0
-                                 else model._sparse_strided_mask)
-                    attn_mask = attn_mask.to(device=hidden.device, dtype=hidden.dtype)
-                    hidden = block(hidden, mask=None, position_ids=position_ids,
-                                   attn_mask=attn_mask)
-            else:
-                for block in model.blocks:
-                    hidden = block(hidden, mask=None, position_ids=position_ids)
+            for block in model.blocks:
+                hidden = block(hidden, mask=None, position_ids=position_ids)
             if not model.use_post_norm:
                 hidden = model.final_norm(hidden)
             logits = model.head(hidden).float()
@@ -411,6 +415,8 @@ def evaluate_position_bpp(model, loader, device, amp_dtype=None,
         position_bpp_chw = position_bpp_full.reshape(C, H, W)
 
     # 总 BPP 热力图: 对 C 通道求和 → (H, W)
+    # 注意: heatmap 单位是 bits/pixel（每像素 C=3 个 token CE 之和），
+    # 与主流程 evaluate_model 返回的 bits/dim 单位不同（差 C 倍）。
     heatmap = position_bpp_chw.sum(axis=0)
 
     # 每通道热力图
@@ -772,8 +778,11 @@ def cmd_ablation(args, config, device):
             if not os.path.isfile(ckpt_path):
                 continue
 
-            # 从目录名推断实验编号 (E0_full → E0)
+            # 从目录名推断实验编号 (E0_full → E0)；只接受 ABLATION_CONFIGS 中已知的 ID，
+            # 避免将随机命名的目录误判为消融实验
             exp_id = exp_name.split("_")[0].upper()
+            if not re.fullmatch(r"E\d+", exp_id) or exp_id not in ABLATION_CONFIGS:
+                continue
             ablation_overrides = ABLATION_CONFIGS.get(exp_id, {})
 
             # 构建模型配置（应用消融覆盖）

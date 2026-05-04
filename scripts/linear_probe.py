@@ -38,7 +38,6 @@ from torchvision.datasets import CIFAR10, CIFAR100
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from src.mdlic.models.igpt import IGPT
-from src.mdlic.models.igpt_sparse import SparseIGPT
 from src.mdlic.models.mspa import MSPA
 
 
@@ -53,7 +52,7 @@ def load_config(path):
 
 
 def build_model(mcfg, device):
-    """从 config['model'] 构建 IGPT、SparseIGPT 或 MSPA（复用 train.py 逻辑）。"""
+    """从 config['model'] 构建 IGPT 或 MSPA（复用 train.py 逻辑）。"""
     model_type = mcfg.get("type", "igpt")
     common = dict(
         image_size=mcfg["image_size"],
@@ -75,12 +74,6 @@ def build_model(mcfg, device):
     )
     if model_type == "mspa":
         return MSPA(num_scales=mcfg.get("num_scales", 6), **common).to(device)
-    if model_type == "igpt_sparse":
-        return SparseIGPT(
-            use_subpixel_ar=mcfg.get("use_subpixel_ar", False),
-            sparse_stride=mcfg.get("sparse_stride", 128),
-            **common,
-        ).to(device)
     return IGPT(use_subpixel_ar=mcfg.get("use_subpixel_ar", False),
                 **common).to(device)
 
@@ -167,7 +160,7 @@ def train_linear_probe(train_features, train_labels, test_features, test_labels,
       test_labels:    (N_test,) long
 
     返回:
-      best_acc: float — 最佳测试准确率 (%)
+      final_acc: float — 训练结束时的测试准确率 (%)（避免按 epoch 选 max 造成 test-set peeking）
     """
     # 特征标准化 (zero mean, unit variance)
     mean = train_features.mean(dim=0)
@@ -186,7 +179,6 @@ def train_linear_probe(train_features, train_labels, test_features, test_labels,
     optimizer = torch.optim.SGD(classifier.parameters(), lr=lr, momentum=0.9)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
 
-    best_acc = 0.0
     test_x = test_features.to(device)
     test_y = test_labels.to(device)
 
@@ -205,17 +197,14 @@ def train_linear_probe(train_features, train_labels, test_features, test_labels,
 
         scheduler.step()
 
-        # 测试准确率
-        classifier.eval()
-        with torch.no_grad():
-            logits = classifier(test_x)
-            preds = logits.argmax(dim=1)
-            acc = (preds == test_y).float().mean().item() * 100
+    # 训练完成后报告 final test accuracy，而非每 epoch max（后者等价于在 test 集做模型选择）
+    classifier.eval()
+    with torch.no_grad():
+        logits = classifier(test_x)
+        preds = logits.argmax(dim=1)
+        final_acc = (preds == test_y).float().mean().item() * 100
 
-        if acc > best_acc:
-            best_acc = acc
-
-    return best_acc
+    return final_acc
 
 
 # ──────────────────────────────────────────────────────────────

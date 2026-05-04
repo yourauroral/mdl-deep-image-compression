@@ -266,7 +266,9 @@ class MSPA(nn.Module):
 
     z_w = z_loss_weight if self.use_zloss else 0.0
 
-    if _USE_FUSED_LINEAR_CE and hidden.is_cuda and z_w > 0:
+    # 小 vocab (V < 1024) 下 fused_linear_ce 三层嵌套循环开销远大于 fusion 收益
+    _use_fused_linear = _USE_FUSED_LINEAR_CE and self.vocab_size >= 1024
+    if _use_fused_linear and hidden.is_cuda and z_w > 0:
         ce_loss, z_loss = _fused_linear_ce(
             hidden.reshape(-1, self.d_model),
             self.head.weight,

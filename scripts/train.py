@@ -32,7 +32,6 @@ from torchvision import transforms
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from src.mdlic.models.igpt import IGPT
-from src.mdlic.models.igpt_sparse import SparseIGPT
 from src.mdlic.models.mspa import MSPA
 from src.mdlic.models.layers import get_fused_kernel_status
 from src.mdlic.utils import seed_everything, compute_bpp
@@ -57,7 +56,7 @@ def _validate_config(config: dict):
     mcfg = config['model']
     model_type = mcfg.get('type', 'igpt')
 
-    if model_type in ('igpt', 'igpt_sparse', 'mspa'):
+    if model_type in ('igpt', 'mspa'):
         required_model = ['image_size', 'in_channels', 'vocab_size', 'd_model', 'N', 'h', 'd_ff', 'dropout']
         for key in required_model:
             assert key in mcfg, f"Config model 缺少必填字段: 'model.{key}'"
@@ -72,7 +71,7 @@ def _validate_config(config: dict):
         assert 0.0 <= mcfg['dropout'] < 1.0, f"model.dropout 必须在 [0, 1)，got {mcfg['dropout']}"
         assert mcfg['vocab_size'] > 0, f"model.vocab_size 必须 > 0，got {mcfg['vocab_size']}"
     else:
-        raise ValueError(f"未知 model.type: '{model_type}'，支持 igpt/igpt_sparse/mspa")
+        raise ValueError(f"未知 model.type: '{model_type}'，支持 igpt/mspa")
 
     # ── train 字段 ──
     tcfg = config['train']
@@ -90,16 +89,15 @@ def _validate_config(config: dict):
         f"train.lr_schedule 必须是 cosine/wsd/multistep，got '{lr_schedule}'"
     )
 
-    # 以下校验仅适用于自回归模型 (iGPT / SparseIGPT / MSPA)
-    if model_type in ('igpt', 'igpt_sparse', 'mspa'):
+    # 以下校验仅适用于自回归模型 (iGPT / MSPA)
+    if model_type in ('igpt', 'mspa'):
         z_w = float(tcfg.get('z_loss_weight', 1e-4))
         assert z_w >= 0, f"train.z_loss_weight 必须 >= 0，got {z_w}"
 
 
-def _build_model_from_config(mcfg: dict, device):
-    """从 config['model'] 构建 IGPT 或 SparseIGPT 模型（统一 train.py 和 dryrun_forward.py）。"""
-    model_type = mcfg.get("type", "igpt")
-    common_kwargs = dict(
+def _build_model_from_config(mcfg: dict, device) -> IGPT:
+    """从 config['model'] 构建 IGPT 模型（统一 train.py 和 dryrun_forward.py）。"""
+    return IGPT(
         image_size=mcfg["image_size"],
         in_channels=mcfg["in_channels"],
         vocab_size=mcfg["vocab_size"],
@@ -117,13 +115,7 @@ def _build_model_from_config(mcfg: dict, device):
         use_zloss=mcfg.get("use_zloss", True),
         activation_checkpointing=mcfg.get("activation_checkpointing", False),
         use_subpixel_ar=mcfg.get("use_subpixel_ar", False),
-    )
-    if model_type == "igpt_sparse":
-        return SparseIGPT(
-            **common_kwargs,
-            sparse_stride=mcfg.get("sparse_stride", 128),
-        ).to(device)
-    return IGPT(**common_kwargs).to(device)
+    ).to(device)
 
 
 def _build_mspa_from_config(mcfg: dict, device) -> MSPA:
@@ -245,7 +237,7 @@ def train_one_epoch(model, loader, optimizer, scaler, device,
                 if "bpp" in out and out["bpp"] is not None:
                     bpp = out["bpp"]
                 else:
-                    bpp = compute_bpp(ce_loss, C)
+                    bpp = compute_bpp(ce_loss)
             loss_scaled = loss / grad_accum_steps
             if scaler is not None:
                 scaler.scale(loss_scaled).backward()
@@ -286,7 +278,7 @@ def train_one_epoch(model, loader, optimizer, scaler, device,
         if (i + 1) % log_freq == 0:
             loss_val = loss.item()
             bpp_val  = bpp.item()
-            if not math.isfinite(loss_val):
+            if not math.isfinite(loss_val) and rank == 0:
                 print(f"WARNING: loss is {loss_val} at epoch {epoch} step {i+1}/{steps}. "
                       f"LR={optimizer.param_groups[0]['lr']:.2e}. Training may diverge.")
             if rank == 0:
@@ -308,8 +300,13 @@ def validate(model, loader, device, amp_dtype=None):
                减少显存占用和加速。None 则使用 fp32。
     """
     model.eval()
-    bpp_list = []
-    total_loss = 0
+    # 加权平均：累加 per-batch (sum_loss, sum_bpp, batch_size)，
+    # 最后除以总样本数。避免 unweighted batch mean 在最后一批不满 batch_size
+    # 时产生偏差（CIFAR-10 测试 10000 / batch=64，最后一批 16，偏差 ~0.5%）。
+    total_bpp_weighted = 0.0
+    total_loss_weighted = 0.0
+    bpp_per_batch = []   # 仅用于估算 std（粗略）
+    n_total = 0
     use_amp = amp_dtype is not None and device.type == 'cuda'
     for batch in loader:
         if isinstance(batch, (list, tuple)):
@@ -317,7 +314,7 @@ def validate(model, loader, device, amp_dtype=None):
         else:
             x = batch
         x = x.to(device)
-        _, C, _, _ = x.shape
+        B, C, _, _ = x.shape
         # 验证时也使用 AMP，与训练保持一致的数值精度，同时节省显存
         with autocast(device_type="cuda", dtype=amp_dtype) if use_amp else nullcontext():
             out = model(x)
@@ -327,12 +324,16 @@ def validate(model, loader, device, amp_dtype=None):
         if "bpp" in out and out["bpp"] is not None:
             bpp = out["bpp"]
         else:
-            bpp = compute_bpp(ce_loss, C)
-        bpp_list.append(bpp.item())
-        total_loss += loss.item()
-    avg_bpp = float(np.mean(bpp_list))
-    std_bpp = float(np.std(bpp_list))
-    avg_loss = total_loss / len(bpp_list)
+            bpp = compute_bpp(ce_loss)
+        bpp_val = bpp.item()
+        loss_val = loss.item()
+        total_bpp_weighted += bpp_val * B
+        total_loss_weighted += loss_val * B
+        bpp_per_batch.append(bpp_val)
+        n_total += B
+    avg_bpp = total_bpp_weighted / n_total
+    avg_loss = total_loss_weighted / n_total
+    std_bpp = float(np.std(bpp_per_batch))
     return avg_bpp, std_bpp, avg_loss
 
 
@@ -663,19 +664,32 @@ def main():
                 swa_state = ckpt['swa_state']
                 swa_n = ckpt.get('swa_n', 0)
             # resume 后用 config 中的 lr 覆盖 checkpoint 里的旧值，
-            # 使得修改 yaml lr 后 resume 能立即生效
+            # 使得修改 yaml lr 后 resume 能立即生效。
+            # 关键：保留 muP per-group 缩放比例（pg['lr'] / pg['initial_lr']）。
             for pg in optimizer.param_groups:
-                pg['lr'] = base_lr
+                old_initial = pg.get('initial_lr', pg['lr'])
+                scale = pg['lr'] / old_initial if old_initial > 0 else 1.0
                 pg['initial_lr'] = base_lr
+                pg['lr'] = base_lr * scale
+            # Muon optimizer（如启用）：从 yaml 重新读 muon.lr 覆盖
             if optimizers:
+                muon_lr_new = float(muon_cfg.get("lr", 0.02)) if muon_enabled else None
                 for opt in optimizers:
+                    if opt is optimizer:
+                        continue  # 已处理
                     for pg in opt.param_groups:
-                        if 'initial_lr' in pg:
-                            pg['initial_lr'] = pg['lr']
+                        if muon_lr_new is not None:
+                            old_initial = pg.get('initial_lr', pg['lr'])
+                            scale = pg['lr'] / old_initial if old_initial > 0 else 1.0
+                            pg['initial_lr'] = muon_lr_new
+                            pg['lr'] = muon_lr_new * scale
+            # Scheduler base_lrs 同步（cosine/wsd 的 lr_lambda 乘以 base_lr）
             if scheduler is not None:
-                scheduler.base_lrs = [base_lr] * len(scheduler.base_lrs)
+                scheduler.base_lrs = [pg['initial_lr'] for pg in optimizer.param_groups]
+                # last_epoch = start_epoch - 1：主循环 epoch=start_epoch 结束时
+                # scheduler.step() 推进到 start_epoch。**不**在这里多 step 一次
+                # （否则 off-by-one：第一个 resume epoch 会用到 start_epoch+1 的 LR）
                 scheduler.last_epoch = start_epoch - 1
-                scheduler.step()
 
             if rank == 0:
                 print(f"Resumed from checkpoint '{args.resume}' (epoch {ckpt.get('epoch', '?')}, best_bpp={best_bpp:.4f})")
@@ -725,27 +739,32 @@ def main():
                 if bpp_avg < best_bpp:
                     best_bpp = bpp_avg
                     torch.save(raw_model.state_dict(), os.path.join(checkpoint_dir, 'best.pth'))
+            if dist.is_available() and dist.is_initialized():
+                dist.barrier()
 
         if scheduler is not None:
             scheduler.step()
 
-        # SWA 更新：running average of model weights
+        # SWA 更新：running average of model weights，**用 fp32 累加**避免
+        # bf16 mantissa (~7e-3) 在 21+ checkpoint 上累计的舍入误差。
         # swa_state[name] = swa_state[name] + (param - swa_state[name]) / (n+1)
         #                  = swa_state[name].lerp_(param, 1/(n+1))
         # Ref: Izmailov et al., arXiv:1803.05407
         if swa_enabled and rank == 0 and epoch >= swa_start_epoch and epoch % swa_update_interval == 0:
-            # SWA 仅在 rank 0 维护，避免非主进程浪费显存
-            has_nan = any(torch.isnan(p.data).any().item() for p in raw_model.parameters())
+            # 一次性 batched NaN 检查，避免逐参数 .item() 多次同步
+            has_nan = torch.stack([torch.isnan(p.data).any() for p in raw_model.parameters()]).any().item()
             if has_nan:
                 print(f"  WARNING: skipping SWA update at epoch {epoch} — model contains NaN weights")
             elif swa_state is None:
-                swa_state = {name: param.data.clone()
+                # 首次以 fp32 拷贝
+                swa_state = {name: param.data.detach().float().clone()
                              for name, param in raw_model.named_parameters()}
                 swa_n = 1
             else:
                 swa_n += 1
                 for name, param in raw_model.named_parameters():
-                    swa_state[name].lerp_(param.data, 1.0 / swa_n)
+                    # 在 fp32 域更新（param 自动 upcast）
+                    swa_state[name].lerp_(param.data.float(), 1.0 / swa_n)
             if not has_nan:
                 print(f"  SWA update #{swa_n} at epoch {epoch}")
 
@@ -773,6 +792,7 @@ def main():
     # SWA 后处理：替换权重 → 重新验证 → 保存（仅 rank 0 维护 swa_state）
     if swa_enabled and swa_state is not None and rank == 0:
         for name, param in raw_model.named_parameters():
+            # swa_state 是 fp32，copy_ 时自动 cast 回 param 的 dtype
             param.data.copy_(swa_state[name])
         print(f"SWA: replaced model weights (averaged over {swa_n} checkpoints)")
         # 用 SWA 权重重新验证 (iGPT/MSPA)

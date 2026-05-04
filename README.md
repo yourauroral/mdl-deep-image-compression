@@ -3,8 +3,12 @@
 基于 **Minimum Description Length (MDL)** 原则的深度图像压缩系统设计与实现。核心命题：**压缩即预测** — CE loss 直接对应 Shannon 最优编码长度 (Shannon 1948, Delétang et al. 2024)。
 
 - **Phase A (完成)**: iGPT token-level 自回归压缩 + 8 个手写 Triton Kernel (~2,400 行)
-- **Phase B (完成)**: MSPA 多尺度像素无损自回归 (借鉴 VAR next-scale prediction) + Linear Probe 表征评估
+- **Phase B (训练中)**: MSPA 多尺度像素无损自回归 (借鉴 VAR next-scale prediction) + Linear Probe 表征评估
 - **Phase C (完成)**: Demo 前端可视化系统 (FastAPI + Chart.js, 5 个展示面板)
+
+> **MSPA 训练状态 (2026-05-04)**: 在 epoch 105 出现训练崩溃（粗尺度 token CE 极高，与细尺度均匀平均后梯度方差过大触发正反馈）。
+> 已从 epoch 100 checkpoint resume，超参调整为 `lr=1e-4`（原 3e-4）、`clip_max_norm=0.5`（原 1.0）。
+> resume 逻辑已支持用 config 中的 lr 覆盖 checkpoint 中的旧值（保留 muP per-group 缩放）。
 
 ## Baseline 对比
 
@@ -30,22 +34,29 @@
 ## 快速开始
 
 ```bash
-pip install torch torchvision pyyaml numpy pillow tensorboard
+pip install torch torchvision pyyaml numpy pillow tensorboard triton
 ```
 
 ```bash
-# 训练 iGPT
-python scripts/train.py --config configs/igpt_cifar10_s.yaml
+# 单元测试 + 前向 dry-run
+pytest tests/ -v
+python scripts/dryrun_forward.py
 
-# 训练 MSPA (Phase B)
-python scripts/train.py --config configs/mspa_cifar10_s.yaml
+# 训练 — 单卡
+torchrun --nproc_per_node=1 scripts/train.py --config configs/igpt_cifar10_s.yaml
 
-# 训练 ImageNet 32×32
+# 训练 — 多卡 DDP (按 GPU 数调整 nproc_per_node)
+torchrun --nproc_per_node=2 scripts/train.py --config configs/igpt_cifar10_s.yaml
+torchrun --nproc_per_node=2 scripts/train.py --config configs/mspa_cifar10_s.yaml
+
+# 训练 — ImageNet 32×32
 torchrun --nproc_per_node=2 scripts/train.py --config configs/igpt_imagenet32_s.yaml
 torchrun --nproc_per_node=2 scripts/train.py --config configs/mspa_imagenet32_s.yaml
 
-# 多卡分布式 (按 GPU 数调整 nproc_per_node)
-torchrun --nproc_per_node=2 scripts/train.py --config configs/igpt_cifar10_s.yaml
+# 断点续训 (resume 会自动用 config 中的 lr 覆盖 checkpoint 旧值)
+torchrun --nproc_per_node=2 scripts/train.py \
+    --config configs/mspa_cifar10_s.yaml \
+    --resume experiments/mspa_cifar10_s/checkpoints/epoch_100.pth
 
 # 评测
 python scripts/evaluate.py --config configs/igpt_cifar10_s.yaml \
@@ -53,17 +64,14 @@ python scripts/evaluate.py --config configs/igpt_cifar10_s.yaml \
 
 # Linear Probe (各层表征分类准确率)
 python scripts/linear_probe.py --config configs/igpt_cifar10_s.yaml \
-    --checkpoint best.pth --layers all
+    --checkpoint experiments/igpt_cifar10_s/checkpoints/best.pth --layers all
 
 # Kernel Profiling
 python scripts/profile_kernels.py --roofline
 
-# 测试
-pytest tests/ -v
-
 # Demo 前端
 pip install fastapi uvicorn python-multipart
-cd demo && uvicorn server:app --reload --port 8000
+uvicorn demo.server:app --reload --port 8000
 ```
 
 ### AutoDL 训练流程
@@ -82,26 +90,19 @@ cd mdl-deep-image-compression
 git checkout dev
 pip install torch torchvision pyyaml numpy pillow tensorboard triton
 
-# 前向 dry-run，确认改动未破坏模型
+# 验证环境
 python scripts/dryrun_forward.py
-
-# 单元测试，确认 8 个 Triton kernel 正确
 pytest tests/ -v
 
 # ========== AutoDL: 训练 ==========
-# 单卡 (iGPT)
-python scripts/train.py --config configs/igpt_cifar10_s.yaml
-
-# 多卡 (按实例 GPU 数调整 nproc_per_node)
 torchrun --nproc_per_node=2 scripts/train.py --config configs/igpt_cifar10_s.yaml
-
-# MSPA (Phase B)
 torchrun --nproc_per_node=2 scripts/train.py --config configs/mspa_cifar10_s.yaml
 
 # 后台挂起 (断开 SSH 不中断)
-nohup python scripts/train.py --config configs/igpt_cifar10_s.yaml \
-    > train.log 2>&1 &
-tail -f train.log
+nohup torchrun --nproc_per_node=2 scripts/train.py \
+    --config configs/mspa_cifar10_s.yaml \
+    > train_mspa.log 2>&1 &
+tail -f train_mspa.log
 
 # 监控 GPU
 watch -n 1 nvidia-smi
@@ -113,10 +114,6 @@ tensorboard --logdir experiments/ --port 6006 --host 0.0.0.0
 # 本地 WSL 执行：
 scp -P <port> root@<autodl-host>:/root/autodl-tmp/mdl-deep-image-compression/experiments/igpt_cifar10_s/checkpoints/best.pth \
     ./experiments/igpt_cifar10_s/checkpoints/
-
-# ========== 断点续训 ==========
-python scripts/train.py --config configs/igpt_cifar10_s.yaml \
-    --resume experiments/igpt_cifar10_s/checkpoints/last.pth
 ```
 
 ## 架构
@@ -273,7 +270,7 @@ GPTBlock, MultiHeadAttentionBlock (RoPE + QK-Norm + Flash Attention + attn_mask)
 
 ### Linear Probe (`scripts/linear_probe.py`)
 
-冻结预训练模型，通过 `IGPT.encode(x, max_layer)` 直接取各层 hidden state（跳过 output head 与 loss），全局平均池化 → 线性分类器 → 报告分类准确率。
+冻结预训练模型，通过 `IGPT.encode(x, max_layer)` 直接取各层 hidden state（跳过 output head 与 loss），全局平均池化 → 线性分类器 → 报告**训练结束时**的测试准确率（避免按 epoch 选 max 造成 test-set peeking）。
 支持 iGPT 和 MSPA，对比多尺度上下文对表征质量的提升 (Chen et al. 2020)。
 
 ## 项目结构
