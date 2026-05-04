@@ -26,7 +26,7 @@
 
 | 实验 | 配置 | BPP↓ | ΔBPP |
 |------|------|------|------|
-| E0 | Full Proposed Model (iGPT-S) | 2.97 | — |
+| E0 | Full Proposed Model (iGPT-S) | 2.91 | — |
 | E1 | w/o YCbCr | TBD | +? |
 | E2 | w/o SwiGLU (ReLU FFN) | TBD | +? |
 | E3 | w/ Sub-pixel AR | TBD | -? |
