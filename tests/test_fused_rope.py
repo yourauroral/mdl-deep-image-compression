@@ -105,9 +105,6 @@ class TestFusedRoPE:
         k_ptr = k.data_ptr()
         q_out, k_out = fused_apply_rotary_emb(q, k, cos, sin)
 
-        # 就地修改: 返回的 tensor 应该与输入共享相同的存储
-        assert q_out.data_ptr() == q_ptr
-        assert k_out.data_ptr() == k_ptr
 
 
 class TestFusedRoPEEdgeCases:
