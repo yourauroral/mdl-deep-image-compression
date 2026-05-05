@@ -292,11 +292,20 @@ def train_one_epoch(model, loader, optimizer, scaler, device,
                 print(f"WARNING: loss is {loss_val} at epoch {epoch} step {i+1}/{steps}. "
                       f"LR={optimizer.param_groups[0]['lr']:.2e}. Training may diverge.")
             if rank == 0:
-                print(f"Epoch {epoch} Step {i+1}/{steps} | Loss: {loss_val:.4f} | BPP: {bpp_val:.4f}")
+                extra = ""
+                if "ce_loss_coarse" in out and "ce_loss_fine" in out:
+                    extra = (f" | CE_c: {out['ce_loss_coarse'].item():.4f}"
+                             f" | CE_f: {out['ce_loss_fine'].item():.4f}"
+                             f" | α: {out['ctx_alpha'].item():.3f}")
+                print(f"Epoch {epoch} Step {i+1}/{steps} | Loss: {loss_val:.4f} | BPP: {bpp_val:.4f}{extra}")
             if writer:
                 step = epoch * steps + i
                 writer.add_scalar('train/loss', loss_val, step)
                 writer.add_scalar('train/bpp',  bpp_val,  step)
+                if "ce_loss_coarse" in out and "ce_loss_fine" in out:
+                    writer.add_scalar('train/ce_coarse', out['ce_loss_coarse'].item(), step)
+                    writer.add_scalar('train/ce_fine',   out['ce_loss_fine'].item(),   step)
+                    writer.add_scalar('train/ctx_alpha', out['ctx_alpha'].item(),      step)
 
     return total_loss.item() / steps, total_bpp.item() / steps
 
