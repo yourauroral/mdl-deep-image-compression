@@ -25,8 +25,8 @@ def small_ccigpt(device):
     return CCIGPT(
         image_size=32, in_channels=3, vocab_size=256,
         pool_factor=4,
-        fine_d_model=64, fine_N=2, fine_h=4, fine_d_ff=128,
-        coarse_d_model=32, coarse_N=2, coarse_h=4, coarse_d_ff=64,
+        fine_d_model=64, fine_N=2, fine_h=2, fine_d_ff=128,
+        coarse_d_model=64, coarse_N=2, coarse_h=2, coarse_d_ff=64,
         dropout=0.0,
     ).to(device).eval()
 
