@@ -47,7 +47,7 @@
       <div class="heatmap-container">
         <p class="heatmap-title">Per-position BPP 热力图</p>
         <img id="heatmap-img" class="heatmap-img" hidden>
-        <p id="heatmap-placeholder" class="hint">上传图片后生成（仅 iGPT 模型支持）</p>
+        <p id="heatmap-placeholder" class="hint">上传图片后生成（仅 iGPT 模型）</p>
       </div>
     </div>
   </div>
@@ -83,15 +83,15 @@
   </div>
 </section>
 
-<!-- Panel 5: MSPA 多尺度 bit 分配 -->
+<!-- Panel 5: CC-iGPT coarse/fine token 分配 -->
 <section class="panel" id="panel-scales">
-  <h2>MSPA 多尺度 Token 分配</h2>
-  <p class="panel-desc">6 个尺度 (1×1 → 32×32) 共 4095 tokens，粗尺度提供全局上下文</p>
+  <h2>CC-iGPT 双尺度 Token 分配</h2>
+  <p class="panel-desc">浅层 coarse iGPT (8×8, 192 token) 独立编码进 bitstream，UP+量化后注入 fine iGPT (32×32, 3072 token)</p>
   <div class="chart-container">
     <canvas id="chart-scales"></canvas>
   </div>
   <table id="table-scales" class="data-table">
-    <thead><tr><th>尺度</th><th>分辨率</th><th>Token 数</th><th>占比</th></tr></thead>
+    <thead><tr><th>分支</th><th>分辨率</th><th>Token 数</th><th>占比</th></tr></thead>
     <tbody></tbody>
   </table>
 </section>

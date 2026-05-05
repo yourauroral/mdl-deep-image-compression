@@ -297,8 +297,9 @@ scripts/       train.py, evaluate.py, linear_probe.py, dryrun_forward.py, profil
 configs/       igpt_cifar10_s, igpt_cifar100_s, igpt_imagenet32_s, ccigpt_cifar10_s
 tests/         8 个 kernel 单元测试
 demo/
-├── server.py          FastAPI 后端 (predict, metrics, probe, kernels, scales)
-├── static/            HTML + JS (Chart.js) + CSS 前端
+├── server.py          FastAPI 后端 (predict / metrics / probe / kernels / scales)
+├── static/            HTML + JS (Chart.js) + CSS 前端，5 个面板：上传预测、BPP 对比、
+│                       Linear Probe、Triton kernel 加速比、CC-iGPT coarse/fine token 分配
 └── data/              预计算 JSON 数据 (训练后替换为真实结果)
 ```
 

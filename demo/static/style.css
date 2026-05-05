@@ -5,10 +5,6 @@
   --text: #e1e4ed;
   --text-dim: #8b8fa3;
   --accent: #6c8cff;
-  --accent-dim: #3d5afe;
-  --green: #4caf50;
-  --orange: #ff9800;
-  --red: #ef5350;
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }

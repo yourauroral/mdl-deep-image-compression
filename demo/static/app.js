@@ -2,12 +2,12 @@
 
 const API = "";
 
-// ── 工具函数 ──
 async function fetchJSON(url) {
   const res = await fetch(API + url);
-  if (!res.ok) return null;
-  return res.json();
+  return res.ok ? res.json() : null;
 }
+
+const $ = (id) => document.getElementById(id);
 
 // Chart.js 全局配色
 Chart.defaults.color = "#8b8fa3";
@@ -15,10 +15,15 @@ Chart.defaults.borderColor = "#2a2d3a";
 
 // ── Panel 1: 图片上传 + 预测 ──
 (function initUpload() {
-  const area = document.getElementById("upload-area");
-  const input = document.getElementById("file-input");
-  const preview = document.getElementById("preview-img");
-  const placeholder = document.getElementById("upload-placeholder");
+  const area = $("upload-area");
+  const input = $("file-input");
+  const preview = $("preview-img");
+  const placeholder = $("upload-placeholder");
+  const bppEl = $("result-bpp");
+  const ceEl = $("result-ce");
+  const modelEl = $("result-model");
+  const hmImg = $("heatmap-img");
+  const hmPlaceholder = $("heatmap-placeholder");
 
   area.addEventListener("click", () => input.click());
   area.addEventListener("dragover", e => { e.preventDefault(); area.classList.add("dragover"); });
@@ -39,28 +44,23 @@ Chart.defaults.borderColor = "#2a2d3a";
     };
     reader.readAsDataURL(file);
 
+    bppEl.textContent = ceEl.textContent = modelEl.textContent = "...";
+
     const form = new FormData();
     form.append("file", file);
-
-    document.getElementById("result-bpp").textContent = "...";
-    document.getElementById("result-ce").textContent = "...";
-    document.getElementById("result-model").textContent = "...";
-
     try {
       const res = await fetch(API + "/api/predict", { method: "POST", body: form });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        document.getElementById("result-bpp").textContent = "N/A";
-        document.getElementById("result-model").textContent = err.detail || "错误";
+        bppEl.textContent = "N/A";
+        modelEl.textContent = err.detail || "错误";
         return;
       }
       const data = await res.json();
-      document.getElementById("result-bpp").textContent = data.bpp;
-      document.getElementById("result-ce").textContent = data.ce_loss;
-      document.getElementById("result-model").textContent = data.model_type.toUpperCase();
+      bppEl.textContent = data.bpp;
+      ceEl.textContent = data.ce_loss;
+      modelEl.textContent = data.model_type.toUpperCase();
 
-      const hmImg = document.getElementById("heatmap-img");
-      const hmPlaceholder = document.getElementById("heatmap-placeholder");
       if (data.heatmap) {
         hmImg.src = "data:image/png;base64," + data.heatmap;
         hmImg.hidden = false;
@@ -68,12 +68,12 @@ Chart.defaults.borderColor = "#2a2d3a";
       } else {
         hmImg.hidden = true;
         hmPlaceholder.hidden = false;
-        hmPlaceholder.textContent = data.model_type === "mspa"
-          ? "MSPA 模型暂不支持热力图" : "热力图不可用";
+        hmPlaceholder.textContent = data.model_type === "ccigpt"
+          ? "CC-iGPT 模型暂不支持热力图" : "热力图不可用";
       }
     } catch (e) {
-      document.getElementById("result-bpp").textContent = "离线";
-      document.getElementById("result-model").textContent = "无法连接后端";
+      bppEl.textContent = "离线";
+      modelEl.textContent = "无法连接后端";
     }
   }
 })();
@@ -206,12 +206,12 @@ Chart.defaults.borderColor = "#2a2d3a";
   });
 })();
 
-// ── Panel 5: MSPA 多尺度 ──
+// ── Panel 5: CC-iGPT 双尺度 ──
 (async function initScales() {
   const data = await fetchJSON("/api/scales");
   if (!data) return;
 
-  const labels = data.scales.map(s => s.scale);
+  const labels = data.scales.map(s => `${s.scale} (${s.resolution})`);
   const tokens = data.scales.map(s => s.tokens);
   const total = data.total_tokens;
 
@@ -221,7 +221,7 @@ Chart.defaults.borderColor = "#2a2d3a";
       labels,
       datasets: [{
         data: tokens,
-        backgroundColor: ["#ef5350", "#ff9800", "#ffeb3b", "#4caf50", "#2196f3", "#6c8cff"],
+        backgroundColor: ["#ff9800", "#6c8cff"],
         borderColor: "#1a1d27",
         borderWidth: 2,
       }]
@@ -231,7 +231,7 @@ Chart.defaults.borderColor = "#2a2d3a";
       maintainAspectRatio: false,
       plugins: {
         legend: { position: "right" },
-        title: { display: true, text: `总计 ${total} tokens`, color: "#e1e4ed" }
+        title: { display: true, text: `总计 ${total} tokens (coarse + fine)`, color: "#e1e4ed" }
       }
     }
   });
