@@ -1,0 +1,76 @@
+exp_name: "ccigpt_cifar10_s"
+
+# Coarse-Conditioned iGPT (CC-iGPT)
+# 双路结构: small coarse iGPT (8x8) + main fine iGPT (32x32, iGPT-S 配置)。
+# coarse 单独编码进 bitstream，UP+量化后通过 additive embedding 注入 fine。
+# 目标 BPP_total < 2.97 (击败 iGPT-S SWA 2.9739)。
+
+model:
+  type: ccigpt
+  image_size: 32
+  in_channels: 3
+  vocab_size: 256
+  pool_factor: 4               # 32 → 8（coarse 192 tokens, ~6% overhead）
+
+  # fine 模型（与 iGPT-S 一致，~76M 参数）
+  d_model: 512
+  N: 24
+  h: 8
+  d_ff: 1376
+  dropout: 0.0
+
+  # coarse 模型（小且浅）
+  coarse_d_model: 256
+  coarse_N: 6
+  coarse_h: 4
+  coarse_d_ff: 688
+
+  # 共享开关（coarse 与 fine 共用）
+  use_ycbcr: true
+  use_rope: true
+  use_post_norm: true
+  use_swiglu: true
+  use_qk_norm: true
+  use_depth_scaled_init: true
+  use_zloss: true
+  activation_checkpointing: true   # fine N=24 必须开
+
+data:
+  dataset: "cifar10"
+  train: datasets/
+  valid: datasets/
+  num_workers: 8
+
+train:
+  amp_dtype: "bf16"
+  batch_size: 64
+  grad_accum_steps: 2
+  lr: 3e-4
+  eps: 1e-8
+  epochs: 300                   # CC-iGPT 训得更久，给联合 coarse+fine 更多收敛时间
+  log_freq: 50
+  clip_max_norm: 1.0
+  z_loss_weight: 1e-4
+  lr_schedule: "cosine"
+  warmup_epochs: 15             # 按 epochs 比例放大
+  stable_epochs: 210            # 仅 WSD 模式生效
+  decay_beta: 1.0
+  compile: false
+  swa:
+    enabled: true
+    start_epoch: 270            # 最后 30 epoch 启动 SWA（按比例从 180/200 放大）
+    update_interval: 1
+  mup:
+    enabled: false
+    base_width: 64
+  muon:
+    enabled: false
+    lr: 0.02
+    momentum: 0.95
+    ns_steps: 5
+
+eval:
+  interval: 5
+
+checkpoint:
+  save_interval: 10

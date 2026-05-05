@@ -2,13 +2,9 @@
 
 基于 **Minimum Description Length (MDL)** 原则的深度图像压缩系统设计与实现。核心命题：**压缩即预测** — CE loss 直接对应 Shannon 最优编码长度 (Shannon 1948, Delétang et al. 2024)。
 
-- **Phase A (完成)**: iGPT token-level 自回归压缩 + 8 个手写 Triton Kernel (~2,400 行)
-- **Phase B (训练中)**: MSPA 多尺度像素无损自回归 (借鉴 VAR next-scale prediction) + Linear Probe 表征评估
+- **Phase A (完成)**: iGPT token-level 自回归压缩 + 8 个手写 Triton Kernel (~2,400 行)，iGPT-S CIFAR-10 SWA **2.9739 bits/dim**
+- **Phase B (训练中)**: CC-iGPT（Coarse-Conditioned iGPT）双尺度条件自回归 — 浅层 coarse iGPT (8×8, 192 token) 独立编码进 bitstream，UP + 量化后通过 additive embedding（可学习 α）注入 fine iGPT (32×32, 3072 token)。300 epoch，目标 BPP_total < 2.97
 - **Phase C (完成)**: Demo 前端可视化系统 (FastAPI + Chart.js, 5 个展示面板)
-
-> **MSPA 训练状态 (2026-05-04)**: 在 epoch 105 出现训练崩溃（粗尺度 token CE 极高，与细尺度均匀平均后梯度方差过大触发正反馈）。
-> 已从 epoch 100 checkpoint resume，超参调整为 `lr=1e-4`（原 3e-4）、`clip_max_norm=0.5`（原 1.0）。
-> resume 逻辑已支持用 config 中的 lr 覆盖 checkpoint 中的旧值（保留 muP per-group 缩放）。
 
 ## Baseline 对比
 
@@ -26,7 +22,7 @@
 
 | 实验 | 配置 | BPP↓ | ΔBPP |
 |------|------|------|------|
-| E0 | Full Proposed Model (iGPT-S) | 2.91 | — |
+| E0 | Full Proposed Model (iGPT-S) | 2.97 | — |
 | E1 | w/o YCbCr | TBD | +? |
 | E2 | w/o SwiGLU (ReLU FFN) | TBD | +? |
 | E3 | w/ Sub-pixel AR | TBD | -? |
@@ -47,16 +43,15 @@ torchrun --nproc_per_node=1 scripts/train.py --config configs/igpt_cifar10_s.yam
 
 # 训练 — 多卡 DDP (按 GPU 数调整 nproc_per_node)
 torchrun --nproc_per_node=2 scripts/train.py --config configs/igpt_cifar10_s.yaml
-torchrun --nproc_per_node=2 scripts/train.py --config configs/mspa_cifar10_s.yaml
+torchrun --nproc_per_node=2 scripts/train.py --config configs/ccigpt_cifar10_s.yaml
 
 # 训练 — ImageNet 32×32
 torchrun --nproc_per_node=2 scripts/train.py --config configs/igpt_imagenet32_s.yaml
-torchrun --nproc_per_node=2 scripts/train.py --config configs/mspa_imagenet32_s.yaml
 
 # 断点续训 (resume 会自动用 config 中的 lr 覆盖 checkpoint 旧值)
 torchrun --nproc_per_node=2 scripts/train.py \
-    --config configs/mspa_cifar10_s.yaml \
-    --resume experiments/mspa_cifar10_s/checkpoints/epoch_100.pth
+    --config configs/igpt_cifar10_s.yaml \
+    --resume experiments/igpt_cifar10_s/checkpoints/epoch_100.pth
 
 # 评测
 python scripts/evaluate.py --config configs/igpt_cifar10_s.yaml \
@@ -96,13 +91,13 @@ pytest tests/ -v
 
 # ========== AutoDL: 训练 ==========
 torchrun --nproc_per_node=2 scripts/train.py --config configs/igpt_cifar10_s.yaml
-torchrun --nproc_per_node=2 scripts/train.py --config configs/mspa_cifar10_s.yaml
+torchrun --nproc_per_node=2 scripts/train.py --config configs/ccigpt_cifar10_s.yaml
 
 # 后台挂起 (断开 SSH 不中断)
 nohup torchrun --nproc_per_node=2 scripts/train.py \
-    --config configs/mspa_cifar10_s.yaml \
-    > train_mspa.log 2>&1 &
-tail -f train_mspa.log
+    --config configs/ccigpt_cifar10_s.yaml \
+    > train_ccigpt.log 2>&1 &
+tail -f train_ccigpt.log
 
 # 监控 GPU
 watch -n 1 nvidia-smi
@@ -130,17 +125,17 @@ scp -P <port> root@<autodl-host>:/root/autodl-tmp/mdl-deep-image-compression/exp
                               |
           +-------------------+-------------------+
           |                                       |
-    iGPT (Phase A)                        MSPA (Phase B)
+    iGPT (Phase A)                       CC-iGPT (Phase B)
           |                                       |
   +-------v--------+                  +-----------v-----------+
-  | Flatten: 3072  |                  | Multi-Scale Pyramid   |
-  | tokens         |                  | S0(1×1)  → 3 tokens  |
-  | (3×32×32)      |                  | S1(2×2)  → 12        |
-  +-------+--------+                  | S2(4×4)  → 48        |
-          |                           | S3(8×8)  → 192       |
-          |                           | S4(16×16)→ 768       |
-          |                           | S5(32×32)→ 3072      |
-          |                           | 总计: 4095 tokens     |
+  | Flatten: 3072  |                  | DOWN avg_pool 8×8     |
+  | tokens         |                  |   → Coarse iGPT       |
+  | (3×32×32)      |                  |     192 tokens, 进 bs |
+  +-------+--------+                  | UP bilinear → quantize|
+          |                           |   → fine.token_embed  |
+          |                           |   → α · coarse_ctx    |
+          |                           |     (additive 注入)    |
+          |                           | Fine iGPT 3072 tokens |
           |                           +-----------+-----------+
           |                                       |
           +-------------------+-------------------+
@@ -164,8 +159,8 @@ scp -P <port> root@<autodl-host>:/root/autodl-tmp/mdl-deep-image-compression/exp
                               |                      |
                     (+ Channel Embedding,            |
                     子像素自回归模式)                  |
-                    (+ Scale Embedding,              |
-                     MSPA 模式)                       |
+                    (+ α · coarse_ctx,               |
+                     CC-iGPT fine 分支)              |
                               |                      |
             ┌─────────────────────────────────────────────────────┐
             │         N × GPT Block (OLMo 2 reordered norm)       │
@@ -199,9 +194,9 @@ scp -P <port> root@<autodl-host>:/root/autodl-tmp/mdl-deep-image-compression/exp
                     | (Triton kernel)     |
                     +---------+-----------+
                               |
-              iGPT: BPP = CE × T / ln(2) / (H·W·C)
-              MSPA: BPP = Σ_k CE_k · N_k / ln(2) / (H·W·C)
-                    （所有 scale 合计，S0..S4 虽少仍需传输）
+              iGPT:    BPP = CE × T / ln(2) / (H·W·C)
+              CC-iGPT: BPP_total = (CE_c · N_c + CE_f · N_f) / ln(2) / N_f
+                       (coarse + fine 联合压缩率，N_f = H·W·C)
 ```
 
 **OLMo 2 Reordered Norm**:  `x = x + RMSNorm(Attention(x))`, `x = x + RMSNorm(FFN(x))`
@@ -247,7 +242,24 @@ pixel-first:    [Y₀ Cb₀ Cr₀ | Y₁ Cb₁ Cr₁ | ... | Y₁₀₂₃ Cb₁
 
 ### VQVAE/VAR 路线（已删除）
 
-早期曾考虑 VQVAE + VAR 有损路线，现已删除（毕设聚焦 YCbCr 域无损，side-path 不保留）。MSPA 继承了 VAR 的 next-scale 思路，但在像素空间做无损自回归。
+早期曾考虑 VQVAE + VAR 有损路线，现已删除（毕设聚焦 YCbCr 域无损，side-path 不保留）。多尺度方向（VAR）我们曾尝试 MSPA 实现，因训练稳定性问题最终未采用，转而采用更简洁的 CC-iGPT（双尺度条件式注入）。
+
+### CC-iGPT (`models/cc_igpt.py`)
+
+Coarse-Conditioned iGPT —— MSPA 的 2-scale 退化版本。回避了多尺度 loss 平衡难题，复用全部 iGPT 训练栈与 Triton kernels。
+
+| 组件 | 说明 |
+|------|------|
+| DOWN | `F.adaptive_avg_pool2d(x, 8)` 在 float 域下采样到 8×8 |
+| Coarse iGPT | 浅层（d_model=256, N=6），独立 NTP 训练，CE 进 bitstream（192 token，~6% overhead） |
+| UP | `F.interpolate(bilinear)` 回到 32×32，`rgb_to_ycbcr_int` 量化（与 fine encoder 一致） |
+| Ctx 注入 | `fine.token_embed(UP(x_c)_tokens)` → AR shift → `α · coarse_ctx`（additive，无新增可学习参数） |
+| 可学习 α | `nn.Parameter(torch.ones(1))`，初始 1.0；模型自适应注入强度，避免 ctx 过强压制 fine token embed |
+| 联合 BPP | `BPP_total = (CE_c · 192 + CE_f · 3072) / ln(2) / 3072`（按 H·W·C 归一化） |
+| 训练 | 端到端联合 `loss = loss_coarse + loss_fine`，无尺度间加权 |
+| 关闭 ctx | `fine(x, coarse_ctx=None)` 严格等价 vanilla iGPT（unit test 校验 CE diff < 1e-6） |
+
+设计参考: Burt & Adelson "Laplacian Pyramid" (1983)、van den Oord "Conditional PixelCNN" (NeurIPS 2016, additive 条件)、Tian "VAR" (NeurIPS 2024)。
 
 ### 共享层 (`models/layers.py`)
 
@@ -271,18 +283,18 @@ GPTBlock, MultiHeadAttentionBlock (RoPE + QK-Norm + Flash Attention + attn_mask)
 ### Linear Probe (`scripts/linear_probe.py`)
 
 冻结预训练模型，通过 `IGPT.encode(x, max_layer)` 直接取各层 hidden state（跳过 output head 与 loss），全局平均池化 → 线性分类器 → 报告**训练结束时**的测试准确率（避免按 epoch 选 max 造成 test-set peeking）。
-支持 iGPT 和 MSPA，对比多尺度上下文对表征质量的提升 (Chen et al. 2020)。
+支持 iGPT（CC-iGPT 的 fine 子模型 probe 待实现），对比预训练表征质量 (Chen et al. 2020)。
 
 ## 项目结构
 
 ```
 src/mdlic/
-├── models/    igpt.py, mspa.py, layers.py
+├── models/    igpt.py, cc_igpt.py, layers.py
 ├── ops/       8 个 Triton kernels (flash_attn, fused_rms_norm, ...)
 ├── optim/     muon.py (Muon optimizer)
 └── utils/     seed, BPP
 scripts/       train.py, evaluate.py, linear_probe.py, dryrun_forward.py, profile_kernels.py
-configs/       igpt_cifar10_s, igpt_cifar100_s, igpt_imagenet32_s, mspa_cifar10_s, mspa_imagenet32_s
+configs/       igpt_cifar10_s, igpt_cifar100_s, igpt_imagenet32_s, ccigpt_cifar10_s
 tests/         8 个 kernel 单元测试
 demo/
 ├── server.py          FastAPI 后端 (predict, metrics, probe, kernels, scales)

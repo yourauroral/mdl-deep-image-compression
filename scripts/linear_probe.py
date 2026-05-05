@@ -38,7 +38,6 @@ from torchvision.datasets import CIFAR10, CIFAR100
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from src.mdlic.models.igpt import IGPT
-from src.mdlic.models.mspa import MSPA
 
 
 # ──────────────────────────────────────────────────────────────
@@ -52,9 +51,15 @@ def load_config(path):
 
 
 def build_model(mcfg, device):
-    """从 config['model'] 构建 IGPT 或 MSPA（复用 train.py 逻辑）。"""
+    """从 config['model'] 构建 IGPT（仅支持 iGPT；CC-iGPT 的 linear probe
+    需对 fine 子模型单独取 hidden state，暂不支持）。"""
     model_type = mcfg.get("type", "igpt")
-    common = dict(
+    if model_type != "igpt":
+        raise NotImplementedError(
+            f"Linear probe 当前仅支持 igpt，不支持 model.type='{model_type}'。"
+            "CC-iGPT 可单独对 model.fine 做 probe（待实现）。"
+        )
+    return IGPT(
         image_size=mcfg["image_size"],
         in_channels=mcfg["in_channels"],
         vocab_size=mcfg["vocab_size"],
@@ -71,11 +76,8 @@ def build_model(mcfg, device):
         use_depth_scaled_init=mcfg.get("use_depth_scaled_init", True),
         use_zloss=mcfg.get("use_zloss", True),
         activation_checkpointing=False,
-    )
-    if model_type == "mspa":
-        return MSPA(num_scales=mcfg.get("num_scales", 6), **common).to(device)
-    return IGPT(use_subpixel_ar=mcfg.get("use_subpixel_ar", False),
-                **common).to(device)
+        use_subpixel_ar=mcfg.get("use_subpixel_ar", False),
+    ).to(device)
 
 
 def load_checkpoint(model, ckpt_path, device):

@@ -59,16 +59,16 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from torch.amp import autocast
 from torch.utils.data import DataLoader
 from src.mdlic.models.igpt import IGPT, rgb_to_ycbcr_int
-from src.mdlic.models.mspa import MSPA
+from src.mdlic.models.cc_igpt import CCIGPT
 from src.mdlic.utils import compute_bpp
-from scripts.train import _build_model_from_config, _build_mspa_from_config
+from scripts.train import _build_model_from_config, _build_ccigpt_from_config
 
 
 def _build_from_config(mcfg: dict, device):
-    """根据 model.type 分发到 IGPT / MSPA 构建函数。"""
+    """根据 model.type 分发到 IGPT / CC-iGPT 构建函数。"""
     model_type = mcfg.get("type", "igpt")
-    if model_type == "mspa":
-        return _build_mspa_from_config(mcfg, device)
+    if model_type == "ccigpt":
+        return _build_ccigpt_from_config(mcfg, device)
     return _build_model_from_config(mcfg, device)
 
 
@@ -131,8 +131,8 @@ def evaluate_model(model, loader, device, amp_dtype=None):
         with autocast(device_type="cuda", dtype=amp_dtype) if use_amp else nullcontext():
             out = model(x)
 
-        # BPP：优先使用模型返回的 bpp（MSPA 在 forward 中按 H·W·C 归一化），
-        # 否则按 iGPT 约定 CE × C / ln2 计算
+        # BPP：优先使用模型返回的 bpp（CC-iGPT 在 forward 中按 H·W·C 归一化），
+        # 否则按 iGPT 约定 CE / ln2 计算
         if "bpp" in out and out["bpp"] is not None:
             bpp = out["bpp"]
         else:
@@ -629,11 +629,11 @@ def cmd_single(args, config, device):
                                             amp_dtype=amp_dtype)
     print(f"{model_type.upper()} BPP: {bpp_mean:.4f} ± {bpp_std:.4f}")
 
-    # Per-channel BPP（可选，仅 iGPT 支持；MSPA 序列跨多尺度非 H·W·C 规整，暂不支持）
+    # Per-channel BPP（可选，仅 iGPT 支持；CC-iGPT 联合 coarse+fine 序列与单尺度通道切分不兼容）
     channel_bpps = None
     if args.per_channel:
-        if model_type == "mspa":
-            print("\n[跳过 per_channel] MSPA 序列跨 6 个尺度（4095 tokens），与单尺度通道切分不兼容。")
+        if model_type == "ccigpt":
+            print("\n[跳过 per_channel] CC-iGPT 含 coarse 子分支，per-channel 切分仅对 fine 有意义，待实现。")
         else:
             print("\n计算 per-channel BPP...")
             use_ycbcr = mcfg.get("use_ycbcr", True)
@@ -667,10 +667,10 @@ def cmd_single(args, config, device):
                          traditional_results, channel_bpps,
                          model_label=f"{model_type.upper()} (Ours)")
 
-    # Per-position BPP 热力图（可选，仅 iGPT — MSPA 序列非 H·W·C 规整）
+    # Per-position BPP 热力图（可选，仅 iGPT — CC-iGPT 含 coarse 分支待实现）
     if args.heatmap:
-        if model_type == "mspa":
-            print("\n[跳过 heatmap] MSPA 多尺度序列不适配 (H, W) 热力图。")
+        if model_type == "ccigpt":
+            print("\n[跳过 heatmap] CC-iGPT 含 coarse 子分支，per-position 热力图待实现。")
         else:
             print("\n生成 per-position BPP 热力图...")
             use_ycbcr = mcfg.get("use_ycbcr", True)

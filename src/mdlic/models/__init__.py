@@ -1,2 +1,2 @@
 from .igpt import IGPT
-from .mspa import MSPA
+from .cc_igpt import CCIGPT

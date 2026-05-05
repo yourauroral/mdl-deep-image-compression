@@ -11,7 +11,7 @@ Demo 可视化后端 — FastAPI + 静态文件。
   GET  /api/metrics     — BPP 对比表数据
   GET  /api/probe       — Linear Probe 各层准确率
   GET  /api/kernels     — Triton Kernel 性能数据
-  GET  /api/scales      — MSPA 各尺度 bit 分配
+  GET  /api/scales      — CC-iGPT coarse/fine bit 分配
   POST /api/predict     — 上传图片 → 返回 BPP 热力图 + 数值
 """
 
@@ -100,7 +100,7 @@ async def predict(file: UploadFile = File(...)):
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # 尝试加载模型（优先 MSPA，回退 iGPT）
+    # 尝试加载模型（优先 CC-iGPT，回退 iGPT）
     model, model_type = _get_cached_model(device)
     if model is None:
         raise HTTPException(status_code=503, detail="No checkpoint available. Place a checkpoint in experiments/*/checkpoints/best.pth")
@@ -143,7 +143,7 @@ def _get_cached_model(device):
     configs_dir = ROOT / "configs"
     experiments_dir = ROOT / "experiments"
 
-    for cfg_name in ["mspa_cifar10_s.yaml", "igpt_cifar10_s.yaml"]:
+    for cfg_name in ["ccigpt_cifar10_s.yaml", "igpt_cifar10_s.yaml"]:
         cfg_path = configs_dir / cfg_name
         if not cfg_path.exists():
             continue
@@ -157,9 +157,9 @@ def _get_cached_model(device):
         mcfg = config["model"]
         model_type = mcfg.get("type", "igpt")
 
-        from scripts.train import _build_model_from_config, _build_mspa_from_config
-        if model_type == "mspa":
-            model = _build_mspa_from_config(mcfg, device)
+        from scripts.train import _build_model_from_config, _build_ccigpt_from_config
+        if model_type == "ccigpt":
+            model = _build_ccigpt_from_config(mcfg, device)
         else:
             model = _build_model_from_config(mcfg, device)
 

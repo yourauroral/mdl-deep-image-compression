@@ -25,8 +25,8 @@ import torch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from src.mdlic.models.igpt import IGPT
-from src.mdlic.models.mspa import MSPA
-from scripts.train import _build_model_from_config, _build_mspa_from_config
+from src.mdlic.models.cc_igpt import CCIGPT
+from scripts.train import _build_model_from_config, _build_ccigpt_from_config
 from src.mdlic.models.layers import get_fused_kernel_status
 
 
@@ -134,27 +134,36 @@ def main():
     assert grad_ok4, "Some parameters missing gradients after backward (subpixel-ar)"
     print("  [backward] all grads computed: OK")
 
-    # ── 5. MSPA smoke ──
-    print("\n=== Test 5: MSPA Multi-Scale Pixel AR ===")
-    model5 = MSPA(
+    # ── 5. CC-iGPT smoke ──
+    print("\n=== Test 5: CC-iGPT (Coarse-Conditioned iGPT) ===")
+    model5 = CCIGPT(
         image_size=32, in_channels=3, vocab_size=256,
-        d_model=mcfg["d_model"], N=2, h=mcfg["h"], d_ff=mcfg["d_ff"],
-        dropout=0.0, num_scales=6,
+        pool_factor=4,
+        fine_d_model=mcfg["d_model"], fine_N=2,
+        fine_h=mcfg["h"], fine_d_ff=mcfg["d_ff"],
+        coarse_d_model=128, coarse_N=2, coarse_h=4, coarse_d_ff=344,
+        dropout=0.0,
     ).to(device)
     out5 = model5(x)
     bpp5 = out5["bpp"].item()
     loss5 = out5["loss"].item()
-    ce5 = out5["ce_loss"].item()
-    assert math.isfinite(loss5) and math.isfinite(ce5), "MSPA loss NaN/Inf"
-    assert 0.0 < bpp5 < 50.0, f"MSPA BPP={bpp5:.2f} 超出合理范围"
-    assert model5.seq_len == 4095, f"MSPA seq_len 应为 4095, got {model5.seq_len}"
-    print(f"  [mspa] loss={loss5:.4f}  ce={ce5:.4f}  bpp={bpp5:.2f}  seq_len={model5.seq_len}")
+    ce5_c = out5["ce_loss_coarse"].item()
+    ce5_f = out5["ce_loss_fine"].item()
+    alpha5 = out5["ctx_alpha"].item()
+    assert math.isfinite(loss5), "CC-iGPT loss NaN/Inf"
+    assert 0.0 < bpp5 < 50.0, f"CC-iGPT BPP={bpp5:.2f} 超出合理范围"
+    print(f"  [ccigpt] loss={loss5:.4f}  ce_coarse={ce5_c:.4f}  ce_fine={ce5_f:.4f}  "
+          f"bpp_total={bpp5:.4f}  α={alpha5:.3f}")
     out5["loss"].backward()
     grad_ok5 = all(p.grad is not None for p in model5.parameters() if p.requires_grad)
-    assert grad_ok5, "MSPA: some params missing gradients"
-    enc5 = model5.encode(x, max_layer=1)
-    assert enc5[-1].shape == (2, 4094, mcfg["d_model"]), f"MSPA encode shape mismatch: {enc5[-1].shape}"
-    print(f"  [mspa.encode] {len(enc5)} layers, last={tuple(enc5[-1].shape)}")
+    assert grad_ok5, "CC-iGPT: some params missing gradients"
+    # 确认 coarse 与 fine 都有梯度
+    assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in model5.coarse.parameters()), \
+        "CC-iGPT coarse 分支无有效梯度"
+    assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in model5.fine.parameters()), \
+        "CC-iGPT fine 分支无有效梯度"
+    assert model5.ctx_alpha.grad is not None, "ctx_alpha 无梯度"
+    print(f"  [ccigpt.grad] coarse + fine + α 全部有梯度: OK")
 
     print("\nAll checks passed!")
 

@@ -32,7 +32,7 @@ from torchvision import transforms
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from src.mdlic.models.igpt import IGPT
-from src.mdlic.models.mspa import MSPA
+from src.mdlic.models.cc_igpt import CCIGPT
 from src.mdlic.models.layers import get_fused_kernel_status
 from src.mdlic.utils import seed_everything, compute_bpp
 
@@ -56,7 +56,7 @@ def _validate_config(config: dict):
     mcfg = config['model']
     model_type = mcfg.get('type', 'igpt')
 
-    if model_type in ('igpt', 'mspa'):
+    if model_type in ('igpt', 'ccigpt'):
         required_model = ['image_size', 'in_channels', 'vocab_size', 'd_model', 'N', 'h', 'd_ff', 'dropout']
         for key in required_model:
             assert key in mcfg, f"Config model 缺少必填字段: 'model.{key}'"
@@ -71,7 +71,7 @@ def _validate_config(config: dict):
         assert 0.0 <= mcfg['dropout'] < 1.0, f"model.dropout 必须在 [0, 1)，got {mcfg['dropout']}"
         assert mcfg['vocab_size'] > 0, f"model.vocab_size 必须 > 0，got {mcfg['vocab_size']}"
     else:
-        raise ValueError(f"未知 model.type: '{model_type}'，支持 igpt/mspa")
+        raise ValueError(f"未知 model.type: '{model_type}'，支持 igpt/ccigpt")
 
     # ── train 字段 ──
     tcfg = config['train']
@@ -89,55 +89,65 @@ def _validate_config(config: dict):
         f"train.lr_schedule 必须是 cosine/wsd/multistep，got '{lr_schedule}'"
     )
 
-    # 以下校验仅适用于自回归模型 (iGPT / MSPA)
-    if model_type in ('igpt', 'mspa'):
+    # 以下校验仅适用于自回归模型 (iGPT / CC-iGPT)
+    if model_type in ('igpt', 'ccigpt'):
         z_w = float(tcfg.get('z_loss_weight', 1e-4))
         assert z_w >= 0, f"train.z_loss_weight 必须 >= 0，got {z_w}"
+
+    # CC-iGPT 额外校验
+    if model_type == 'ccigpt':
+        for key in ['pool_factor', 'coarse_d_model', 'coarse_N', 'coarse_h', 'coarse_d_ff']:
+            assert key in mcfg, f"Config model 缺少 ccigpt 必填字段: 'model.{key}'"
+        assert mcfg['image_size'] % mcfg['pool_factor'] == 0, (
+            f"image_size ({mcfg['image_size']}) 必须能被 pool_factor ({mcfg['pool_factor']}) 整除"
+        )
+        assert mcfg['coarse_d_model'] % mcfg['coarse_h'] == 0, (
+            f"coarse_d_model ({mcfg['coarse_d_model']}) 必须能被 coarse_h ({mcfg['coarse_h']}) 整除"
+        )
+
+
+def _shared_igpt_kwargs(mcfg: dict) -> dict:
+    """提取 iGPT / CC-iGPT 共用的消融开关字段（默认值与 IGPT.__init__ 对齐）。"""
+    return dict(
+        in_channels=mcfg["in_channels"],
+        vocab_size=mcfg["vocab_size"],
+        dropout=mcfg["dropout"],
+        use_ycbcr=mcfg.get("use_ycbcr", True),
+        use_rope=mcfg.get("use_rope", True),
+        use_post_norm=mcfg.get("use_post_norm", True),
+        use_swiglu=mcfg.get("use_swiglu", True),
+        use_qk_norm=mcfg.get("use_qk_norm", True),
+        use_depth_scaled_init=mcfg.get("use_depth_scaled_init", True),
+        use_zloss=mcfg.get("use_zloss", True),
+        activation_checkpointing=mcfg.get("activation_checkpointing", False),
+    )
 
 
 def _build_model_from_config(mcfg: dict, device) -> IGPT:
     """从 config['model'] 构建 IGPT 模型（统一 train.py 和 dryrun_forward.py）。"""
     return IGPT(
         image_size=mcfg["image_size"],
-        in_channels=mcfg["in_channels"],
-        vocab_size=mcfg["vocab_size"],
-        d_model=mcfg["d_model"],
-        N=mcfg["N"],
-        h=mcfg["h"],
-        d_ff=mcfg["d_ff"],
-        dropout=mcfg["dropout"],
-        use_ycbcr=mcfg.get("use_ycbcr", True),
-        use_rope=mcfg.get("use_rope", True),
-        use_post_norm=mcfg.get("use_post_norm", True),
-        use_swiglu=mcfg.get("use_swiglu", True),
-        use_qk_norm=mcfg.get("use_qk_norm", True),
-        use_depth_scaled_init=mcfg.get("use_depth_scaled_init", True),
-        use_zloss=mcfg.get("use_zloss", True),
-        activation_checkpointing=mcfg.get("activation_checkpointing", False),
+        d_model=mcfg["d_model"], N=mcfg["N"], h=mcfg["h"], d_ff=mcfg["d_ff"],
         use_subpixel_ar=mcfg.get("use_subpixel_ar", False),
+        **_shared_igpt_kwargs(mcfg),
     ).to(device)
 
 
-def _build_mspa_from_config(mcfg: dict, device) -> MSPA:
-    """从 config['model'] 构建 MSPA 模型。"""
-    return MSPA(
+def _build_ccigpt_from_config(mcfg: dict, device) -> CCIGPT:
+    """从 config['model'] 构建 CC-iGPT 模型。
+
+    顶层字段 (image_size, d_model, N, h, d_ff, ...) 描述 fine 模型；
+    额外字段 pool_factor / coarse_d_model / coarse_N / coarse_h / coarse_d_ff
+    描述 coarse 子模型。
+    """
+    return CCIGPT(
         image_size=mcfg["image_size"],
-        in_channels=mcfg["in_channels"],
-        vocab_size=mcfg["vocab_size"],
-        d_model=mcfg["d_model"],
-        N=mcfg["N"],
-        h=mcfg["h"],
-        d_ff=mcfg["d_ff"],
-        dropout=mcfg["dropout"],
-        num_scales=mcfg.get("num_scales", 6),
-        use_ycbcr=mcfg.get("use_ycbcr", True),
-        use_rope=mcfg.get("use_rope", True),
-        use_post_norm=mcfg.get("use_post_norm", True),
-        use_swiglu=mcfg.get("use_swiglu", True),
-        use_qk_norm=mcfg.get("use_qk_norm", True),
-        use_depth_scaled_init=mcfg.get("use_depth_scaled_init", True),
-        use_zloss=mcfg.get("use_zloss", True),
-        activation_checkpointing=mcfg.get("activation_checkpointing", False),
+        pool_factor=mcfg["pool_factor"],
+        fine_d_model=mcfg["d_model"], fine_N=mcfg["N"],
+        fine_h=mcfg["h"], fine_d_ff=mcfg["d_ff"],
+        coarse_d_model=mcfg["coarse_d_model"], coarse_N=mcfg["coarse_N"],
+        coarse_h=mcfg["coarse_h"], coarse_d_ff=mcfg["coarse_d_ff"],
+        **_shared_igpt_kwargs(mcfg),
     ).to(device)
 
 
@@ -151,11 +161,11 @@ def _get_param_groups(model, weight_decay=0.1, mup_enabled=False,
     no_decay = set()
     mup_hidden = set()
     for name, _ in model.named_parameters():
-        if any(nd in name for nd in ['token_embed', 'pos_embed', 'scale_embed', 'channel_embed', 'norm', 'bias']):
+        if any(nd in name for nd in ['token_embed', 'pos_embed', 'channel_embed', 'norm', 'bias', 'ctx_alpha']):
             no_decay.add(name)
         if mup_enabled and not name.endswith('head.weight') \
            and 'token_embed' not in name and 'pos_embed' not in name \
-           and 'scale_embed' not in name and 'channel_embed' not in name:
+           and 'channel_embed' not in name and 'ctx_alpha' not in name:
             mup_hidden.add(name)
 
     if mup_enabled:
@@ -231,8 +241,8 @@ def train_one_epoch(model, loader, optimizer, scaler, device,
                 out = model(x, z_loss_weight=z_loss_weight)
                 loss = out["loss"]
                 ce_loss = out["ce_loss"]
-                # BPP：优先使用模型返回的 bpp（MSPA 需自行按 H·W·C 归一化，
-                # 因为序列长度 4095 ≠ H·W·C=3072），否则按 iGPT 约定计算。
+                # BPP：优先使用模型返回的 bpp（CC-iGPT 联合 coarse+fine 的 BPP_total
+                # 需自行按 H·W·C 归一化），否则按 iGPT 约定计算。
                 # Ref: Shannon, "A Mathematical Theory of Communication," 1948
                 if "bpp" in out and out["bpp"] is not None:
                     bpp = out["bpp"]
@@ -320,7 +330,7 @@ def validate(model, loader, device, amp_dtype=None):
             out = model(x)
         loss = out["loss"]
         ce_loss = out["ce_loss"]
-        # 验证 BPP：优先使用模型返回的 bpp（MSPA），否则按 iGPT 约定计算
+        # 验证 BPP：优先使用模型返回的 bpp（CC-iGPT），否则按 iGPT 约定计算
         if "bpp" in out and out["bpp"] is not None:
             bpp = out["bpp"]
         else:
@@ -435,31 +445,38 @@ def main():
     mcfg = config["model"]
     model_type = mcfg.get("type", "igpt")
 
-    if model_type == "mspa":
-        model = _build_mspa_from_config(mcfg, device)
+    if model_type == "ccigpt":
+        model = _build_ccigpt_from_config(mcfg, device)
         if rank == 0:
             n_params = sum(p.numel() for p in model.parameters())
-            print(f"MSPA model: {n_params:,} params, "
-                  f"{mcfg.get('num_scales', 6)} scales, "
-                  f"total tokens/image={model.seq_len}")
+            n_coarse = sum(p.numel() for p in model.coarse.parameters())
+            n_fine   = sum(p.numel() for p in model.fine.parameters())
+            print(f"CC-iGPT model: {n_params:,} params "
+                  f"(coarse {n_coarse:,} + fine {n_fine:,}), "
+                  f"pool_factor={mcfg['pool_factor']}, "
+                  f"coarse_seq={model.coarse.seq_len}, fine_seq={model.fine.seq_len}")
     else:
         model = _build_model_from_config(mcfg, device)
 
-    # Fused kernel 状态日志（iGPT/MSPA 使用 Triton kernels）
-    if rank == 0 and model_type in ('igpt', 'mspa'):
+    # Fused kernel 状态日志（iGPT/CC-iGPT 使用 Triton kernels）
+    if rank == 0 and model_type in ('igpt', 'ccigpt'):
         kernel_status = get_fused_kernel_status()
         active = sum(kernel_status.values())
         print(f"Fused Triton kernels: {active}/{len(kernel_status)} active")
         for name, avail in kernel_status.items():
             print(f"  {name}: {'ON' if avail else 'OFF (fallback to PyTorch)'}")
 
-    # muP 初始化（仅 iGPT）
+    # muP 初始化（iGPT/CC-iGPT）
     # Ref: Yang et al., "Tensor Programs V," arXiv:2203.03466, 2022.
     mup_cfg = config["train"].get("mup", {})
-    mup_enabled = mup_cfg.get("enabled", False) and model_type in ('igpt', 'mspa')
+    mup_enabled = mup_cfg.get("enabled", False) and model_type in ('igpt', 'ccigpt')
     mup_base_width = mup_cfg.get("base_width", 64)
     if mup_enabled:
-        model._init_weights_mup(mup_base_width)
+        if model_type == "ccigpt":
+            model.coarse._init_weights_mup(mup_base_width)
+            model.fine._init_weights_mup(mup_base_width)
+        else:
+            model._init_weights_mup(mup_base_width)
         if rank == 0:
             print(f"muP init enabled: base_width={mup_base_width}, d_model={mcfg['d_model']}")
 
@@ -480,9 +497,9 @@ def main():
     base_lr = float(config["train"]["lr"])
     d_model = mcfg.get("d_model", 128)
 
-    # Muon 优化器（仅 iGPT/MSPA）
+    # Muon 优化器（仅 iGPT/CC-iGPT）
     muon_cfg = config["train"].get("muon", {})
-    muon_enabled = muon_cfg.get("enabled", False) and model_type in ('igpt', 'mspa')
+    muon_enabled = muon_cfg.get("enabled", False) and model_type in ('igpt', 'ccigpt')
 
     if muon_enabled:
         from src.mdlic.optim.muon import build_muon_adamw
@@ -495,7 +512,7 @@ def main():
             adamw_betas=(0.9, 0.95),
             adamw_eps=float(config["train"].get("eps", 1e-8)),
             adamw_wd=0.1,
-            no_decay_keywords=['token_embed', 'pos_embed', 'scale_embed', 'channel_embed', 'norm', 'bias'],
+            no_decay_keywords=['token_embed', 'pos_embed', 'channel_embed', 'norm', 'bias', 'ctx_alpha'],
         )
         # 包装成统一接口：optimizer 是一个 list，后续代码统一处理
         optimizers = [opt for opt in [muon_opt, adamw_opt] if opt is not None]
@@ -699,7 +716,7 @@ def main():
         if distributed:
             train_sampler.set_epoch(epoch)
 
-        # ── 训练一个 epoch (iGPT/MSPA 共用 NTP 训练循环) ──
+        # ── 训练一个 epoch (iGPT/CC-iGPT 共用 NTP 训练循环) ──
         avg_loss, avg_bpp = train_one_epoch(
             model, train_loader, optimizer, scaler,
             device=device,
@@ -721,7 +738,7 @@ def main():
             if writer:
                 writer.add_scalar('train/lr', current_lr, epoch)
 
-        # ── 验证 (iGPT/MSPA 共用 BPP 评测, 仅 rank 0 执行避免冗余计算) ──
+        # ── 验证 (iGPT/CC-iGPT 共用 BPP 评测, 仅 rank 0 执行避免冗余计算) ──
         if epoch % config['eval']['interval'] == 0:
             if rank == 0:
                 bpp_avg, std_bpp, loss_avg = validate(model, valid_loader, device, amp_dtype=amp_dtype)
@@ -795,7 +812,7 @@ def main():
             # swa_state 是 fp32，copy_ 时自动 cast 回 param 的 dtype
             param.data.copy_(swa_state[name])
         print(f"SWA: replaced model weights (averaged over {swa_n} checkpoints)")
-        # 用 SWA 权重重新验证 (iGPT/MSPA)
+        # 用 SWA 权重重新验证 (iGPT/CC-iGPT)
         bpp_avg, std_bpp, loss_avg = validate(model, valid_loader, device, amp_dtype=amp_dtype)
         print(f"SWA Validation: Loss {loss_avg:.4f} | BPP {bpp_avg:.4f} ± {std_bpp:.4f}")
         torch.save(raw_model.state_dict(), os.path.join(checkpoint_dir, 'swa.pth'))

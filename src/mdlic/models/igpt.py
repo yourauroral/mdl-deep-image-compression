@@ -184,52 +184,69 @@ class IGPT(nn.Module):
       elif isinstance(module, nn.Embedding):
         nn.init.normal_(module.weight, mean=0.0, std=1.0)
 
-  def forward(self, x, z_loss_weight: float = 1e-4):
+  def _tokenize(self, x: torch.Tensor) -> torch.Tensor:
+    """RGB float [0,1] → 整数 token 序列 (B, T)。"""
+    B = x.size(0)
+    x = x.clamp(0, 1)
+    x = rgb_to_ycbcr_int(x) if self.use_ycbcr else (x * 255).round().long()
+    if self.use_subpixel_ar:
+        # pixel-first: [Y0,Cb0,Cr0, Y1,Cb1,Cr1, ...]
+        x = x.permute(0, 2, 3, 1).reshape(B, -1)
+    else:
+        x = x.reshape(B, -1)
+    return x
+
+  def _embed_inputs(self, input_tokens: torch.Tensor,
+                    coarse_ctx: torch.Tensor = None):
+    """Token → hidden 的统一入口（forward / encode 共用）。
+
+    返回 (hidden, position_ids)。处理:
+      - token_embed
+      - 可选 coarse_ctx additive 注入 (CC-iGPT)
+      - 子像素 AR 的 channel_embed 与像素级 position_ids
+      - 非 RoPE 时的 learned positional embedding
+    """
+    hidden = self.token_embed(input_tokens)
+
+    if coarse_ctx is not None:
+        assert coarse_ctx.shape == hidden.shape, (
+            f"coarse_ctx shape {tuple(coarse_ctx.shape)} != hidden {tuple(hidden.shape)}"
+        )
+        hidden = hidden + coarse_ctx
+
+    T = input_tokens.shape[1]
+    position_ids = None
+    if self.use_subpixel_ar:
+        C = self.in_channels
+        channel_indices = torch.arange(T, device=input_tokens.device) % C
+        hidden = hidden + self.channel_embed(channel_indices).unsqueeze(0)
+        position_ids = torch.arange(T, device=input_tokens.device) // C
+
+    if not self.use_rope:
+        positions = torch.arange(T, device=input_tokens.device)
+        hidden = hidden + self.pos_embed(positions)
+
+    return hidden, position_ids
+
+  def forward(self, x, z_loss_weight: float = 1e-4, coarse_ctx: torch.Tensor = None):
     """
     参数:
       x:             (B, C, H, W) float [0,1]
       z_loss_weight: z-loss 权重，默认 1e-4
                      Ref: PaLM arXiv:2204.02311; OLMo 2 arXiv:2501.00656
+      coarse_ctx:    可选 (B, T-1, d_model) tensor，作为 additive 全局上下文
+                     注入到 token embedding 之上。用于 CC-iGPT 的 fine 模型，
+                     由 coarse 分支 down→up→quantize 后的 token 经 fine.token_embed
+                     得到。形状必须与 token embedding 后的 hidden 一致。
     """
     z_loss_weight = float(z_loss_weight)
-    x = x.clamp(0, 1)
-    B = x.size(0)
 
-    if self.use_ycbcr:
-        x = rgb_to_ycbcr_int(x)   # (B, 3, H, W) long [0,255]
-    else:
-        x = (x * 255).round().long()
-
-    if self.use_subpixel_ar:
-        # 子像素自回归: pixel-first 排列
-        # (B, C, H, W) → (B, H, W, C) → (B, H*W*C)
-        # 序列: [Y0, Cb0, Cr0, Y1, Cb1, Cr1, ...]
-        # Ref: Salimans et al., "PixelCNN++," ICLR 2017
-        x = x.permute(0, 2, 3, 1).reshape(B, -1)
-    else:
-        x = x.reshape(B, -1)
-
+    tokens = self._tokenize(x)
     # NTP：输入 x[0..T-1]，预测 x[1..T]
-    input_tokens  = x[:, :-1]
-    target_tokens = x[:, 1:]
+    input_tokens  = tokens[:, :-1]
+    target_tokens = tokens[:, 1:]
 
-    hidden = self.token_embed(input_tokens)
-
-    # 子像素自回归: 添加 channel embedding + 像素级 RoPE position_ids
-    position_ids = None
-    if self.use_subpixel_ar:
-        T = input_tokens.shape[1]
-        C = self.in_channels
-        channel_indices = torch.arange(T, device=input_tokens.device) % C
-        hidden = hidden + self.channel_embed(channel_indices).unsqueeze(0)
-        # 同一像素内的 C 个 token 共享同一位置 ID
-        position_ids = torch.arange(T, device=input_tokens.device) // C
-
-    # Learned positional embedding（use_rope=False 时）
-    if not self.use_rope:
-        T = input_tokens.shape[1]
-        positions = torch.arange(T, device=input_tokens.device)
-        hidden = hidden + self.pos_embed(positions)
+    hidden, position_ids = self._embed_inputs(input_tokens, coarse_ctx=coarse_ctx)
 
     for block in self.blocks:
       hidden = block(hidden, mask=None, position_ids=position_ids)
@@ -287,37 +304,20 @@ class IGPT(nn.Module):
     }
 
   @torch.no_grad()
-  def encode(self, x, max_layer: int = None, pool: bool = False):
+  def encode(self, x, max_layer: int = None, pool: bool = False, coarse_ctx: torch.Tensor = None):
     """
     仅走 embed + blocks 到 max_layer，不计算 head / loss。
 
     参数:
-      pool: True 时对每层输出做 GAP 并转 CPU，返回 (B, d_model)，大幅节省显存。
-            False 时返回完整 (B, T, d_model)（兼容旧调用）。
+      pool:        True 时对每层输出做 GAP 并转 CPU，返回 (B, d_model)，大幅节省显存。
+                   False 时返回完整 (B, T, d_model)（兼容旧调用）。
+      coarse_ctx:  CC-iGPT fine 分支的可选全局上下文（与 forward 同义）。
     返回:
       list[Tensor]，长度为 max_layer+1。
     """
-    x = x.clamp(0, 1)
-    B = x.size(0)
-    x = rgb_to_ycbcr_int(x) if self.use_ycbcr else (x * 255).round().long()
-    if self.use_subpixel_ar:
-      x = x.permute(0, 2, 3, 1).reshape(B, -1)
-    else:
-      x = x.reshape(B, -1)
-    input_tokens = x[:, :-1]
-    hidden = self.token_embed(input_tokens)
-
-    position_ids = None
-    if self.use_subpixel_ar:
-      T = input_tokens.shape[1]
-      C = self.in_channels
-      channel_indices = torch.arange(T, device=input_tokens.device) % C
-      hidden = hidden + self.channel_embed(channel_indices).unsqueeze(0)
-      position_ids = torch.arange(T, device=input_tokens.device) // C
-    if not self.use_rope:
-      T = input_tokens.shape[1]
-      positions = torch.arange(T, device=input_tokens.device)
-      hidden = hidden + self.pos_embed(positions)
+    tokens = self._tokenize(x)
+    input_tokens = tokens[:, :-1]
+    hidden, position_ids = self._embed_inputs(input_tokens, coarse_ctx=coarse_ctx)
 
     if max_layer is None:
       max_layer = len(self.blocks) - 1
