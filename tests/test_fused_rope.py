@@ -93,17 +93,24 @@ class TestFusedRoPE:
         tol = TOLERANCES[dtype]
         torch.testing.assert_close(k_fused, k_ref, **tol)
 
-    def test_inplace_semantics(self, B, h, T, d_k, dtype):
-        """验证就地修改语义: 返回的 tensor 与输入共享存储"""
+    def test_out_of_place_semantics(self, B, h, T, d_k, dtype):
+        """验证 out-of-place 语义：返回新张量，autograd 安全（input 不被覆盖）。"""
         torch.manual_seed(42)
         device = "cuda"
         q = torch.randn(B, h, T, d_k, device=device, dtype=dtype).contiguous()
         k = torch.randn(B, h, T, d_k, device=device, dtype=dtype).contiguous()
         cos, sin = self._get_cos_sin(T, d_k, device, dtype)
 
-        q_ptr = q.data_ptr()
-        k_ptr = k.data_ptr()
+        q_ref = q.clone()
+        k_ref = k.clone()
         q_out, k_out = fused_apply_rotary_emb(q, k, cos, sin)
+
+        # 不共享存储
+        assert q_out.data_ptr() != q.data_ptr()
+        assert k_out.data_ptr() != k.data_ptr()
+        # 输入未被修改
+        torch.testing.assert_close(q, q_ref)
+        torch.testing.assert_close(k, k_ref)
 
 
 
