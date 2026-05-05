@@ -315,16 +315,16 @@ def train_one_epoch(model, loader, optimizer, scaler, device,
 def validate(model, loader, device, amp_dtype=None):
     """验证集评估，返回 (avg_bpp, std_bpp, avg_loss)。
 
+    DDP-aware：每个 rank 通过 DistributedSampler 处理一个分片，最后用
+    all_reduce(SUM) 聚合 weighted sums + n_total，避免 rank 0 单跑导致 barrier 超时。
+
     amp_dtype: 传入 AMP dtype（如 torch.bfloat16）以在验证时也使用混合精度，
                减少显存占用和加速。None 则使用 fp32。
     """
     model.eval()
-    # 加权平均：累加 per-batch (sum_loss, sum_bpp, batch_size)，
-    # 最后除以总样本数。避免 unweighted batch mean 在最后一批不满 batch_size
-    # 时产生偏差（CIFAR-10 测试 10000 / batch=64，最后一批 16，偏差 ~0.5%）。
     total_bpp_weighted = 0.0
     total_loss_weighted = 0.0
-    bpp_per_batch = []   # 仅用于估算 std（粗略）
+    sum_sq_bpp = 0.0   # E[X^2] 估算 std（DDP 友好，不依赖 per-batch 列表）
     n_total = 0
     use_amp = amp_dtype is not None and device.type == 'cuda'
     for batch in loader:
@@ -334,12 +334,10 @@ def validate(model, loader, device, amp_dtype=None):
             x = batch
         x = x.to(device)
         B, C, _, _ = x.shape
-        # 验证时也使用 AMP，与训练保持一致的数值精度，同时节省显存
         with autocast(device_type="cuda", dtype=amp_dtype) if use_amp else nullcontext():
             out = model(x)
         loss = out["loss"]
         ce_loss = out["ce_loss"]
-        # 验证 BPP：优先使用模型返回的 bpp（CC-iGPT），否则按 iGPT 约定计算
         if "bpp" in out and out["bpp"] is not None:
             bpp = out["bpp"]
         else:
@@ -348,11 +346,21 @@ def validate(model, loader, device, amp_dtype=None):
         loss_val = loss.item()
         total_bpp_weighted += bpp_val * B
         total_loss_weighted += loss_val * B
-        bpp_per_batch.append(bpp_val)
+        sum_sq_bpp += (bpp_val ** 2) * B
         n_total += B
+
+    # DDP 聚合：跨 rank 求和后再求平均，结果在所有 rank 上一致
+    if dist.is_available() and dist.is_initialized():
+        agg = torch.tensor([total_bpp_weighted, total_loss_weighted, sum_sq_bpp, float(n_total)],
+                           device=device, dtype=torch.float64)
+        dist.all_reduce(agg, op=dist.ReduceOp.SUM)
+        total_bpp_weighted, total_loss_weighted, sum_sq_bpp, n_total_f = agg.tolist()
+        n_total = int(n_total_f)
+
     avg_bpp = total_bpp_weighted / n_total
     avg_loss = total_loss_weighted / n_total
-    std_bpp = float(np.std(bpp_per_batch))
+    var_bpp = max(sum_sq_bpp / n_total - avg_bpp ** 2, 0.0)
+    std_bpp = float(math.sqrt(var_bpp))
     return avg_bpp, std_bpp, avg_loss
 
 
@@ -408,7 +416,9 @@ def main():
     if distributed:
         local_rank = int(os.environ.get("LOCAL_RANK", 0))
         torch.cuda.set_device(local_rank)
-        dist.init_process_group(backend='nccl')
+        # rank 0 单独跑 validation 期间，rank 1 在 barrier 等待，需放宽 NCCL 超时（默认 10min）
+        from datetime import timedelta
+        dist.init_process_group(backend='nccl', timeout=timedelta(hours=2))
         rank = dist.get_rank()
     else:
         local_rank = 0
@@ -447,7 +457,9 @@ def main():
     # 验证集: batch_size 和 num_workers 从 config 读取，支持不同 GPU 显存调整
     valid_batch_size = config['data'].get('valid_batch_size', 64)
     valid_num_workers = config['data'].get('valid_num_workers', 2)
+    valid_sampler = DistributedSampler(valid_dataset, shuffle=False) if distributed else None
     valid_loader = DataLoader(valid_dataset, batch_size=valid_batch_size, shuffle=False,
+                              sampler=valid_sampler,
                               num_workers=valid_num_workers, pin_memory=True)
 
     # Model — 根据 type 分发构建
@@ -747,10 +759,10 @@ def main():
             if writer:
                 writer.add_scalar('train/lr', current_lr, epoch)
 
-        # ── 验证 (iGPT/CC-iGPT 共用 BPP 评测, 仅 rank 0 执行避免冗余计算) ──
+        # ── 验证 (DDP: 所有 rank 跑分片，all_reduce 聚合；rank 0 写日志/保存) ──
         if epoch % config['eval']['interval'] == 0:
+            bpp_avg, std_bpp, loss_avg = validate(model, valid_loader, device, amp_dtype=amp_dtype)
             if rank == 0:
-                bpp_avg, std_bpp, loss_avg = validate(model, valid_loader, device, amp_dtype=amp_dtype)
                 print(f"Validation: Loss {loss_avg:.4f} | BPP {bpp_avg:.4f} ± {std_bpp:.4f}")
                 if writer:
                     writer.add_scalar('val/loss', loss_avg, epoch)
@@ -765,8 +777,6 @@ def main():
                 if bpp_avg < best_bpp:
                     best_bpp = bpp_avg
                     torch.save(raw_model.state_dict(), os.path.join(checkpoint_dir, 'best.pth'))
-            if dist.is_available() and dist.is_initialized():
-                dist.barrier()
 
         if scheduler is not None:
             scheduler.step()
@@ -815,18 +825,21 @@ def main():
                 ckpt_data['swa_n'] = swa_n
             torch.save(ckpt_data, os.path.join(checkpoint_dir, f'epoch_{epoch}.pth'))
 
-    # SWA 后处理：替换权重 → 重新验证 → 保存（仅 rank 0 维护 swa_state）
-    if swa_enabled and swa_state is not None and rank == 0:
-        for name, param in raw_model.named_parameters():
-            # swa_state 是 fp32，copy_ 时自动 cast 回 param 的 dtype
-            param.data.copy_(swa_state[name])
-        print(f"SWA: replaced model weights (averaged over {swa_n} checkpoints)")
-        # 用 SWA 权重重新验证 (iGPT/CC-iGPT)
+    # SWA 后处理：rank 0 替换权重 + broadcast → 全 rank 重新验证 → rank 0 保存
+    if swa_enabled and swa_state is not None:
+        if rank == 0:
+            for name, param in raw_model.named_parameters():
+                param.data.copy_(swa_state[name])
+            print(f"SWA: replaced model weights (averaged over {swa_n} checkpoints)")
+        if dist.is_available() and dist.is_initialized():
+            for param in raw_model.parameters():
+                dist.broadcast(param.data, src=0)
         bpp_avg, std_bpp, loss_avg = validate(model, valid_loader, device, amp_dtype=amp_dtype)
-        print(f"SWA Validation: Loss {loss_avg:.4f} | BPP {bpp_avg:.4f} ± {std_bpp:.4f}")
-        torch.save(raw_model.state_dict(), os.path.join(checkpoint_dir, 'swa.pth'))
-        if writer:
-            writer.add_scalar('val/swa_bpp', bpp_avg, total_epochs)
+        if rank == 0:
+            print(f"SWA Validation: Loss {loss_avg:.4f} | BPP {bpp_avg:.4f} ± {std_bpp:.4f}")
+            torch.save(raw_model.state_dict(), os.path.join(checkpoint_dir, 'swa.pth'))
+            if writer:
+                writer.add_scalar('val/swa_bpp', bpp_avg, total_epochs)
 
     if rank == 0:
         if csv_file:
