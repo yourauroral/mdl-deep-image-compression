@@ -38,6 +38,7 @@ from torchvision.datasets import CIFAR10, CIFAR100
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from src.mdlic.models.igpt import IGPT
+from src.mdlic.models.cc_igpt import CCIGPT
 
 
 # ──────────────────────────────────────────────────────────────
@@ -51,14 +52,27 @@ def load_config(path):
 
 
 def build_model(mcfg, device):
-    """从 config['model'] 构建 IGPT（仅支持 iGPT；CC-iGPT 的 linear probe
-    需对 fine 子模型单独取 hidden state，暂不支持）。"""
+    """构建 IGPT 或 CCIGPT（CC-iGPT 的 encode() 内部走 fine 子模型 + coarse_ctx）。"""
     model_type = mcfg.get("type", "igpt")
-    if model_type != "igpt":
-        raise NotImplementedError(
-            f"Linear probe 当前仅支持 igpt，不支持 model.type='{model_type}'。"
-            "CC-iGPT 可单独对 model.fine 做 probe（待实现）。"
-        )
+    if model_type == "ccigpt":
+        return CCIGPT(
+            image_size=mcfg["image_size"],
+            in_channels=mcfg["in_channels"],
+            vocab_size=mcfg["vocab_size"],
+            pool_factor=mcfg.get("pool_factor", 4),
+            fine_d_model=mcfg["fine"]["d_model"], fine_N=mcfg["fine"]["N"],
+            fine_h=mcfg["fine"]["h"],            fine_d_ff=mcfg["fine"]["d_ff"],
+            coarse_d_model=mcfg["coarse"]["d_model"], coarse_N=mcfg["coarse"]["N"],
+            coarse_h=mcfg["coarse"]["h"],            coarse_d_ff=mcfg["coarse"]["d_ff"],
+            dropout=mcfg["dropout"],
+            use_ycbcr=mcfg.get("use_ycbcr", True),
+            use_rope=mcfg.get("use_rope", True),
+            use_post_norm=mcfg.get("use_post_norm", True),
+            use_swiglu=mcfg.get("use_swiglu", True),
+            use_qk_norm=mcfg.get("use_qk_norm", True),
+            use_depth_scaled_init=mcfg.get("use_depth_scaled_init", True),
+            use_zloss=mcfg.get("use_zloss", True),
+        ).to(device)
     return IGPT(
         image_size=mcfg["image_size"],
         in_channels=mcfg["in_channels"],
@@ -244,8 +258,13 @@ def main():
     for p in model.parameters():
         p.requires_grad_(False)
 
-    N = mcfg["N"]
-    d_model = mcfg["d_model"]
+    model_type = mcfg.get("type", "igpt")
+    if model_type == "ccigpt":
+        N = mcfg["fine"]["N"]
+        d_model = mcfg["fine"]["d_model"]
+    else:
+        N = mcfg["N"]
+        d_model = mcfg["d_model"]
 
     # --- 解析层索引 ---
     if args.layers == "all":
