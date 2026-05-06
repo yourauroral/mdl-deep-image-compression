@@ -79,21 +79,43 @@ class CCIGPT(nn.Module):
         self.vocab_size = vocab_size
         self.use_ycbcr = use_ycbcr
 
-    def _compute_coarse_ctx(self, x_c_float: torch.Tensor) -> torch.Tensor:
-        """coarse float 输入 → fine 用的 additive coarse context (B, T_fine-1, d_model)。
+    def _compute_coarse_ctx(self, coarse_tokens: torch.Tensor) -> torch.Tensor:
+        """coarse 量化 token (B, N_c) → fine 用 additive coarse context (B, T_fine-1, d_model)。
 
-        UP 后量化路径必须与 fine encoder 保持一致 —— fine 内部 use_subpixel_ar=False
-        强制 channel-first reshape。
+        Bit-exact 一致性约束：bitstream 只携带 coarse 量化 token，decoder 必须
+        独立从 token 重建出与 encoder 相同的 fine 条件分布。因此本路径输入是
+        **量化后的 coarse token**（不是 float），整个管线 encoder/decoder 共用。
+
+        管线：
+          token (YCbCr or RGB int 0-255) → 反量化 float → 若是 YCbCr 则 BT.601 inverse
+          → bilinear UP 到 fine 分辨率 → clamp → 再 tokenize (与 fine encoder 同规则)
+          → fine.token_embed
         """
+        B = coarse_tokens.size(0)
+        S, C = self.coarse_size, self.in_channels
+        # IGPT._tokenize 在 use_subpixel_ar=False 模式直接 (B,C,S,S).reshape(B,-1)，
+        # 即 channel-first 平铺；逆操作是 view(B,C,S,S)，不需要 permute。
+        # CCIGPT 在 __init__ 强制 use_subpixel_ar=False，所以这里的 reshape 安全。
+        rec = coarse_tokens.view(B, C, S, S).float() / 255.0
+
+        if self.use_ycbcr:
+            # ITU-R BT.601 inverse: YCbCr [0,1] → RGB [0,1]
+            y, cb, cr = rec[:, 0], rec[:, 1], rec[:, 2]
+            r = y + 1.402 * (cr - 0.5)
+            g = y - 0.344136 * (cb - 0.5) - 0.714136 * (cr - 0.5)
+            b = y + 1.772 * (cb - 0.5)
+            rec = torch.stack([r, g, b], dim=1)
+        rec = rec.clamp(0.0, 1.0)
+
         x_up = F.interpolate(
-            x_c_float, size=(self.image_size, self.image_size),
+            rec, size=(self.image_size, self.image_size),
             mode='bilinear', align_corners=False,
         )
         if self.use_ycbcr:
             x_up_tok = rgb_to_ycbcr_int(x_up)
         else:
             x_up_tok = (x_up.clamp(0, 1) * 255).round().long()
-        x_up_tok = x_up_tok.reshape(x_up_tok.size(0), -1)        # (B, H*W*C)
+        x_up_tok = x_up_tok.reshape(B, -1)                       # (B, H*W*C)
         coarse_ctx = self.fine.token_embed(x_up_tok)             # (B, T, d_model)
         return coarse_ctx[:, :-1]                                 # AR shift
 
@@ -109,7 +131,9 @@ class CCIGPT(nn.Module):
         x_c_float = F.adaptive_avg_pool2d(x, self.coarse_size)
 
         out_c = self.coarse(x_c_float, z_loss_weight=z_loss_weight)
-        coarse_ctx = self._compute_coarse_ctx(x_c_float)
+        # bit-exact: ctx 走 coarse 量化 token 重建路径（decoder 同款）
+        coarse_tokens = self.coarse._tokenize(x_c_float)
+        coarse_ctx = self._compute_coarse_ctx(coarse_tokens)
         out_f = self.fine(x, z_loss_weight=z_loss_weight,
                           coarse_ctx=self.ctx_alpha * coarse_ctx)
 
@@ -131,6 +155,7 @@ class CCIGPT(nn.Module):
         """对 fine 子模型做 linear probe / 表征提取（含 coarse_ctx 条件）。"""
         x = x.clamp(0, 1).to(torch.float32)
         x_c_float = F.adaptive_avg_pool2d(x, self.coarse_size)
-        coarse_ctx = self._compute_coarse_ctx(x_c_float)
+        coarse_tokens = self.coarse._tokenize(x_c_float)
+        coarse_ctx = self._compute_coarse_ctx(coarse_tokens)
         return self.fine.encode(x, max_layer=max_layer, pool=pool,
                                 coarse_ctx=self.ctx_alpha * coarse_ctx)

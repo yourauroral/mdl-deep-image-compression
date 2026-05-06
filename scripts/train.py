@@ -193,6 +193,17 @@ def _get_param_groups(model, weight_decay=0.1, mup_enabled=False,
 
 
 # ==================== Training ====================
+def _atomic_save(obj, path: str):
+    """torch.save 的原子写包装：先写 .tmp 再 os.replace，避免崩溃中断产生半截文件。
+
+    Why: 直接覆盖式 torch.save 在写入过程中被 SIGTERM/OOM 中断会留下损坏的
+    checkpoint，下次 --resume 直接报错。os.replace 在同一文件系统下是原子的。
+    """
+    tmp_path = path + ".tmp"
+    torch.save(obj, tmp_path)
+    os.replace(tmp_path, path)
+
+
 def train_one_epoch(model, loader, optimizer, scaler, device,
                     epoch, log_freq, writer, clip_max_norm,
                     amp_dtype=torch.float16, grad_accum_steps=1,
@@ -790,7 +801,7 @@ def main():
                     csv_file.flush()
                 if bpp_avg < best_bpp:
                     best_bpp = bpp_avg
-                    torch.save(raw_model.state_dict(), os.path.join(checkpoint_dir, 'best.pth'))
+                    _atomic_save(raw_model.state_dict(), os.path.join(checkpoint_dir, 'best.pth'))
 
         if scheduler is not None:
             scheduler.step()
@@ -800,7 +811,7 @@ def main():
         # swa_state[name] = swa_state[name] + (param - swa_state[name]) / (n+1)
         #                  = swa_state[name].lerp_(param, 1/(n+1))
         # Ref: Izmailov et al., arXiv:1803.05407
-        if swa_enabled and rank == 0 and epoch >= swa_start_epoch and epoch % swa_update_interval == 0:
+        if swa_enabled and rank == 0 and epoch >= swa_start_epoch and (epoch - swa_start_epoch) % swa_update_interval == 0:
             # 一次性 batched NaN 检查，避免逐参数 .item() 多次同步
             has_nan = torch.stack([torch.isnan(p.data).any() for p in raw_model.parameters()]).any().item()
             if has_nan:
@@ -837,7 +848,7 @@ def main():
             if swa_state is not None:
                 ckpt_data['swa_state'] = swa_state
                 ckpt_data['swa_n'] = swa_n
-            torch.save(ckpt_data, os.path.join(checkpoint_dir, f'epoch_{epoch}.pth'))
+            _atomic_save(ckpt_data, os.path.join(checkpoint_dir, f'epoch_{epoch}.pth'))
 
     # SWA 后处理：rank 0 替换权重 + broadcast → 全 rank 重新验证 → rank 0 保存
     if swa_enabled and swa_state is not None:
@@ -851,7 +862,7 @@ def main():
         bpp_avg, std_bpp, loss_avg = validate(model, valid_loader, device, amp_dtype=amp_dtype)
         if rank == 0:
             print(f"SWA Validation: Loss {loss_avg:.4f} | BPP {bpp_avg:.4f} ± {std_bpp:.4f}")
-            torch.save(raw_model.state_dict(), os.path.join(checkpoint_dir, 'swa.pth'))
+            _atomic_save(raw_model.state_dict(), os.path.join(checkpoint_dir, 'swa.pth'))
             if writer:
                 writer.add_scalar('val/swa_bpp', bpp_avg, total_epochs)
 

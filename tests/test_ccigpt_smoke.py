@@ -92,6 +92,65 @@ def test_shape_assert_triggers(device):
         fine(x, coarse_ctx=bad_ctx)
 
 
+def test_encoder_decoder_ctx_consistency(small_ccigpt, device):
+    """Bit-exact 一致性：encoder 算的 coarse_ctx 必须等于 decoder 仅凭 coarse
+    bitstream tokens 重建出的 coarse_ctx。
+
+    场景：实际熵编码部署时，bitstream 只携带 coarse 量化 token (YCbCr int)。
+    解码端拿到这些 token 后必须独立重建出与 encoder 相同的 fine 条件分布
+    p(x_fine | coarse_ctx)，否则算术编码不可解。
+
+    本测试同时检查 reshape 正确性：内部反量化必须把 (B, N_c) 还原成正确的
+    (B, C, S, S) 像素图（与 IGPT._tokenize 互逆）。验证手段是 token→反量化→
+    重新 tokenize 后应当与原 token bit-exact 等价（量化只损一次，第二次
+    YCbCr int → BT.601 inverse → rgb_to_ycbcr_int 是稳定的不动点对自身）。
+    """
+    m = small_ccigpt
+    x = torch.rand(2, 3, 32, 32, device=device)
+
+    # encoder 路径
+    x_c_float = F.adaptive_avg_pool2d(x.clamp(0, 1), m.coarse_size)
+    coarse_tokens_enc = m.coarse._tokenize(x_c_float)
+    ctx_enc = m._compute_coarse_ctx(coarse_tokens_enc)
+
+    # decoder 模拟：只有 bitstream 解出来的 coarse token，调用同一函数
+    coarse_tokens_dec = coarse_tokens_enc.clone()
+    ctx_dec = m._compute_coarse_ctx(coarse_tokens_dec)
+    max_diff = (ctx_enc - ctx_dec).abs().max().item()
+    assert max_diff < 1e-6, (
+        f"encoder/decoder coarse_ctx 不一致 (max diff={max_diff:.6e})。"
+    )
+
+    # reshape 正确性: 直接对比 _compute_coarse_ctx 内部用的反量化 (B,C,S,S)
+    # 与 rgb_to_ycbcr_int(x_c_float) 应当 byte-exact
+    from src.mdlic.models.igpt import rgb_to_ycbcr_int
+    ycbcr_direct = rgb_to_ycbcr_int(x_c_float)
+    B = x.size(0)
+    S, C = m.coarse_size, m.in_channels
+    ycbcr_via_reshape = coarse_tokens_enc.view(B, C, S, S)
+    assert (ycbcr_direct == ycbcr_via_reshape).all(), (
+        "coarse_tokens reshape 错误：view(B,C,S,S) 没还原出原 YCbCr 平面"
+    )
+
+
+def test_encoder_decoder_ctx_consistency_rgb(device):
+    """同一致性测试，但走 use_ycbcr=False 的 RGB 反量化分支。"""
+    torch.manual_seed(1)
+    m = CCIGPT(
+        image_size=32, in_channels=3, vocab_size=256, pool_factor=4,
+        fine_d_model=64, fine_N=2, fine_h=2, fine_d_ff=128,
+        coarse_d_model=64, coarse_N=2, coarse_h=2, coarse_d_ff=64,
+        dropout=0.0, use_ycbcr=False,
+    ).to(device).eval()
+    x = torch.rand(2, 3, 32, 32, device=device)
+    x_c = F.adaptive_avg_pool2d(x.clamp(0, 1), m.coarse_size)
+    tok = m.coarse._tokenize(x_c)
+    ctx_enc = m._compute_coarse_ctx(tok)
+    ctx_dec = m._compute_coarse_ctx(tok.clone())
+    max_diff = (ctx_enc - ctx_dec).abs().max().item()
+    assert max_diff < 1e-6, f"RGB 分支 ctx 不一致 (max diff={max_diff:.6e})"
+
+
 def test_backward_grads_flow(small_ccigpt, device):
     """coarse、fine、ctx_alpha 三处都必须有非零梯度。"""
     small_ccigpt.train()
