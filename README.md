@@ -2,8 +2,8 @@
 
 基于 **Minimum Description Length (MDL)** 原则的深度图像压缩系统设计与实现。核心命题：**压缩即预测** — CE loss 直接对应 Shannon 最优编码长度 (Shannon 1948, Delétang et al. 2024)。
 
-- **Phase A (完成)**: iGPT token-level 自回归压缩 + 8 个手写 Triton Kernel (~2,400 行)，iGPT-S CIFAR-10 SWA **2.9739 bits/dim**
-- **Phase B (训练中)**: CC-iGPT（Coarse-Conditioned iGPT）双尺度条件自回归 — 浅层 coarse iGPT (8×8, 192 token) 独立编码进 bitstream，UP + 量化后通过 additive embedding（可学习 α）注入 fine iGPT (32×32, 3072 token)。300 epoch，目标 BPP_total < 2.97
+- **Phase A (完成)**: iGPT token-level 自回归压缩 + 7 个手写 Triton Kernel (~2,100 行)，iGPT-S CIFAR-10 SWA **2.9739 bits/dim**
+- **Phase B (完成)**: CC-iGPT（Coarse-Conditioned iGPT）双尺度条件自回归 — 浅层 coarse iGPT (8×8, 192 token) 独立编码进 bitstream，UP + 量化后通过 additive embedding（可学习 α）注入 fine iGPT (32×32, 3072 token)。CIFAR-10 test BPP_total **2.81 bits/dim**
 - **Phase C (完成)**: Demo 前端可视化系统 (FastAPI + Chart.js, 5 个展示面板)
 
 ## Baseline 对比
@@ -15,6 +15,7 @@
 | PixelSNAIL | 380M | 2.85 | Chen et al., ICML 2018 |
 | **iGPT-S (Ours, best)** | **76.05M** | **2.9792** | d_model=512, N=24, 200 epochs |
 | **iGPT-S (Ours, SWA)** | **76.05M** | **2.9739** | SWA averaged over 21 checkpoints |
+| **CC-iGPT (Ours)** | **~95M** | **2.81** | 双尺度条件 AR (fine iGPT-S + 浅层 coarse iGPT, pool=4×) |
 | PNG (lossless) | — | ~5.87 | 传统方法 |
 | WebP (lossless) | — | ~5.02 | 传统方法 |
 
@@ -184,14 +185,13 @@ scp -P <port> root@<autodl-host>:/root/autodl-tmp/mdl-deep-image-compression/exp
                               |                      |
                     +---------v-----------+          |
                     |    Output Head      |--- Weight Tying
-                    |    Linear(→256)     |   (fused path: backward
-                    +---------+-----------+    显式回算 d_W, 保证
-                              |                 tied head 正确梯度)
+                    |    Linear(→256)     |
+                    +---------+-----------+
+                              |
                     +---------v-----------+
                     | Cross-Entropy Loss  |
                     | + z-loss 正则 (1e-4) |
-                    | + Fused Linear+CE   |
-                    | (Triton kernel)     |
+                    | (Fused CE Triton)   |
                     +---------+-----------+
                               |
               iGPT:    BPP = CE × T / ln(2) / (H·W·C)
@@ -276,7 +276,6 @@ GPTBlock, MultiHeadAttentionBlock (RoPE + QK-Norm + Flash Attention + attn_mask)
 | Fused RoPE | ~123 | 就地旋转 Q/K |
 | Fused Add+RMSNorm | ~217 | post-norm 残差+归一化合并 |
 | Fused Attn+RoPE | ~100 | RoPE + Flash Attention 合并 |
-| Fused Linear+CE | ~280 | output head + CE, 避免实例化 logits；backward 显式回算 d_W 保证 weight-tying 下 head 权重正确更新 |
 
 全部自动降级到 PyTorch，全部有独立单元测试。
 
@@ -290,12 +289,12 @@ GPTBlock, MultiHeadAttentionBlock (RoPE + QK-Norm + Flash Attention + attn_mask)
 ```
 src/mdlic/
 ├── models/    igpt.py, cc_igpt.py, layers.py
-├── ops/       8 个 Triton kernels (flash_attn, fused_rms_norm, ...)
+├── ops/       7 个 Triton kernels (flash_attn, fused_rms_norm, ...)
 ├── optim/     muon.py (Muon optimizer)
 └── utils/     seed, BPP
 scripts/       train.py, evaluate.py, linear_probe.py, dryrun_forward.py, profile_kernels.py
 configs/       igpt_cifar10_s, igpt_cifar100_s, igpt_imagenet32_s, ccigpt_cifar10_s
-tests/         8 个 kernel 单元测试
+tests/         7 个 kernel 单元测试
 demo/
 ├── server.py          FastAPI 后端 (predict / metrics / probe / kernels / scales)
 ├── static/            HTML + JS (Chart.js) + CSS 前端，5 个面板：上传预测、BPP 对比、

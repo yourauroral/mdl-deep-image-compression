@@ -10,5 +10,5 @@
     {"name": "Flash Attention v2", "triton_ms": 3.673, "pytorch_ms": 3.983, "speedup": 1.08, "mem_save_pct": 0.0},
     {"name": "Fused Attn+RoPE", "triton_ms": 5.426, "pytorch_ms": 7.184, "speedup": 1.32, "mem_save_pct": 42.3}
   ],
-  "note": "Forward-only, H800 PCIe, 2026-05-01. fused_linear_ce 在 V=256 下劣化已排除。"
+  "note": "Forward-only, H800 PCIe, 2026-05-01."
 }
