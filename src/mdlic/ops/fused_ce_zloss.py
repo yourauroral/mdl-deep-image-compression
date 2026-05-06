@@ -176,6 +176,11 @@ class FusedCrossEntropyZLossFunction(torch.autograd.Function):
         # logits: (M, V)，targets: (M,)
         assert logits.ndim == 2, f"logits 必须为 2D (M, V)，got ndim={logits.ndim}"
         assert targets.ndim == 1, f"targets 必须为 1D (M,)，got ndim={targets.ndim}"
+        # forward kernel 用 stride_logits=stride(0) 但只读单行 BLOCK_V 切片，
+        # 要求 stride(1)==1 且行连续；非 contiguous 时 backward 用同一 logits 重算
+        # softmax，stride 假设若不一致会读到错位元素。这里强制 contiguous 防御。
+        logits = logits.contiguous()
+        targets = targets.contiguous()
         M, V = logits.shape
         assert targets.shape[0] == M, (
             f"logits 行数 ({M}) 与 targets 长度 ({targets.shape[0]}) 不匹配"

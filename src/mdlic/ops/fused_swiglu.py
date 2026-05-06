@@ -154,7 +154,7 @@ class FusedSwiGLUFunction(torch.autograd.Function):
 
         _fused_swiglu_fwd_kernel[grid](
             a_flat, b_flat, c,
-            stride_m=N,
+            stride_m=a_flat.stride(0),
             N=N,
             BLOCK_N=BLOCK_N,
         )
@@ -180,7 +180,7 @@ class FusedSwiGLUFunction(torch.autograd.Function):
         _fused_swiglu_bwd_kernel[grid](
             a_flat, b_flat, dc_flat,
             da, db,
-            stride_m=N,
+            stride_m=a_flat.stride(0),
             N=N,
             BLOCK_N=BLOCK_N,
         )

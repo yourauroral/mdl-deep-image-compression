@@ -751,7 +751,11 @@ class TritonAttention(torch.autograd.Function):
             num_stages=3,
         )
 
-        # 保存 padded 版本供 backward 使用（避免重复 padding）
+        # 保存 padded 版本供 backward 使用（避免重复 padding）。
+        # 取舍：当 PAD/SEQ_LEN_PADDED 较大时（如 SEQ_LEN=193 → PAD=63 → ~25%
+        # 显存浪费），重新 pad 在 backward 入口可省下保存成本；但当前所有训练
+        # 形状（CIFAR seq_len=3071, ImageNet32 同）PAD ≤ BLOCK_MACRO=64 → ≤2%，
+        # 不值得为这个边角形状增加 backward 入口的复杂度。
         ctx.save_for_backward(Q, K, V, O, M)
         ctx.softmax_scale = softmax_scale
         ctx.HEAD_DIM = HEAD_DIM
@@ -900,11 +904,12 @@ class TritonAttention(torch.autograd.Function):
             num_stages=NUM_STAGES,
         )
 
-        # Unpad 梯度
+        # Unpad 梯度。slice 是 view，contiguous() 一次让上游 autograd 收到
+        # 行连续张量，避免后续算子（matmul 等）隐式拷贝。
         if PAD > 0:
-            dQ = dQ[:, :, :SEQ_LEN_ORIG, :]
-            dK = dK[:, :, :SEQ_LEN_ORIG, :]
-            dV = dV[:, :, :SEQ_LEN_ORIG, :]
+            dQ = dQ[:, :, :SEQ_LEN_ORIG, :].contiguous()
+            dK = dK[:, :, :SEQ_LEN_ORIG, :].contiguous()
+            dV = dV[:, :, :SEQ_LEN_ORIG, :].contiguous()
 
         return dQ, dK, dV, None, None
 

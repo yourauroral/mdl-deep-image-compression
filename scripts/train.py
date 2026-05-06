@@ -313,18 +313,27 @@ def train_one_epoch(model, loader, optimizer, scaler, device,
 # ==================== Validation ====================
 @torch.no_grad()
 def validate(model, loader, device, amp_dtype=None):
-    """验证集评估，返回 (avg_bpp, std_bpp, avg_loss)。
+    """验证集评估，返回 (avg_bpp, std_bpp_batch, avg_loss)。
 
     DDP-aware：每个 rank 通过 DistributedSampler 处理一个分片，最后用
     all_reduce(SUM) 聚合 weighted sums + n_total，避免 rank 0 单跑导致 barrier 超时。
 
     amp_dtype: 传入 AMP dtype（如 torch.bfloat16）以在验证时也使用混合精度，
                减少显存占用和加速。None 则使用 fp32。
+
+    std_bpp 语义（重要，论文报告时注意）:
+        当前的 `std_bpp` 是 **batch 级加权波动**，不是图像级标准差。
+        公式 var = E[batch_mean_bpp² · B] / n_total − avg_bpp² 里 batch_mean_bpp
+        已经是 batch 内平均，按 B 加权后得到的是 batch 间平均 BPP 的加权方差，
+        数值通常比 per-image std 小（batch 内部方差被平均抹掉）。
+        论文若要报告 per-image std，需让 forward 返回 reduction='none' 的
+        per-token/per-image CE 后重算。此处保留 batch-level 便于训练监控，
+        evaluate.py cmd_single 也使用同样语义。
     """
     model.eval()
     total_bpp_weighted = 0.0
     total_loss_weighted = 0.0
-    sum_sq_bpp = 0.0   # E[X^2] 估算 std（DDP 友好，不依赖 per-batch 列表）
+    sum_sq_bpp_batch = 0.0   # Σ (batch_mean_bpp)² · B ，batch-level std
     n_total = 0
     use_amp = amp_dtype is not None and device.type == 'cuda'
     for batch in loader:
@@ -346,22 +355,22 @@ def validate(model, loader, device, amp_dtype=None):
         loss_val = loss.item()
         total_bpp_weighted += bpp_val * B
         total_loss_weighted += loss_val * B
-        sum_sq_bpp += (bpp_val ** 2) * B
+        sum_sq_bpp_batch += (bpp_val ** 2) * B
         n_total += B
 
     # DDP 聚合：跨 rank 求和后再求平均，结果在所有 rank 上一致
     if dist.is_available() and dist.is_initialized():
-        agg = torch.tensor([total_bpp_weighted, total_loss_weighted, sum_sq_bpp, float(n_total)],
+        agg = torch.tensor([total_bpp_weighted, total_loss_weighted, sum_sq_bpp_batch, float(n_total)],
                            device=device, dtype=torch.float64)
         dist.all_reduce(agg, op=dist.ReduceOp.SUM)
-        total_bpp_weighted, total_loss_weighted, sum_sq_bpp, n_total_f = agg.tolist()
+        total_bpp_weighted, total_loss_weighted, sum_sq_bpp_batch, n_total_f = agg.tolist()
         n_total = int(n_total_f)
 
     avg_bpp = total_bpp_weighted / n_total
     avg_loss = total_loss_weighted / n_total
-    var_bpp = max(sum_sq_bpp / n_total - avg_bpp ** 2, 0.0)
-    std_bpp = float(math.sqrt(var_bpp))
-    return avg_bpp, std_bpp, avg_loss
+    var_bpp_batch = max(sum_sq_bpp_batch / n_total - avg_bpp ** 2, 0.0)
+    std_bpp_batch = float(math.sqrt(var_bpp_batch))
+    return avg_bpp, std_bpp_batch, avg_loss
 
 
 
@@ -457,7 +466,12 @@ def main():
     # 验证集: batch_size 和 num_workers 从 config 读取，支持不同 GPU 显存调整
     valid_batch_size = config['data'].get('valid_batch_size', 64)
     valid_num_workers = config['data'].get('valid_num_workers', 2)
-    valid_sampler = DistributedSampler(valid_dataset, shuffle=False) if distributed else None
+    # drop_last=True: 避免 DistributedSampler 默认 padding（重复 dataset 头部样本
+    # 让每个 rank 拿到整除分片）造成验证集统计偏差。代价是最多丢 world_size-1
+    # 个样本（CIFAR-10/100 val=10000、ImageNet32 val=50000 在 world=2 下整除，
+    # 不丢；world=3 时丢 1 个，不影响 BPP 数值精度）。
+    valid_sampler = (DistributedSampler(valid_dataset, shuffle=False, drop_last=True)
+                     if distributed else None)
     valid_loader = DataLoader(valid_dataset, batch_size=valid_batch_size, shuffle=False,
                               sampler=valid_sampler,
                               num_workers=valid_num_workers, pin_memory=True)

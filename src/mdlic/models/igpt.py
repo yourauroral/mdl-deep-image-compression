@@ -324,10 +324,16 @@ class IGPT(nn.Module):
     outputs = []
     for i, block in enumerate(self.blocks):
       hidden = block(hidden, mask=None, position_ids=position_ids)
+      # Pre-norm 路径下 forward 会在最后一层之后再过 final_norm 才送 head；
+      # 为让 linear probe 拿到的"最后一层特征"与 forward 提供给 head 的特征一致，
+      # 在 i == max_layer 且 pre-norm 模式时补一次 final_norm。
+      out = hidden
+      if i == max_layer and not self.use_post_norm:
+        out = self.final_norm(out)
       if pool:
-        outputs.append(hidden.float().mean(dim=1).cpu())
+        outputs.append(out.float().mean(dim=1).cpu())
       else:
-        outputs.append(hidden)
+        outputs.append(out)
       if i >= max_layer:
         break
     return outputs

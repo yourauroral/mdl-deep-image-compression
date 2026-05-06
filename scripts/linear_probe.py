@@ -37,8 +37,7 @@ from torchvision.datasets import CIFAR10, CIFAR100
 # 添加项目根目录到 sys.path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from src.mdlic.models.igpt import IGPT
-from src.mdlic.models.cc_igpt import CCIGPT
+from scripts.train import _build_model_from_config, _build_ccigpt_from_config
 
 
 # ──────────────────────────────────────────────────────────────
@@ -52,46 +51,16 @@ def load_config(path):
 
 
 def build_model(mcfg, device):
-    """构建 IGPT 或 CCIGPT（CC-iGPT 的 encode() 内部走 fine 子模型 + coarse_ctx）。"""
+    """构建 IGPT 或 CCIGPT。
+
+    复用 train.py 的工厂函数，确保配置键路径与训练完全一致：
+    CC-iGPT yaml 用平铺键 (d_model 描述 fine、coarse_d_model 描述 coarse)，
+    早期版本曾尝试 mcfg["fine"]["d_model"] 嵌套键，与训练不兼容会立刻 KeyError。
+    """
     model_type = mcfg.get("type", "igpt")
     if model_type == "ccigpt":
-        return CCIGPT(
-            image_size=mcfg["image_size"],
-            in_channels=mcfg["in_channels"],
-            vocab_size=mcfg["vocab_size"],
-            pool_factor=mcfg.get("pool_factor", 4),
-            fine_d_model=mcfg["fine"]["d_model"], fine_N=mcfg["fine"]["N"],
-            fine_h=mcfg["fine"]["h"],            fine_d_ff=mcfg["fine"]["d_ff"],
-            coarse_d_model=mcfg["coarse"]["d_model"], coarse_N=mcfg["coarse"]["N"],
-            coarse_h=mcfg["coarse"]["h"],            coarse_d_ff=mcfg["coarse"]["d_ff"],
-            dropout=mcfg["dropout"],
-            use_ycbcr=mcfg.get("use_ycbcr", True),
-            use_rope=mcfg.get("use_rope", True),
-            use_post_norm=mcfg.get("use_post_norm", True),
-            use_swiglu=mcfg.get("use_swiglu", True),
-            use_qk_norm=mcfg.get("use_qk_norm", True),
-            use_depth_scaled_init=mcfg.get("use_depth_scaled_init", True),
-            use_zloss=mcfg.get("use_zloss", True),
-        ).to(device)
-    return IGPT(
-        image_size=mcfg["image_size"],
-        in_channels=mcfg["in_channels"],
-        vocab_size=mcfg["vocab_size"],
-        d_model=mcfg["d_model"],
-        N=mcfg["N"],
-        h=mcfg["h"],
-        d_ff=mcfg["d_ff"],
-        dropout=mcfg["dropout"],
-        use_ycbcr=mcfg.get("use_ycbcr", True),
-        use_rope=mcfg.get("use_rope", True),
-        use_post_norm=mcfg.get("use_post_norm", True),
-        use_swiglu=mcfg.get("use_swiglu", True),
-        use_qk_norm=mcfg.get("use_qk_norm", True),
-        use_depth_scaled_init=mcfg.get("use_depth_scaled_init", True),
-        use_zloss=mcfg.get("use_zloss", True),
-        activation_checkpointing=False,
-        use_subpixel_ar=mcfg.get("use_subpixel_ar", False),
-    ).to(device)
+        return _build_ccigpt_from_config(mcfg, device)
+    return _build_model_from_config(mcfg, device)
 
 
 def load_checkpoint(model, ckpt_path, device):
@@ -260,8 +229,9 @@ def main():
 
     model_type = mcfg.get("type", "igpt")
     if model_type == "ccigpt":
-        N = mcfg["fine"]["N"]
-        d_model = mcfg["fine"]["d_model"]
+        # CC-iGPT 的 probe 在 fine 子模型的各层 hidden 上做（encode 内部已注入 coarse_ctx）
+        N = model.fine.N_layers
+        d_model = model.fine.d_model
     else:
         N = mcfg["N"]
         d_model = mcfg["d_model"]
