@@ -79,36 +79,80 @@ Chart.defaults.borderColor = "#2a2d3a";
 })();
 
 // ── Panel 2: BPP 对比 ──
+// 设计：传统方法 (PNG ~5.87, WebP ~5.02) 与神经 AR (~2.81-2.97) 量级差异过大，
+// 同图柱状图会把神经方法间的差异挤成视觉噪声。改为聚焦神经 AR 的 lollipop 图，
+// 横轴聚焦 2.70-3.05，数值标签贴在点末端；传统方法放表格 / 副标题作为上下文。
 (async function initMetrics() {
   const data = await fetchJSON("/api/metrics");
   if (!data) return;
 
-  // 按 BPP 升序排序，最优 (CC-iGPT) 显示在顶部
-  const methods = data.methods.filter(m => m.bpp !== null).sort((a, b) => a.bpp - b.bpp);
-  const labels = methods.map(m => m.name);
-  const values = methods.map(m => m.bpp);
   const isTraditional = (n) => n.includes("PNG") || n.includes("WebP");
-  const colorFor = (m) => {
-    if (m.name === "CC-iGPT (Ours)") return "#6c8cff";   // 主推方法 — 强调色
-    if (m.name === "iGPT-S (Ours)")  return "#9bb0ff";   // 我们的 baseline — 浅强调色
-    if (isTraditional(m.name))       return "#3a3d4a";   // 传统方法 — 深灰
-    return "#5a5d72";                                    // prior neural AR — 中灰
-  };
-  const colors = methods.map(colorFor);
+  const traditional = data.methods.filter(m => isTraditional(m.name) && m.bpp !== null);
+  const neural = data.methods.filter(m => !isTraditional(m.name) && m.bpp !== null)
+                             .sort((a, b) => a.bpp - b.bpp);
 
-  // 在柱条末端绘制数值标签
-  const valueLabelPlugin = {
-    id: "valueLabel",
+  const labels = neural.map(m => m.name);
+  const values = neural.map(m => m.bpp);
+
+  const colorFor = (m) => {
+    if (m.name === "CC-iGPT (Ours)") return "#6c8cff";
+    if (m.name === "iGPT-S (Ours)")  return "#9bb0ff";
+    return "#5a5d72";
+  };
+  const colors = neural.map(colorFor);
+
+  const ourBest = neural.find(m => m.name === "CC-iGPT (Ours)");
+  const ourBaseline = neural.find(m => m.name === "iGPT-S (Ours)");
+
+  // 副标题：传统方法上下文 + 主结果
+  const desc = document.createElement("p");
+  desc.className = "panel-desc";
+  desc.innerHTML =
+    `聚焦神经自回归方法 (BPP ∈ [2.7, 3.0])。传统无损基线作为参照: ` +
+    traditional.map(m => `<b>${m.name.replace(" (lossless)", "")}</b> ${m.bpp.toFixed(2)}`).join(" · ") +
+    (ourBest && ourBaseline
+      ? ` &nbsp;|&nbsp; <span style="color:#6c8cff">CC-iGPT 较 iGPT-S baseline 改善 <b>−${(ourBaseline.bpp - ourBest.bpp).toFixed(2)}</b> bits/dim</span>`
+      : "");
+  const panel = document.getElementById("panel-metrics");
+  const chartCt = panel.querySelector(".chart-container");
+  if (!panel.querySelector(".panel-desc")) panel.insertBefore(desc, chartCt);
+
+  // Lollipop: 用一条从 xMin 起的细线 + 末端粗点表示
+  // Chart.js 没有原生 lollipop，用 bar(很细) + scatter 叠加
+  const X_MIN = 2.70;
+  const X_MAX = 3.05;
+
+  // 自定义 plugin: 在每个点末端绘制数值标签 + 在 baseline 处画虚线
+  const overlayPlugin = {
+    id: "overlay",
     afterDatasetsDraw(chart) {
-      const { ctx } = chart;
+      const { ctx, chartArea, scales } = chart;
+      // baseline 虚线 (iGPT-S)
+      if (ourBaseline) {
+        const x = scales.x.getPixelForValue(ourBaseline.bpp);
+        ctx.save();
+        ctx.strokeStyle = "rgba(155,176,255,0.35)";
+        ctx.setLineDash([4, 4]);
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(x, chartArea.top);
+        ctx.lineTo(x, chartArea.bottom);
+        ctx.stroke();
+        ctx.fillStyle = "#9bb0ff";
+        ctx.font = "11px -apple-system, sans-serif";
+        ctx.textAlign = "left";
+        ctx.fillText("iGPT-S baseline", x + 4, chartArea.top + 12);
+        ctx.restore();
+      }
+      // 数值标签
       const meta = chart.getDatasetMeta(0);
       ctx.save();
-      ctx.font = "600 12px -apple-system, 'Segoe UI', sans-serif";
+      ctx.font = "600 12px -apple-system, sans-serif";
       ctx.textAlign = "left";
       ctx.textBaseline = "middle";
       meta.data.forEach((bar, i) => {
-        ctx.fillStyle = methods[i].name.includes("Ours") ? "#6c8cff" : "#e1e4ed";
-        ctx.fillText(values[i].toFixed(2), bar.x + 6, bar.y);
+        ctx.fillStyle = neural[i].name.includes("Ours") ? "#6c8cff" : "#cfd3e0";
+        ctx.fillText(values[i].toFixed(2), bar.x + 10, bar.y);
       });
       ctx.restore();
     }
@@ -119,27 +163,41 @@ Chart.defaults.borderColor = "#2a2d3a";
     data: {
       labels,
       datasets: [{
-        label: "BPP (bits/dim)",
+        label: "BPP",
         data: values,
         backgroundColor: colors,
-        borderRadius: 4,
-        barThickness: 26,
-        categoryPercentage: 0.85,
+        borderRadius: 0,
+        barThickness: 3,             // 细线 (lollipop 的杆)
+        categoryPercentage: 1.0,
+        // 通过 pointStyle 在末端画大圆点
+        pointStyle: false,
+      }, {
+        // 第二个 dataset: 散点画末端粗点
+        type: "scatter",
+        label: "_dot",
+        data: values.map((v, i) => ({ x: v, y: i })),
+        backgroundColor: colors,
+        borderColor: colors.map(c => c === "#6c8cff" ? "#ffffff" : c),
+        borderWidth: neural.map(m => m.name === "CC-iGPT (Ours)" ? 2 : 0),
+        pointRadius: neural.map(m => m.name === "CC-iGPT (Ours)" ? 9 : 6),
+        pointHoverRadius: neural.map(m => m.name === "CC-iGPT (Ours)" ? 11 : 8),
       }]
     },
     options: {
       indexAxis: "y",
       responsive: true,
       maintainAspectRatio: false,
-      layout: { padding: { left: 8, right: 56, top: 4, bottom: 4 } },
+      layout: { padding: { left: 8, right: 56, top: 8, bottom: 4 } },
       plugins: {
         legend: { display: false },
         tooltip: {
+          filter: (item) => item.datasetIndex === 1,  // 只在散点上显示 tooltip
           callbacks: {
+            title: (items) => neural[items[0].dataIndex].name,
             label: (item) => {
-              const m = methods[item.dataIndex];
+              const m = neural[item.dataIndex];
               const std = m.std ? ` ± ${m.std.toFixed(2)}` : "";
-              return `BPP: ${m.bpp.toFixed(2)}${std}  (${m.note})`;
+              return [`BPP: ${m.bpp.toFixed(2)}${std}`, m.note];
             }
           }
         }
@@ -147,17 +205,17 @@ Chart.defaults.borderColor = "#2a2d3a";
       scales: {
         x: {
           title: { display: true, text: "BPP (bits/dim) — 越低越好 ↓" },
-          min: 0,
-          grid: { color: "rgba(255,255,255,0.04)" }
+          min: X_MIN,
+          max: X_MAX,
+          grid: { color: "rgba(255,255,255,0.04)" },
+          ticks: { stepSize: 0.05 }
         },
         y: {
+          type: "category",
+          labels,
           ticks: {
-            font: (ctx) => {
-              const name = labels[ctx.index] || "";
-              return name.includes("Ours")
-                ? { size: 12, weight: "700" }
-                : { size: 12 };
-            },
+            font: (ctx) => labels[ctx.index]?.includes("Ours")
+              ? { size: 12, weight: "700" } : { size: 12 },
             color: (ctx) => labels[ctx.index]?.includes("Ours") ? "#6c8cff" : "#8b8fa3",
             autoSkip: false,
             padding: 8,
@@ -167,11 +225,11 @@ Chart.defaults.borderColor = "#2a2d3a";
         }
       }
     },
-    plugins: [valueLabelPlugin]
+    plugins: [overlayPlugin]
   });
 
+  // 表格保留全部方法（含 PNG/WebP）作为完整数据展示
   const tbody = document.querySelector("#table-metrics tbody");
-  // 表格按原顺序展示（保留原始 methods 顺序便于阅读）
   data.methods.forEach(m => {
     const tr = document.createElement("tr");
     const isOurs = m.name.includes("Ours");
