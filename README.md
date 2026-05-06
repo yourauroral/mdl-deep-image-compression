@@ -130,9 +130,13 @@ scp -P <port> root@<autodl-host>:/root/autodl-tmp/mdl-deep-image-compression/exp
   | Flatten: 3072  |                  | DOWN avg_pool 8×8     |
   | tokens         |                  |   → Coarse iGPT       |
   | (3×32×32)      |                  |     192 tokens, 进 bs |
-  +-------+--------+                  | UP bilinear → quantize|
-          |                           |   → fine.token_embed  |
-          |                           |   → α · coarse_ctx    |
+  +-------+--------+                  | bit-exact ctx 路径:    |
+          |                           |   coarse 量化 token    |
+          |                           |   → 反量化 (BT.601⁻¹)  |
+          |                           |   → bilinear UP 32×32  |
+          |                           |   → re-tokenize        |
+          |                           |   → fine.token_embed   |
+          |                           |   → α · coarse_ctx     |
           |                           |     (additive 注入)    |
           |                           | Fine iGPT 3072 tokens |
           |                           +-----------+-----------+
@@ -243,18 +247,19 @@ pixel-first:    [Y₀ Cb₀ Cr₀ | Y₁ Cb₁ Cr₁ | ... | Y₁₀₂₃ Cb₁
 
 ### CC-iGPT (`models/cc_igpt.py`)
 
-Coarse-Conditioned iGPT —— MSPA 的 2-scale 退化版本。回避了多尺度 loss 平衡难题，复用全部 iGPT 训练栈与 Triton kernels。
+Coarse-Conditioned iGPT —— 双尺度条件式自回归。回避了多尺度 loss 平衡难题，复用全部 iGPT 训练栈与 Triton kernels。
 
 | 组件 | 说明 |
 |------|------|
 | DOWN | `F.adaptive_avg_pool2d(x, 8)` 在 float 域下采样到 8×8 |
 | Coarse iGPT | 浅层（d_model=256, N=6），独立 NTP 训练，CE 进 bitstream（192 token，~6% overhead） |
-| UP | `F.interpolate(bilinear)` 回到 32×32，`rgb_to_ycbcr_int` 量化（与 fine encoder 一致） |
-| Ctx 注入 | `fine.token_embed(UP(x_c)_tokens)` → AR shift → `α · coarse_ctx`（additive，无新增可学习参数） |
+| **Bit-exact ctx 路径** | encoder/decoder 必须看到**同一个** `coarse_ctx`，否则 fine 端算术编码不可解。统一管线：coarse 量化 token → 反量化 RGB（YCbCr 时走 BT.601 inverse）→ bilinear UP 到 32×32 → 与 fine encoder 同规则 re-tokenize → `fine.token_embed` |
+| Ctx 注入 | AR shift `coarse_ctx[:-1]` → `α · coarse_ctx`（additive，无新增可学习参数） |
 | 可学习 α | `nn.Parameter(torch.ones(1))`，初始 1.0；模型自适应注入强度，避免 ctx 过强压制 fine token embed |
 | 联合 BPP | `BPP_total = (CE_c · 192 + CE_f · 3072) / ln(2) / 3072`（按 H·W·C 归一化） |
 | 训练 | 端到端联合 `loss = loss_coarse + loss_fine`，无尺度间加权 |
 | 关闭 ctx | `fine(x, coarse_ctx=None)` 严格等价 vanilla iGPT（unit test 校验 CE diff < 1e-6） |
+| 一致性回归 | `tests/test_ccigpt_smoke.py` 同时断言 (a) encoder/decoder ctx max diff < 1e-6 (b) `coarse_tokens.view(B,C,S,S)` 与 `rgb_to_ycbcr_int(x_c_float)` byte-exact，覆盖 YCbCr/RGB 两条路径 |
 
 设计参考: Burt & Adelson "Laplacian Pyramid" (1983)、van den Oord "Conditional PixelCNN" (NeurIPS 2016, additive 条件)、Tian "VAR" (NeurIPS 2024)。
 
