@@ -83,10 +83,36 @@ Chart.defaults.borderColor = "#2a2d3a";
   const data = await fetchJSON("/api/metrics");
   if (!data) return;
 
-  const methods = data.methods.filter(m => m.bpp !== null);
+  // 按 BPP 升序排序，最优 (CC-iGPT) 显示在顶部
+  const methods = data.methods.filter(m => m.bpp !== null).sort((a, b) => a.bpp - b.bpp);
   const labels = methods.map(m => m.name);
   const values = methods.map(m => m.bpp);
-  const colors = methods.map(m => m.name.includes("Ours") ? "#6c8cff" : "#4a4d5e");
+  const isTraditional = (n) => n.includes("PNG") || n.includes("WebP");
+  const colorFor = (m) => {
+    if (m.name === "CC-iGPT (Ours)") return "#6c8cff";   // 主推方法 — 强调色
+    if (m.name === "iGPT-S (Ours)")  return "#9bb0ff";   // 我们的 baseline — 浅强调色
+    if (isTraditional(m.name))       return "#3a3d4a";   // 传统方法 — 深灰
+    return "#5a5d72";                                    // prior neural AR — 中灰
+  };
+  const colors = methods.map(colorFor);
+
+  // 在柱条末端绘制数值标签
+  const valueLabelPlugin = {
+    id: "valueLabel",
+    afterDatasetsDraw(chart) {
+      const { ctx } = chart;
+      const meta = chart.getDatasetMeta(0);
+      ctx.save();
+      ctx.font = "600 12px -apple-system, 'Segoe UI', sans-serif";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "middle";
+      meta.data.forEach((bar, i) => {
+        ctx.fillStyle = methods[i].name.includes("Ours") ? "#6c8cff" : "#e1e4ed";
+        ctx.fillText(values[i].toFixed(2), bar.x + 6, bar.y);
+      });
+      ctx.restore();
+    }
+  };
 
   new Chart(document.getElementById("chart-metrics"), {
     type: "bar",
@@ -97,7 +123,7 @@ Chart.defaults.borderColor = "#2a2d3a";
         data: values,
         backgroundColor: colors,
         borderRadius: 4,
-        barThickness: 28,
+        barThickness: 26,
         categoryPercentage: 0.85,
       }]
     },
@@ -105,23 +131,47 @@ Chart.defaults.borderColor = "#2a2d3a";
       indexAxis: "y",
       responsive: true,
       maintainAspectRatio: false,
-      layout: { padding: { left: 8, right: 24 } },
-      plugins: { legend: { display: false } },
+      layout: { padding: { left: 8, right: 56, top: 4, bottom: 4 } },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: (item) => {
+              const m = methods[item.dataIndex];
+              const std = m.std ? ` ± ${m.std.toFixed(2)}` : "";
+              return `BPP: ${m.bpp.toFixed(2)}${std}  (${m.note})`;
+            }
+          }
+        }
+      },
       scales: {
-        x: { title: { display: true, text: "BPP (bits/dim) ↓" }, min: 0 },
+        x: {
+          title: { display: true, text: "BPP (bits/dim) — 越低越好 ↓" },
+          min: 0,
+          grid: { color: "rgba(255,255,255,0.04)" }
+        },
         y: {
           ticks: {
-            font: { size: 12 },
+            font: (ctx) => {
+              const name = labels[ctx.index] || "";
+              return name.includes("Ours")
+                ? { size: 12, weight: "700" }
+                : { size: 12 };
+            },
+            color: (ctx) => labels[ctx.index]?.includes("Ours") ? "#6c8cff" : "#8b8fa3",
             autoSkip: false,
-            padding: 6,
+            padding: 8,
           },
-          afterFit: (axis) => { axis.width = 170; }
+          grid: { display: false },
+          afterFit: (axis) => { axis.width = 175; }
         }
       }
-    }
+    },
+    plugins: [valueLabelPlugin]
   });
 
   const tbody = document.querySelector("#table-metrics tbody");
+  // 表格按原顺序展示（保留原始 methods 顺序便于阅读）
   data.methods.forEach(m => {
     const tr = document.createElement("tr");
     const isOurs = m.name.includes("Ours");
