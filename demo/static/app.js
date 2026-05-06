@@ -97,17 +97,26 @@ Chart.defaults.borderColor = "#2a2d3a";
         data: values,
         backgroundColor: colors,
         borderRadius: 4,
-        barThickness: 36,
+        barThickness: 28,
+        categoryPercentage: 0.85,
       }]
     },
     options: {
       indexAxis: "y",
       responsive: true,
       maintainAspectRatio: false,
+      layout: { padding: { left: 8, right: 24 } },
       plugins: { legend: { display: false } },
       scales: {
         x: { title: { display: true, text: "BPP (bits/dim) ↓" }, min: 0 },
-        y: { ticks: { font: { size: 12 } } }
+        y: {
+          ticks: {
+            font: { size: 12 },
+            autoSkip: false,
+            padding: 6,
+          },
+          afterFit: (axis) => { axis.width = 170; }
+        }
       }
     }
   });

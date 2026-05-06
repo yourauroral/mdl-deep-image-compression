@@ -151,6 +151,12 @@ main {
   margin-bottom: 1rem;
 }
 
+/* BPP 对比是水平柱状图，方法名较长 + 7 行需要更高画布 */
+#panel-metrics .chart-container {
+  max-height: none;
+  height: 460px;
+}
+
 /* Tables */
 .data-table {
   width: 100%;
