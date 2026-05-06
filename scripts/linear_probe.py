@@ -80,7 +80,8 @@ def load_checkpoint(model, ckpt_path, device):
 # ──────────────────────────────────────────────────────────────
 
 @torch.no_grad()
-def extract_features(model, dataloader, layer_indices, device, amp_dtype=None):
+def extract_features(model, dataloader, layer_indices, device, amp_dtype=None,
+                     use_coarse_ctx: bool = True):
     """
     提取指定层的 hidden states，全局平均池化后返回。
 
@@ -90,6 +91,8 @@ def extract_features(model, dataloader, layer_indices, device, amp_dtype=None):
       layer_indices: 要提取的层索引列表，如 [0, 3, 7, 11]
       device:        torch.device
       amp_dtype:     混合精度 dtype（None / torch.bfloat16 / torch.float16）
+      use_coarse_ctx: 仅对 CC-iGPT 生效。True (默认) 测"条件后表征"，
+                      False 测"裸 fine 表征"以做消融对比。
 
     返回:
       features: dict[int, Tensor]  — {layer_idx: (N, d_model) float32}
@@ -106,12 +109,19 @@ def extract_features(model, dataloader, layer_indices, device, amp_dtype=None):
     from contextlib import nullcontext
     from torch.amp import autocast
 
+    # CC-iGPT 的 encode 接受 use_coarse_ctx；普通 iGPT 没有这个参数。
+    is_ccigpt = hasattr(model, "fine") and hasattr(model, "coarse")
+
     for batch in dataloader:
         images, targets = batch
         images = images.to(device)
 
         with autocast("cuda", dtype=amp_dtype) if use_amp else nullcontext():
-            layer_outs = model.encode(images, max_layer=max_layer, pool=True)
+            if is_ccigpt:
+                layer_outs = model.encode(images, max_layer=max_layer, pool=True,
+                                          use_coarse_ctx=use_coarse_ctx)
+            else:
+                layer_outs = model.encode(images, max_layer=max_layer, pool=True)
 
         for idx in layer_indices:
             all_features[idx].append(layer_outs[idx])
@@ -214,6 +224,9 @@ def main():
                         help="特征提取和分类器训练 batch size (default: 256)")
     parser.add_argument("--export_csv", type=str, default=None,
                         help="导出结果到 CSV 文件")
+    parser.add_argument("--no_coarse_ctx", action="store_true",
+                        help="仅 CC-iGPT 生效：跳过 α·coarse_ctx 注入，"
+                             "测裸 fine 表征（消融对照组）")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -277,15 +290,22 @@ def main():
     print(f"Model: d_model={d_model}, N={N}, layers={layer_indices}")
     print(f"{'='*60}")
 
+    use_coarse_ctx = not args.no_coarse_ctx
+    if model_type == "ccigpt":
+        ctx_label = "with α·coarse_ctx" if use_coarse_ctx else "WITHOUT coarse_ctx (ablation)"
+        print(f"CC-iGPT probe mode: {ctx_label}")
+
     print("\n[1/3] 提取训练集特征 ...")
     train_features, train_labels = extract_features(
-        model, train_loader, layer_indices, device, amp_dtype)
+        model, train_loader, layer_indices, device, amp_dtype,
+        use_coarse_ctx=use_coarse_ctx)
     print(f"      训练集: {train_labels.shape[0]} 样本, "
           f"每层特征 shape: ({train_labels.shape[0]}, {d_model})")
 
     print("[2/3] 提取测试集特征 ...")
     test_features, test_labels = extract_features(
-        model, test_loader, layer_indices, device, amp_dtype)
+        model, test_loader, layer_indices, device, amp_dtype,
+        use_coarse_ctx=use_coarse_ctx)
     print(f"      测试集: {test_labels.shape[0]} 样本")
 
     # --- 训练线性分类器 ---

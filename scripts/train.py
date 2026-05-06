@@ -851,20 +851,36 @@ def main():
             _atomic_save(ckpt_data, os.path.join(checkpoint_dir, f'epoch_{epoch}.pth'))
 
     # SWA 后处理：rank 0 替换权重 + broadcast → 全 rank 重新验证 → rank 0 保存
-    if swa_enabled and swa_state is not None:
-        if rank == 0:
-            for name, param in raw_model.named_parameters():
-                param.data.copy_(swa_state[name])
-            print(f"SWA: replaced model weights (averaged over {swa_n} checkpoints)")
+    #
+    # DDP 死锁规避：SWA 状态只在 rank 0 上累积（swa_state 在其余 rank 永远是 None），
+    # 因此 finalize 必须由 rank 0 来"发起"、其余 rank 通过 broadcast 同步参与。
+    # 直接用 `swa_state is not None` 守护 → 仅 rank 0 进入 broadcast/validate，
+    # 其余 rank 退出循环，集合通信永久挂起。这里改用 rank 0 广播一个 0/1 标量
+    # 决定全 rank 是否同时进入 finalize 路径。
+    if swa_enabled:
+        swa_done = torch.tensor(
+            [1 if swa_state is not None else 0],
+            device=device, dtype=torch.int32,
+        )
         if dist.is_available() and dist.is_initialized():
-            for param in raw_model.parameters():
-                dist.broadcast(param.data, src=0)
-        bpp_avg, std_bpp, loss_avg = validate(model, valid_loader, device, amp_dtype=amp_dtype)
-        if rank == 0:
-            print(f"SWA Validation: Loss {loss_avg:.4f} | BPP {bpp_avg:.4f} ± {std_bpp:.4f}")
-            _atomic_save(raw_model.state_dict(), os.path.join(checkpoint_dir, 'swa.pth'))
-            if writer:
-                writer.add_scalar('val/swa_bpp', bpp_avg, total_epochs)
+            dist.broadcast(swa_done, src=0)
+
+        if swa_done.item() == 1:
+            if rank == 0:
+                for name, param in raw_model.named_parameters():
+                    param.data.copy_(swa_state[name])
+                print(f"SWA: replaced model weights (averaged over {swa_n} checkpoints)")
+            if dist.is_available() and dist.is_initialized():
+                for param in raw_model.parameters():
+                    dist.broadcast(param.data, src=0)
+            bpp_avg, std_bpp, loss_avg = validate(model, valid_loader, device, amp_dtype=amp_dtype)
+            if rank == 0:
+                print(f"SWA Validation: Loss {loss_avg:.4f} | BPP {bpp_avg:.4f} ± {std_bpp:.4f}")
+                _atomic_save(raw_model.state_dict(), os.path.join(checkpoint_dir, 'swa.pth'))
+                if writer:
+                    writer.add_scalar('val/swa_bpp', bpp_avg, total_epochs)
+        elif rank == 0:
+            print("SWA: 训练期间未发生任何 SWA 更新（swa_start_epoch 可能大于实际 epoch 数），跳过 finalize")
 
     if rank == 0:
         if csv_file:

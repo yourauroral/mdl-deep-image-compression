@@ -6,6 +6,6 @@
     {"scale": "Fine",   "resolution": "32x32", "tokens": 3072, "role": "条件 fine NTP（注入 α·coarse_ctx）"}
   ],
   "total_tokens": 3264,
-  "bpp_target": 2.97,
-  "note": "示例数据 — CE_coarse / CE_fine 待训练后填充"
+  "bpp_target": 2.9739,
+  "note": "示例数据 — CE_coarse / CE_fine 待训练后填充；目标击败 iGPT-S SWA 2.9739 bits/dim"
 }

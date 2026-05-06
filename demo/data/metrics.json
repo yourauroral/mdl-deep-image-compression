@@ -6,7 +6,7 @@
     {"name": "PixelCNN++", "bpp": 2.92, "std": null, "note": "Salimans 2017"},
     {"name": "Image Transformer", "bpp": 2.90, "std": null, "note": "Parmar 2018"},
     {"name": "PixelSNAIL", "bpp": 2.85, "std": null, "note": "Chen 2018"},
-    {"name": "iGPT-S (Ours)", "bpp": 2.97, "std": 0.07, "note": "SWA, d=512, N=24, 200ep"},
-    {"name": "CC-iGPT (Ours)", "bpp": 2.81, "std": 0.07, "note": "双尺度条件 AR, fine d=512 N=24 + coarse d=256 N=6"}
+    {"name": "iGPT-S (Ours)", "bpp": 2.9739, "std": 0.07, "note": "SWA, d=512, N=24, 200ep"},
+    {"name": "CC-iGPT (Ours)", "bpp": null, "std": null, "note": "训练中（bit-exact ctx 修复后重训 300ep）"}
   ]
 }

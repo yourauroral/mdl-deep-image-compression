@@ -151,11 +151,20 @@ class CCIGPT(nn.Module):
         }
 
     @torch.no_grad()
-    def encode(self, x, max_layer: int = None, pool: bool = False):
-        """对 fine 子模型做 linear probe / 表征提取（含 coarse_ctx 条件）。"""
+    def encode(self, x, max_layer: int = None, pool: bool = False,
+               use_coarse_ctx: bool = True):
+        """对 fine 子模型做 linear probe / 表征提取。
+
+        参数:
+          use_coarse_ctx: True (默认) 注入 α·coarse_ctx，得到"条件后表征"；
+                          False 跳过 ctx，得到"裸 fine 表征"，用于消融对比
+                          (论文里通常两组都报)。
+        """
         x = x.clamp(0, 1).to(torch.float32)
-        x_c_float = F.adaptive_avg_pool2d(x, self.coarse_size)
-        coarse_tokens = self.coarse._tokenize(x_c_float)
-        coarse_ctx = self._compute_coarse_ctx(coarse_tokens)
+        coarse_ctx = None
+        if use_coarse_ctx:
+            x_c_float = F.adaptive_avg_pool2d(x, self.coarse_size)
+            coarse_tokens = self.coarse._tokenize(x_c_float)
+            coarse_ctx = self.ctx_alpha * self._compute_coarse_ctx(coarse_tokens)
         return self.fine.encode(x, max_layer=max_layer, pool=pool,
-                                coarse_ctx=self.ctx_alpha * coarse_ctx)
+                                coarse_ctx=coarse_ctx)

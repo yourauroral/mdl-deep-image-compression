@@ -2,7 +2,7 @@
 
 基于 **Minimum Description Length (MDL)** 原则的深度图像压缩系统设计与实现。核心命题：**压缩即预测** — CE loss 直接对应 Shannon 最优编码长度 (Shannon 1948, Delétang et al. 2024)。
 
-- **Phase A (完成)**: iGPT token-level 自回归压缩 + 7 个手写 Triton Kernel (~2,000 行)，iGPT-S CIFAR-10 SWA **2.9739 bits/dim**
+- **Phase A (完成)**: iGPT token-level 自回归压缩 + 8 个手写 Triton Kernel（7 个进入训练栈，1 个 `fused_linear_ce` 在 V=256 下经 roofline 分析证伪、保留作反面案例，~2,400 行），iGPT-S CIFAR-10 SWA **2.9739 bits/dim**
 - **Phase B (训练中)**: CC-iGPT（Coarse-Conditioned iGPT）双尺度条件自回归 — 浅层 coarse iGPT (8×8, 192 token) 独立编码进 bitstream，UP + 量化后通过 additive embedding（可学习 α）注入 fine iGPT (32×32, 3072 token)，目标 BPP_total < iGPT-S 2.9739
 - **Phase C (完成)**: Demo 前端可视化系统 (FastAPI + Chart.js, 5 个展示面板)
 
@@ -52,9 +52,9 @@ python scripts/evaluate.py --config configs/igpt_cifar10_s.yaml \
 # 评测 — CC-iGPT (含 coarse / fine CE 分解 + BPP_total)
 python scripts/evaluate.py --config configs/ccigpt_cifar10_s.yaml \
     --checkpoint experiments/ccigpt_cifar10_s/checkpoints/best.pth
-# SWA 权重
+# SWA vs best 对比（同时评测 best.pth 和 swa.pth）
 python scripts/evaluate.py --config configs/ccigpt_cifar10_s.yaml \
-    --checkpoint experiments/ccigpt_cifar10_s/checkpoints/swa.pth
+    --checkpoint experiments/ccigpt_cifar10_s/checkpoints/best.pth --swa
 
 # Linear Probe (各层表征分类准确率)
 python scripts/linear_probe.py --config configs/igpt_cifar10_s.yaml \
@@ -144,8 +144,9 @@ scp -P <port> root@<autodl-host>:/root/autodl-tmp/mdl-deep-image-compression/exp
           +-------------------+-------------------+
                               |
             +-----------------+-----------------+
-            |  channel-first (默认)              |  pixel-first (子像素自回归)
-            |  [Y_all | Cb_all | Cr_all]       |  [Y₀,Cb₀,Cr₀, Y₁,Cb₁,Cr₁, ...]
+            |  channel-first                     |  pixel-first (子像素自回归, 当前默认)
+            |  [Y_all | Cb_all | Cr_all]         |  [Y₀,Cb₀,Cr₀, Y₁,Cb₁,Cr₁, ...]
+            |  (CC-iGPT 强制使用)                 |  (iGPT-S 配置默认开启)
             +-----------------+-----------------+
                               |
                     +---------v-----------+
@@ -267,7 +268,9 @@ Coarse-Conditioned iGPT —— 双尺度条件式自回归。回避了多尺度 
 
 GPTBlock, MultiHeadAttentionBlock (RoPE + QK-Norm + Flash Attention + attn_mask), RMSNorm, SwiGLU FFN。RoPE 的 `cos/sin` 按 `(seq_len, device)` 缓存，避免逐层逐步重算。
 
-### 手写 Triton Kernels (`ops/`, ~2,000 行, 7 个 kernel)
+### 手写 Triton Kernels (`ops/`, ~2,400 行, 8 个 kernel)
+
+7 个进入训练栈，1 个 (`fused_linear_ce`) 经 roofline 分析在 V=256 下负收益、保留作反面案例（详见 [`experiments/kernel_negative_finding.md`](experiments/kernel_negative_finding.md)）。
 
 | Kernel | 行数 | 说明 |
 |--------|------|------|
@@ -278,8 +281,9 @@ GPTBlock, MultiHeadAttentionBlock (RoPE + QK-Norm + Flash Attention + attn_mask)
 | Fused SwiGLU | ~204 | activation recomputation |
 | Fused RoPE | ~123 | 就地旋转 Q/K |
 | Fused Attn+RoPE | ~100 | RoPE + Flash Attention 合并 |
+| ~~Fused Linear+CE~~ | ~393 | **反面案例** — V=256 下三重循环失去 cuBLAS GEMM 利用率，比 PyTorch 慢 100× |
 
-全部自动降级到 PyTorch，全部有独立单元测试。
+全部 7 个生效 kernel 自动降级到 PyTorch，全部有独立单元测试。
 
 ### Linear Probe (`scripts/linear_probe.py`)
 

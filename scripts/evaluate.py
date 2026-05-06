@@ -326,7 +326,18 @@ def evaluate_position_bpp(model, loader, device, amp_dtype=None,
     position_ce_sum = torch.zeros(seq_len - 1, device=device)
     n_samples = 0
 
-    for batch in loader:
+    # ── Fused Linear CE 与 per-position 评测不兼容 ──
+    # 与 evaluate_per_channel 同款处理：临时关闭融合开关，让 forward 返回完整
+    # logits；try/finally 保证状态复位。这样可以避免之前手动复刻 IGPT.forward
+    # 的 token_embed/channel_embed/blocks/final_norm/head 一长串细节，
+    # 否则 _embed_inputs 内部任何调整（例如 CC-iGPT 注入位置变化）都会让这里
+    # 静默失同步。
+    from src.mdlic.models import igpt as _igpt_mod
+    _saved_fused_linear_ce = _igpt_mod._USE_FUSED_LINEAR_CE
+    _igpt_mod._USE_FUSED_LINEAR_CE = False
+
+    try:
+     for batch in loader:
         if isinstance(batch, (list, tuple)):
             x = batch[0]
         else:
@@ -339,49 +350,23 @@ def evaluate_position_bpp(model, loader, device, amp_dtype=None,
 
         logits = out["logits"]
         if logits is None:
-            # fused path 不返回 logits，需要手动计算
-            x_clamped = x.clamp(0, 1)
-            if use_ycbcr:
-                tokens = rgb_to_ycbcr_int(x_clamped)
-            else:
-                tokens = (x_clamped * 255).round().long()
-            if use_subpixel_ar:
-                tokens = tokens.permute(0, 2, 3, 1).reshape(B_cur, -1)
-            else:
-                tokens = tokens.reshape(B_cur, -1)
-            target_tokens = tokens[:, 1:]
-            # 手动计算 logits
-            hidden = model.token_embed(tokens[:, :-1])
-            if hasattr(model, 'channel_embed') and use_subpixel_ar:
-                T_in = tokens.shape[1] - 1
-                ch_idx = torch.arange(T_in, device=device) % C
-                hidden = hidden + model.channel_embed(ch_idx).unsqueeze(0)
-            if not model.use_rope:
-                T = tokens.shape[1] - 1
-                positions = torch.arange(T, device=device)
-                hidden = hidden + model.pos_embed(positions)
-            position_ids = None
-            if use_subpixel_ar and model.use_rope:
-                T_in = tokens.shape[1] - 1
-                position_ids = torch.arange(T_in, device=device) // C
-            for block in model.blocks:
-                hidden = block(hidden, mask=None, position_ids=position_ids)
-            if not model.use_post_norm:
-                hidden = model.final_norm(hidden)
-            logits = model.head(hidden).float()
+            raise RuntimeError(
+                "evaluate_position_bpp: model returned logits=None even after disabling "
+                "fused linear CE. Please check igpt.py forward path."
+            )
+        logits = logits.float()
+
+        # 重建 target tokens（与 model forward 一致）
+        x_clamped = x.clamp(0, 1)
+        if use_ycbcr:
+            tokens = rgb_to_ycbcr_int(x_clamped)
         else:
-            logits = logits.float()
-            # 重建 target
-            x_clamped = x.clamp(0, 1)
-            if use_ycbcr:
-                tokens = rgb_to_ycbcr_int(x_clamped)
-            else:
-                tokens = (x_clamped * 255).round().long()
-            if use_subpixel_ar:
-                tokens = tokens.permute(0, 2, 3, 1).reshape(B_cur, -1)
-            else:
-                tokens = tokens.reshape(B_cur, -1)
-            target_tokens = tokens[:, 1:]
+            tokens = (x_clamped * 255).round().long()
+        if use_subpixel_ar:
+            tokens = tokens.permute(0, 2, 3, 1).reshape(B_cur, -1)
+        else:
+            tokens = tokens.reshape(B_cur, -1)
+        target_tokens = tokens[:, 1:]
 
         # Per-token CE loss: (B, T)
         per_token_ce = F.cross_entropy(
@@ -393,6 +378,8 @@ def evaluate_position_bpp(model, loader, device, amp_dtype=None,
         # 对 batch 维度求和
         position_ce_sum += per_token_ce.sum(dim=0)
         n_samples += B_cur
+    finally:
+        _igpt_mod._USE_FUSED_LINEAR_CE = _saved_fused_linear_ce
 
     # 平均 CE per position
     position_ce_avg = (position_ce_sum / n_samples).cpu().numpy()  # (seq_len-1,)
