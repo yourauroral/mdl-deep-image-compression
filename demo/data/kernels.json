@@ -1,14 +1,41 @@
 {
   "gpu": "NVIDIA H800 PCIe",
   "shape": "B=64, T=3072, d_model=512, d_ff=1376, h=8, V=256, bf16",
-  "kernels": [
-    {"name": "Fused RMSNorm", "triton_ms": 0.263, "pytorch_ms": 2.859, "speedup": 10.85, "mem_save_pct": 60.0},
-    {"name": "Fused CE+z-loss", "triton_ms": 0.269, "pytorch_ms": 7.424, "speedup": 27.63, "mem_save_pct": 79.5},
-    {"name": "Fused SwiGLU", "triton_ms": 0.901, "pytorch_ms": 4.150, "speedup": 4.61, "mem_save_pct": 50.0},
-    {"name": "Fused RoPE", "triton_ms": 2.666, "pytorch_ms": 3.915, "speedup": 1.47, "mem_save_pct": 66.5},
-    {"name": "Fused Add+RMSNorm", "triton_ms": 0.362, "pytorch_ms": 2.768, "speedup": 7.65, "mem_save_pct": 62.5},
-    {"name": "Flash Attention v2", "triton_ms": 3.673, "pytorch_ms": 3.983, "speedup": 1.08, "mem_save_pct": 0.0},
-    {"name": "Fused Attn+RoPE", "triton_ms": 5.426, "pytorch_ms": 7.184, "speedup": 1.32, "mem_save_pct": 42.3}
-  ],
-  "note": "Forward-only, H800 PCIe, 2026-05-01."
+  "forward_only": {
+    "kernels": [
+      {"name": "Fused RMSNorm",       "triton_ms": 0.262, "pytorch_ms": 2.850, "speedup": 10.88, "mem_save_pct": 60.0, "ai": 1.2,   "tflops": 1.922,   "bottleneck": "Memory"},
+      {"name": "Fused CE+z-loss",     "triton_ms": 0.266, "pytorch_ms": 7.280, "speedup": 27.41, "mem_save_pct": 79.5, "ai": 1.5,   "tflops": 0.569,   "bottleneck": "Memory"},
+      {"name": "Fused SwiGLU",        "triton_ms": 0.899, "pytorch_ms": 4.143, "speedup": 4.61,  "mem_save_pct": 50.0, "ai": 0.7,   "tflops": 0.448,   "bottleneck": "Memory"},
+      {"name": "Fused RoPE",          "triton_ms": 2.610, "pytorch_ms": 3.910, "speedup": 1.50,  "mem_save_pct": 33.3, "ai": 1.5,   "tflops": 0.463,   "bottleneck": "Memory"},
+      {"name": "Fused Add+RMSNorm",   "triton_ms": 0.359, "pytorch_ms": 2.763, "speedup": 7.68,  "mem_save_pct": 62.5, "ai": 1.0,   "tflops": 1.680,   "bottleneck": "Memory"},
+      {"name": "Flash Attention v2",  "triton_ms": 3.474, "pytorch_ms": 3.955, "speedup": 1.14,  "mem_save_pct": 0.0,  "ai": 768.0, "tflops": 178.013, "bottleneck": "Compute"},
+      {"name": "Fused Attn+RoPE",     "triton_ms": 5.421, "pytorch_ms": 7.164, "speedup": 1.32,  "mem_save_pct": 13.8, "ai": 769.5, "tflops": 114.321, "bottleneck": "Compute"}
+    ],
+    "avg_speedup": 6.82,
+    "max_speedup": 27.41,
+    "max_speedup_kernel": "Fused CE+z-loss"
+  },
+  "forward_backward": {
+    "kernels": [
+      {"name": "Fused RMSNorm",       "triton_ms": 1.700,  "pytorch_ms": 10.630, "speedup": 6.25,  "mem_save_pct": 60.0, "ai": 1.2,   "tflops": 0.296,  "bottleneck": "Memory"},
+      {"name": "Fused CE+z-loss",     "triton_ms": 0.789,  "pytorch_ms": 12.290, "speedup": 15.58, "mem_save_pct": 66.6, "ai": 1.5,   "tflops": 0.191,  "bottleneck": "Memory"},
+      {"name": "Fused SwiGLU",        "triton_ms": 4.766,  "pytorch_ms": 11.611, "speedup": 2.44,  "mem_save_pct": 33.3, "ai": 0.7,   "tflops": 0.084,  "bottleneck": "Memory"},
+      {"name": "Fused RoPE",          "triton_ms": 2.604,  "pytorch_ms": 3.894,  "speedup": 1.50,  "mem_save_pct": 33.3, "ai": 1.5,   "tflops": 0.464,  "bottleneck": "Memory"},
+      {"name": "Fused Add+RMSNorm",   "triton_ms": 2.239,  "pytorch_ms": 10.815, "speedup": 4.83,  "mem_save_pct": 44.2, "ai": 1.0,   "tflops": 0.270,  "bottleneck": "Memory"},
+      {"name": "Flash Attention v2",  "triton_ms": 11.942, "pytorch_ms": 13.052, "speedup": 1.09,  "mem_save_pct": 27.1, "ai": 768.0, "tflops": 51.789, "bottleneck": "Compute"},
+      {"name": "Fused Attn+RoPE",     "triton_ms": 15.502, "pytorch_ms": 20.273, "speedup": 1.31,  "mem_save_pct": 22.9, "ai": 769.5, "tflops": 39.973, "bottleneck": "Compute"}
+    ],
+    "avg_speedup": 4.13,
+    "max_speedup": 15.58,
+    "max_speedup_kernel": "Fused CE+z-loss"
+  },
+  "negative_case": {
+    "name": "Fused Linear+CE",
+    "forward_only": {"triton_ms": 765.139,  "pytorch_ms": 18.719, "speedup": 0.02, "tflops": 0.068},
+    "forward_backward": {"triton_ms": 3048.584, "pytorch_ms": 15.017, "speedup": 0.00, "tflops": 0.017},
+    "ai": 256.4,
+    "bottleneck": "Compute",
+    "verdict": "反面案例：V=256 下 compute-bound + 三重循环失去 cuBLAS GEMM 利用率（仅达峰值算力的 0.007%），fwd 慢 100×，fwd+bwd 慢 200×。论文 3.3 节保留作工程判断素材。"
+  },
+  "note": "H800 PCIe, 2026-05-08 重测。fwd-only 与 fwd+bwd 两张表 + roofline 分析。"
 }
