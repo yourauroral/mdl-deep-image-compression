@@ -192,10 +192,12 @@ def test_ccigpt_disable_ctx_equivalent_to_fine_alone(small_ccigpt, device):
     with torch.no_grad():
         out_via_ccigpt = m.encode(x, max_layer=1, pool=True, use_coarse_ctx=False)
         out_via_fine = m.fine.encode(x, max_layer=1, pool=True)
-    for k in out_via_ccigpt:
-        assert k in out_via_fine
-        diff = (out_via_ccigpt[k] - out_via_fine[k]).abs().max().item()
-        assert diff < 1e-5, f"layer {k} 输出不一致 (max diff={diff:.6e})"
+    assert len(out_via_ccigpt) == len(out_via_fine), (
+        f"encode 输出层数不一致：{len(out_via_ccigpt)} vs {len(out_via_fine)}"
+    )
+    for i, (a, b) in enumerate(zip(out_via_ccigpt, out_via_fine)):
+        diff = (a - b).abs().max().item()
+        assert diff < 1e-5, f"layer {i} 输出不一致 (max diff={diff:.6e})"
 
 
 def test_backward_grads_flow(small_ccigpt, device):
