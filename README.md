@@ -15,7 +15,7 @@
 | PixelSNAIL | 380M | 2.85 | Chen et al., ICML 2018 |
 | **iGPT-S (Ours, best)** | **76.05M** | **2.9792** | d_model=512, N=24, 200 epochs |
 | **iGPT-S (Ours, SWA)** | **76.05M** | **2.9739** | SWA averaged over 21 checkpoints |
-| **CC-iGPT (Ours)** | **~81M** | 训练中 | 双尺度条件 AR (fine iGPT-S 76M + 浅层 coarse iGPT 4.8M, pool=4×) |
+| **CC-iGPT (Ours)** | **~81M** | **2.8047 ± 0.0747** | 双尺度条件 AR (fine 76M + coarse 4.8M, pool=4×); early-stop @ epoch 20（CIFAR-10 容量过剩，详见 §实验讨论） |
 | PNG (lossless) | — | ~5.87 | 传统方法 |
 | WebP (lossless) | — | ~5.02 | 传统方法 |
 
