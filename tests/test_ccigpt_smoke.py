@@ -93,41 +93,59 @@ def test_shape_assert_triggers(device):
 
 
 def test_encoder_decoder_ctx_consistency(small_ccigpt, device):
-    """Bit-exact 一致性：encoder 算的 coarse_ctx 必须等于 decoder 仅凭 coarse
-    bitstream tokens 重建出的 coarse_ctx。
+    """Bit-exact 一致性：encoder 真实 forward 用的 coarse_ctx 必须等于 decoder
+    仅凭 coarse bitstream tokens 重建出的 coarse_ctx。
 
-    场景：实际熵编码部署时，bitstream 只携带 coarse 量化 token (YCbCr int)。
+    场景：实际熵编码部署时 bitstream 只携带 coarse 量化 token (YCbCr int)。
     解码端拿到这些 token 后必须独立重建出与 encoder 相同的 fine 条件分布
     p(x_fine | coarse_ctx)，否则算术编码不可解。
 
-    本测试同时检查 reshape 正确性：内部反量化必须把 (B, N_c) 还原成正确的
-    (B, C, S, S) 像素图（与 IGPT._tokenize 互逆）。验证手段是 token→反量化→
-    重新 tokenize 后应当与原 token bit-exact 等价（量化只损一次，第二次
-    YCbCr int → BT.601 inverse → rgb_to_ycbcr_int 是稳定的不动点对自身）。
+    与旧版本测试的关键差异：旧版仅"对同一函数传同一输入比较"——这是 trivially
+    true 的恒等测试，无法捕获 forward 路径偷偷走 float 旁路（绕过量化）的回归。
+    本版本用 spy hook 截获 forward 内部实际使用的 coarse_tokens 与 ctx，再与
+    "decoder 视角"独立调用做对比，能真正发现量化路径被绕过。
     """
     m = small_ccigpt
     x = torch.rand(2, 3, 32, 32, device=device)
 
-    # encoder 路径
-    x_c_float = F.adaptive_avg_pool2d(x.clamp(0, 1), m.coarse_size)
-    coarse_tokens_enc = m.coarse._tokenize(x_c_float)
-    ctx_enc = m._compute_coarse_ctx(coarse_tokens_enc)
+    captured = {}
+    orig_compute = m._compute_coarse_ctx
+    def spy(tokens):
+        out = orig_compute(tokens)
+        captured["tokens"] = tokens.detach().clone()
+        captured["ctx"] = out.detach().clone()
+        return out
+    m._compute_coarse_ctx = spy
+    try:
+        with torch.no_grad():
+            m(x)  # 触发完整 forward，记录 forward 实际用的 (tokens, ctx)
+    finally:
+        m._compute_coarse_ctx = orig_compute
 
-    # decoder 模拟：只有 bitstream 解出来的 coarse token，调用同一函数
-    coarse_tokens_dec = coarse_tokens_enc.clone()
-    ctx_dec = m._compute_coarse_ctx(coarse_tokens_dec)
-    max_diff = (ctx_enc - ctx_dec).abs().max().item()
+    # decoder 视角：从 bitstream 解出 coarse token 后独立调 _compute_coarse_ctx
+    decoder_tokens = captured["tokens"]
+    ctx_dec = m._compute_coarse_ctx(decoder_tokens)
+
+    max_diff = (captured["ctx"] - ctx_dec).abs().max().item()
     assert max_diff < 1e-6, (
-        f"encoder/decoder coarse_ctx 不一致 (max diff={max_diff:.6e})。"
+        f"encoder forward 内 ctx 与 decoder 独立重建 ctx 不一致 "
+        f"(max diff={max_diff:.6e})。可能 forward 路径绕开了量化 token。"
     )
 
-    # reshape 正确性: 直接对比 _compute_coarse_ctx 内部用的反量化 (B,C,S,S)
-    # 与 rgb_to_ycbcr_int(x_c_float) 应当 byte-exact
-    from src.mdlic.models.igpt import rgb_to_ycbcr_int
+    # 进一步：forward 用的 token 必须可独立从 _tokenize(x_c_float) 复现，
+    # 否则 decoder 拿不到一样的 tokens。
+    x_c_float = F.adaptive_avg_pool2d(x.clamp(0, 1), m.coarse_size)
+    expected_tokens = m.coarse._tokenize(x_c_float)
+    assert (captured["tokens"] == expected_tokens).all(), (
+        "forward 内 _compute_coarse_ctx 收到的 tokens 与 coarse._tokenize 输出不一致"
+    )
+
+    # reshape 正确性: 直接对比反量化 (B,C,S,S) 与 rgb_to_ycbcr_int(x_c_float)
+    # 应当 byte-exact（防止 channel-first vs pixel-first reshape 误用）
     ycbcr_direct = rgb_to_ycbcr_int(x_c_float)
     B = x.size(0)
     S, C = m.coarse_size, m.in_channels
-    ycbcr_via_reshape = coarse_tokens_enc.view(B, C, S, S)
+    ycbcr_via_reshape = decoder_tokens.view(B, C, S, S)
     assert (ycbcr_direct == ycbcr_via_reshape).all(), (
         "coarse_tokens reshape 错误：view(B,C,S,S) 没还原出原 YCbCr 平面"
     )
@@ -143,12 +161,41 @@ def test_encoder_decoder_ctx_consistency_rgb(device):
         dropout=0.0, use_ycbcr=False,
     ).to(device).eval()
     x = torch.rand(2, 3, 32, 32, device=device)
-    x_c = F.adaptive_avg_pool2d(x.clamp(0, 1), m.coarse_size)
-    tok = m.coarse._tokenize(x_c)
-    ctx_enc = m._compute_coarse_ctx(tok)
-    ctx_dec = m._compute_coarse_ctx(tok.clone())
-    max_diff = (ctx_enc - ctx_dec).abs().max().item()
+
+    captured = {}
+    orig_compute = m._compute_coarse_ctx
+    def spy(tokens):
+        out = orig_compute(tokens)
+        captured["tokens"] = tokens.detach().clone()
+        captured["ctx"] = out.detach().clone()
+        return out
+    m._compute_coarse_ctx = spy
+    try:
+        with torch.no_grad():
+            m(x)
+    finally:
+        m._compute_coarse_ctx = orig_compute
+
+    ctx_dec = m._compute_coarse_ctx(captured["tokens"])
+    max_diff = (captured["ctx"] - ctx_dec).abs().max().item()
     assert max_diff < 1e-6, f"RGB 分支 ctx 不一致 (max diff={max_diff:.6e})"
+
+
+def test_ccigpt_disable_ctx_equivalent_to_fine_alone(small_ccigpt, device):
+    """CCIGPT.encode(use_coarse_ctx=False) 必须严格等价 fine 子模型独立 encode。
+
+    覆盖 linear_probe 消融对照路径：用户传 --no_coarse_ctx 时 fine 应该看不到
+    任何 ctx 注入；本测试防止未来 encode 实现误把 ctx 默认接通。
+    """
+    m = small_ccigpt
+    x = torch.rand(2, 3, 32, 32, device=device)
+    with torch.no_grad():
+        out_via_ccigpt = m.encode(x, max_layer=1, pool=True, use_coarse_ctx=False)
+        out_via_fine = m.fine.encode(x, max_layer=1, pool=True)
+    for k in out_via_ccigpt:
+        assert k in out_via_fine
+        diff = (out_via_ccigpt[k] - out_via_fine[k]).abs().max().item()
+        assert diff < 1e-5, f"layer {k} 输出不一致 (max diff={diff:.6e})"
 
 
 def test_backward_grads_flow(small_ccigpt, device):

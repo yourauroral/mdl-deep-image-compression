@@ -122,13 +122,15 @@ class RotaryEmbedding(nn.Module):
     # θ_i = base^{-2i/d_k}，shape: (dim//2,)  [1] Eq.(15)
     inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
     self.register_buffer('inv_freq', inv_freq)
-    # (seq_len, device) → (cos, sin)；避免每次 forward 重算 arange/outer/cat
+    # (seq_len, device, dtype) → (cos, sin)；dtype 入 key 防止 model.to(bf16)
+    # 后旧 fp32 cos/sin 仍被命中（cos/sin 是从 inv_freq 派生的，inv_freq 会随
+    # model.to() 改 dtype，cache 必须跟随）。
     self._cache_key = None
     self._cache_cos = None
     self._cache_sin = None
 
   def forward(self, seq_len: int, device: torch.device):
-    key = (seq_len, device)
+    key = (seq_len, device, self.inv_freq.dtype)
     if self._cache_key != key:
       t = torch.arange(seq_len, device=device, dtype=self.inv_freq.dtype)
       freqs = torch.outer(t, self.inv_freq)

@@ -47,18 +47,18 @@ train:
   grad_accum_steps: 2
   lr: 3e-4
   eps: 1e-8
-  epochs: 300                   # CC-iGPT 训得更久，给联合 coarse+fine 更多收敛时间
+  epochs: 120                   # 300 epoch 过拟合，缩短到 120（warmup/stable/SWA 按比例缩放）
   log_freq: 50
   clip_max_norm: 1.0
   z_loss_weight: 1e-4
   lr_schedule: "cosine"
-  warmup_epochs: 15             # 按 epochs 比例放大
-  stable_epochs: 210            # 仅 WSD 模式生效
+  warmup_epochs: 6              # 5% epochs
+  stable_epochs: 84             # 仅 WSD 模式生效（cosine 模式不读此值，70% epochs）
   decay_beta: 1.0
   compile: false
   swa:
     enabled: true
-    start_epoch: 270            # 最后 30 epoch 启动 SWA（按比例从 180/200 放大）
+    start_epoch: 108            # 最后 12 epoch 启动 SWA（90% epochs）
     update_interval: 1
   mup:
     enabled: false

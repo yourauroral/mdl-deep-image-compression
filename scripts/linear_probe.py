@@ -105,7 +105,7 @@ def extract_features(model, dataloader, layer_indices, device, amp_dtype=None,
     all_features = {idx: [] for idx in layer_indices}
     all_labels = []
 
-    use_amp = amp_dtype is not None
+    use_amp = amp_dtype is not None and device.type == 'cuda'
     from contextlib import nullcontext
     from torch.amp import autocast
 

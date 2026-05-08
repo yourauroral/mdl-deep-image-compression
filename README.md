@@ -3,7 +3,7 @@
 基于 **Minimum Description Length (MDL)** 原则的深度图像压缩系统设计与实现。核心命题：**压缩即预测** — CE loss 直接对应 Shannon 最优编码长度 (Shannon 1948, Delétang et al. 2024)。
 
 - **Phase A (完成)**: iGPT token-level 自回归压缩 + 8 个手写 Triton Kernel（7 个进入训练栈，1 个 `fused_linear_ce` 在 V=256 下经 roofline 分析证伪、保留作反面案例，~2,400 行），iGPT-S CIFAR-10 SWA **2.9739 bits/dim**
-- **Phase B (训练中)**: CC-iGPT（Coarse-Conditioned iGPT）双尺度条件自回归 — 浅层 coarse iGPT (8×8, 192 token) 独立编码进 bitstream，UP + 量化后通过 additive embedding（可学习 α）注入 fine iGPT (32×32, 3072 token)，目标 BPP_total < iGPT-S 2.9739
+- **Phase B (训练中)**: CC-iGPT（Coarse-Conditioned iGPT）双尺度条件自回归 — 浅层 coarse iGPT (8×8, 192 token) 独立编码进 bitstream，UP + 量化后通过 additive embedding（可学习标量 α）注入 fine iGPT (32×32, 3072 token)，目标 BPP_total < iGPT-S 2.9739。当前 120 epoch（早期 300 epoch 配置过拟合后下调）。
 - **Phase C (完成)**: Demo 前端可视化系统 (FastAPI + Chart.js, 5 个展示面板)
 
 ## Baseline 对比
@@ -15,7 +15,7 @@
 | PixelSNAIL | 380M | 2.85 | Chen et al., ICML 2018 |
 | **iGPT-S (Ours, best)** | **76.05M** | **2.9792** | d_model=512, N=24, 200 epochs |
 | **iGPT-S (Ours, SWA)** | **76.05M** | **2.9739** | SWA averaged over 21 checkpoints |
-| **CC-iGPT (Ours)** | **~95M** | 训练中 | 双尺度条件 AR (fine iGPT-S + 浅层 coarse iGPT, pool=4×) |
+| **CC-iGPT (Ours)** | **~81M** | 训练中 | 双尺度条件 AR (fine iGPT-S 76M + 浅层 coarse iGPT 4.8M, pool=4×) |
 | PNG (lossless) | — | ~5.87 | 传统方法 |
 | WebP (lossless) | — | ~5.02 | 传统方法 |
 
@@ -255,7 +255,7 @@ Coarse-Conditioned iGPT —— 双尺度条件式自回归。回避了多尺度 
 | DOWN | `F.adaptive_avg_pool2d(x, 8)` 在 float 域下采样到 8×8 |
 | Coarse iGPT | 浅层（d_model=256, N=6），独立 NTP 训练，CE 进 bitstream（192 token，~6% overhead） |
 | **Bit-exact ctx 路径** | encoder/decoder 必须看到**同一个** `coarse_ctx`，否则 fine 端算术编码不可解。统一管线：coarse 量化 token → 反量化 RGB（YCbCr 时走 BT.601 inverse）→ bilinear UP 到 32×32 → 与 fine encoder 同规则 re-tokenize → `fine.token_embed` |
-| Ctx 注入 | AR shift `coarse_ctx[:-1]` → `α · coarse_ctx`（additive，无新增可学习参数） |
+| Ctx 注入 | AR shift `coarse_ctx[:-1]` → `α · coarse_ctx`（additive，仅引入 1 个标量参数 α） |
 | 可学习 α | `nn.Parameter(torch.ones(1))`，初始 1.0；模型自适应注入强度，避免 ctx 过强压制 fine token embed |
 | 联合 BPP | `BPP_total = (CE_c · 192 + CE_f · 3072) / ln(2) / 3072`（按 H·W·C 归一化） |
 | 训练 | 端到端联合 `loss = loss_coarse + loss_fine`，无尺度间加权 |
@@ -280,7 +280,7 @@ GPTBlock, MultiHeadAttentionBlock (RoPE + QK-Norm + Flash Attention + attn_mask)
 | Fused Add+RMSNorm | ~217 | post-norm 残差+归一化合并 |
 | Fused SwiGLU | ~204 | activation recomputation |
 | Fused RoPE | ~123 | 就地旋转 Q/K |
-| Fused Attn+RoPE | ~100 | RoPE + Flash Attention 合并 |
+| Fused Attn+RoPE | ~62 | 薄包装层：组合 fused_rope + flash_attn，简化 layers.py 调用 |
 | ~~Fused Linear+CE~~ | ~393 | **反面案例** — V=256 下三重循环失去 cuBLAS GEMM 利用率，比 PyTorch 慢 100× |
 
 全部 7 个生效 kernel 自动降级到 PyTorch，全部有独立单元测试。

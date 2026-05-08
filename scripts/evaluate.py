@@ -111,14 +111,18 @@ def evaluate_model(model, loader, device, amp_dtype=None):
       bpp_mean: float — 平均 BPP
       bpp_std:  float — BPP 标准差（per-batch）
       bpp_list: list[float] — 每个 batch 的 BPP
+      extras:   dict — 可选的额外字段（CC-iGPT 时含 ce_coarse / ce_fine / ctx_alpha）
     """
     model.eval()
-    # weighted mean: 累加 bpp * batch_size，除以总样本数。
-    # 避免最后一批样本不满 batch 时的偏差。
     bpp_per_batch = []
     bpp_weighted_sum = 0.0
     n_total = 0
     use_amp = amp_dtype is not None and device.type == 'cuda'
+
+    # CC-iGPT 额外聚合 CE_c / CE_f / α。is_ccigpt 由 forward 输出 keys 推断，
+    # 不依赖 isinstance（DDP wrap 后 model 是 DDP 而非 CCIGPT）。
+    is_ccigpt = False
+    ce_c_sum = ce_f_sum = alpha_sum = 0.0
 
     for batch in loader:
         if isinstance(batch, (list, tuple)):
@@ -131,8 +135,6 @@ def evaluate_model(model, loader, device, amp_dtype=None):
         with autocast(device_type="cuda", dtype=amp_dtype) if use_amp else nullcontext():
             out = model(x)
 
-        # BPP：优先使用模型返回的 bpp（CC-iGPT 在 forward 中按 H·W·C 归一化），
-        # 否则按 iGPT 约定 CE / ln2 计算
         if "bpp" in out and out["bpp"] is not None:
             bpp = out["bpp"]
         else:
@@ -142,9 +144,22 @@ def evaluate_model(model, loader, device, amp_dtype=None):
         bpp_weighted_sum += bpp_val * B
         n_total += B
 
+        if "ce_loss_coarse" in out and out["ce_loss_coarse"] is not None:
+            is_ccigpt = True
+            ce_c_sum += out["ce_loss_coarse"].item() * B
+            ce_f_sum += out["ce_loss_fine"].item() * B
+            if "ctx_alpha" in out and out["ctx_alpha"] is not None:
+                alpha_sum += out["ctx_alpha"].item() * B
+
     bpp_mean = bpp_weighted_sum / n_total
     bpp_std = float(np.std(bpp_per_batch))
-    return bpp_mean, bpp_std, bpp_per_batch
+
+    extras = {}
+    if is_ccigpt:
+        extras["ce_coarse"] = ce_c_sum / n_total
+        extras["ce_fine"] = ce_f_sum / n_total
+        extras["ctx_alpha"] = alpha_sum / n_total
+    return bpp_mean, bpp_std, bpp_per_batch, extras
 
 
 @torch.no_grad()
@@ -240,13 +255,13 @@ def evaluate_per_channel(model, loader, device, amp_dtype=None,
                 ch_logits = logits[:, ch_mask]      # (B, ch_len, vocab)
                 ch_targets = target_tokens[:, ch_mask]  # (B, ch_len)
             else:
-                # channel-first: 通道 i 占连续 pixels_per_channel 个 token
-                start = i * pixels_per_channel
-                end = (i + 1) * pixels_per_channel
-                # NTP 偏移已在 logits[:,:-1] / target_tokens[:,1:] 处理,
-                # 通道边界无需额外偏移
-                ch_start = start
-                ch_end = min(end, logits.shape[1])
+                # channel-first: 通道 i 的原始 tokens 占 [i*HW, (i+1)*HW)。
+                # target_tokens = tokens[:,1:]，logits[:,t] 预测 target_tokens[:,t] = tokens[:,t+1]。
+                # 因此"target 属于通道 i"等价于 tokens 下标 ∈ [i*HW, (i+1)*HW)
+                # 对应 target_tokens 下标 ∈ [i*HW - 1, (i+1)*HW - 1)（通道 0 的 token[0] 无预测）。
+                ch_start = max(0, i * pixels_per_channel - 1)
+                ch_end = (i + 1) * pixels_per_channel - 1
+                ch_end = min(ch_end, logits.shape[1])
                 if ch_start >= ch_end:
                     continue
                 ch_logits = logits[:, ch_start:ch_end]    # (B, ch_len, vocab)
@@ -531,7 +546,9 @@ def print_results_table(dataset_name, model_bpp, model_std,
         print("|------|-------|")
         for ch_name, (bpp, std) in channel_bpps.items():
             print(f"| {ch_name} | {bpp:.4f} ± {std:.4f} |")
-        total_bpp = sum(v[0] for v in channel_bpps.values())
+        # Total 是三通道的平均（bits/dim 单位），与 evaluate_model 返回值一致；
+        # 曾经写 sum() 会多出 ~3× 的伪 Total。
+        total_bpp = sum(v[0] for v in channel_bpps.values()) / len(channel_bpps)
         print(f"| **Total** | **{total_bpp:.4f}** |")
     print()
 
@@ -612,9 +629,20 @@ def cmd_single(args, config, device):
 
     # 基本 BPP 评测
     print(f"\n评测中... (AMP: {amp_dtype_str})")
-    bpp_mean, bpp_std, _ = evaluate_model(model, test_loader, device,
-                                            amp_dtype=amp_dtype)
+    bpp_mean, bpp_std, _, extras = evaluate_model(model, test_loader, device,
+                                                    amp_dtype=amp_dtype)
     print(f"{model_type.upper()} BPP: {bpp_mean:.4f} ± {bpp_std:.4f}")
+    if extras:
+        # CC-iGPT 多输出 CE_c / CE_f / α，便于诊断 fine 弱 vs coarse overhead 过大
+        ce_c = extras["ce_coarse"]
+        ce_f = extras["ce_fine"]
+        N_c = model.coarse.seq_len
+        N_f = model.fine.seq_len
+        bpp_c_share = ce_c * N_c / math.log(2.0) / N_f
+        bpp_f_share = ce_f * N_f / math.log(2.0) / N_f
+        print(f"  CE_coarse = {ce_c:.4f}  → BPP_share = {bpp_c_share:.4f} ({100*bpp_c_share/bpp_mean:.1f}%)")
+        print(f"  CE_fine   = {ce_f:.4f}  → BPP_share = {bpp_f_share:.4f} ({100*bpp_f_share/bpp_mean:.1f}%)")
+        print(f"  ctx_alpha = {extras['ctx_alpha']:.4f}")
 
     # Per-channel BPP（可选，仅 iGPT 支持；CC-iGPT 联合 coarse+fine 序列与单尺度通道切分不兼容）
     channel_bpps = None
@@ -705,16 +733,16 @@ def cmd_swa(args, config, device):
     # 评测 best
     model = _build_from_config(mcfg, device)
     _load_checkpoint(model, best_path, device)
-    bpp_best, std_best, _ = evaluate_model(model, test_loader, device,
-                                            amp_dtype=amp_dtype)
+    bpp_best, std_best, _, _ = evaluate_model(model, test_loader, device,
+                                                amp_dtype=amp_dtype)
     results.append(("best.pth", bpp_best, std_best))
     print(f"best.pth  BPP: {bpp_best:.4f} ± {std_best:.4f}")
 
     # 评测 swa
     model = _build_from_config(mcfg, device)
     _load_checkpoint(model, swa_path, device)
-    bpp_swa, std_swa, _ = evaluate_model(model, test_loader, device,
-                                           amp_dtype=amp_dtype)
+    bpp_swa, std_swa, _, _ = evaluate_model(model, test_loader, device,
+                                               amp_dtype=amp_dtype)
     results.append(("swa.pth", bpp_swa, std_swa))
     print(f"swa.pth   BPP: {bpp_swa:.4f} ± {std_swa:.4f}")
 
@@ -785,8 +813,8 @@ def cmd_ablation(args, config, device):
             print(f"\n评测 {exp_id} ({desc})...")
             model = _build_from_config(mcfg_ablation, device)
             _load_checkpoint(model, ckpt_path, device)
-            bpp, std, _ = evaluate_model(model, test_loader, device,
-                                          amp_dtype=amp_dtype)
+            bpp, std, _, _ = evaluate_model(model, test_loader, device,
+                                              amp_dtype=amp_dtype)
 
             if baseline_bpp is None:
                 baseline_bpp = bpp
@@ -810,8 +838,8 @@ def cmd_ablation(args, config, device):
             print(f"\n评测 {exp_id} ({desc})...")
             model = _build_from_config(mcfg, device)
             _load_checkpoint(model, ckpt_path, device)
-            bpp, std, _ = evaluate_model(model, test_loader, device,
-                                          amp_dtype=amp_dtype)
+            bpp, std, _, _ = evaluate_model(model, test_loader, device,
+                                              amp_dtype=amp_dtype)
 
             if baseline_bpp is None:
                 baseline_bpp = bpp

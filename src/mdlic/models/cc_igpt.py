@@ -91,11 +91,16 @@ class CCIGPT(nn.Module):
           → bilinear UP 到 fine 分辨率 → clamp → 再 tokenize (与 fine encoder 同规则)
           → fine.token_embed
         """
+        # 该 reshape 依赖 channel-first 平铺 (IGPT._tokenize 的 use_subpixel_ar=False
+        # 行为)。__init__ 已强制 coarse channel-first；此处再加运行时断言，防止
+        # 有人替换 self.coarse 或将 _tokenize 改成 pixel-first 后 view(B,C,S,S)
+        # 静默错位（loss 仍下降但 ctx 完全乱套）。
+        assert not self.coarse.use_subpixel_ar, (
+            "_compute_coarse_ctx 依赖 channel-first token 布局；"
+            "self.coarse.use_subpixel_ar 必须为 False"
+        )
         B = coarse_tokens.size(0)
         S, C = self.coarse_size, self.in_channels
-        # IGPT._tokenize 在 use_subpixel_ar=False 模式直接 (B,C,S,S).reshape(B,-1)，
-        # 即 channel-first 平铺；逆操作是 view(B,C,S,S)，不需要 permute。
-        # CCIGPT 在 __init__ 强制 use_subpixel_ar=False，所以这里的 reshape 安全。
         rec = coarse_tokens.view(B, C, S, S).float() / 255.0
 
         if self.use_ycbcr:

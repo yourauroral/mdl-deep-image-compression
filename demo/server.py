@@ -27,6 +27,7 @@ from pathlib import Path
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 
 # 项目根目录
 ROOT = Path(__file__).resolve().parent.parent
@@ -34,7 +35,22 @@ sys.path.insert(0, str(ROOT))
 
 DATA_DIR = Path(__file__).resolve().parent / "data"
 
+# 上传图片大小上限（10 MB）和允许的 MIME 类型，防止 /api/predict 被恶意大文件
+# 或非图片文件耗尽内存。
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+ALLOWED_CONTENT_TYPES = {
+    "image/jpeg", "image/png", "image/webp", "image/gif", "image/bmp",
+}
+
 app = FastAPI(title="MDL Deep Image Compression Demo")
+
+# 显式 CORS 白名单：仅允许本地开发用 origin。部署到公网时按需扩充。
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:8000", "http://127.0.0.1:8000"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
+)
 
 # 静态文件
 app.mount("/static", StaticFiles(directory=Path(__file__).resolve().parent / "static"), name="static")
@@ -87,7 +103,13 @@ async def predict(file: UploadFile = File(...)):
     except ImportError:
         raise HTTPException(status_code=500, detail="torch/torchvision not installed")
 
-    contents = await file.read()
+    # 输入校验：MIME 类型 + 大小上限。content_type 可被客户端伪造，所以后面还会
+    # 让 PIL.Image.open 二次验证；这里只是廉价的早期拒绝。
+    if file.content_type and file.content_type not in ALLOWED_CONTENT_TYPES:
+        raise HTTPException(status_code=415, detail=f"Unsupported media type: {file.content_type}")
+    contents = await file.read(MAX_UPLOAD_BYTES + 1)
+    if len(contents) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail=f"File too large (>{MAX_UPLOAD_BYTES // 1024 // 1024} MB)")
     try:
         img = Image.open(io.BytesIO(contents)).convert("RGB")
     except Exception:
@@ -113,6 +135,16 @@ async def predict(file: UploadFile = File(...)):
         # iGPT: CE 是 per-token nats，bits/dim = CE / ln2 （已按 H·W·C 归一化）
         bpp = ce_loss / math.log(2)
 
+    # CC-iGPT 的 ce_loss 仅含 fine 分支 CE，与 BPP_total（含 coarse overhead）
+    # 在尺度上不对应；前端"CE Loss"卡片若直接显示 ce_loss 会误导观感。
+    # 这里把 ce_coarse / ce_fine / α 也一起返回，前端按 model_type 分别渲染。
+    extras = {}
+    if "ce_loss_coarse" in out and out["ce_loss_coarse"] is not None:
+        extras["ce_coarse"] = round(out["ce_loss_coarse"].item(), 4)
+        extras["ce_fine"] = round(out["ce_loss_fine"].item(), 4)
+        if "ctx_alpha" in out and out["ctx_alpha"] is not None:
+            extras["ctx_alpha"] = round(out["ctx_alpha"].item(), 4)
+
     # 仅 iGPT 支持完整 per-position 热力图（复用同一次 forward 的 logits）
     heatmap_b64 = None
     if model_type == "igpt" and out.get("logits") is not None:
@@ -123,6 +155,7 @@ async def predict(file: UploadFile = File(...)):
         "ce_loss": round(ce_loss, 4),
         "model_type": model_type,
         "heatmap": heatmap_b64,
+        **extras,
     })
 
 
@@ -160,6 +193,9 @@ def _get_cached_model(device):
         else:
             model = _build_model_from_config(mcfg, device)
 
+        # weights_only=False 仅在 demo 加载本地受信 checkpoint 时使用（含 epoch/optimizer
+        # 等非 tensor 字段，weights_only=True 会失败）。若部署到公网或允许第三方上传
+        # checkpoint，必须切换到 weights_only=True 并改造为只接收 state_dict。
         ckpt = torch.load(str(ckpt_path), map_location=device, weights_only=False)
         if "model_state_dict" in ckpt:
             model.load_state_dict(ckpt["model_state_dict"])
