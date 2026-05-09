@@ -1,20 +1,29 @@
-exp_name: "igpt_imagenet32_s"
+exp_name: "ccigpt_imagenet32_s"
 
-# iGPT-S on ImageNet 32×32 (HF parquet → BOX resize → npy)
-# ImageNet 32×32: ~1.28M train / 50k val
-# 序列长度 3072 (32×32×3)，与 CIFAR 相同，但数据量大 25 倍
-# Ref: Chrabaszcz et al., "A Downsampled Variant of ImageNet," 2017
+# Coarse-Conditioned iGPT on ImageNet 32×32
+# 用于验证 CC-iGPT 在 CIFAR-10 过拟合是容量/数据 mismatch 而非结构 bug。
+# ImageNet32 (~1.28M) 数据量足够，预期 fine 76M 不再早过拟合，BPP_total 持续下降。
 
 model:
-  type: igpt
+  type: ccigpt
   image_size: 32
   in_channels: 3
   vocab_size: 256
+  pool_factor: 4               # 32 → 8（coarse 192 tokens, ~6% overhead）
+
+  # fine 模型（iGPT-S 配置，~76M）
   d_model: 512
   N: 24
   h: 8
   d_ff: 1376
   dropout: 0.0
+
+  # coarse 模型
+  coarse_d_model: 256
+  coarse_N: 6
+  coarse_h: 4
+  coarse_d_ff: 688
+
   use_ycbcr: true
   use_rope: true
   use_post_norm: true
@@ -22,7 +31,6 @@ model:
   use_qk_norm: true
   use_depth_scaled_init: true
   use_zloss: true
-  use_subpixel_ar: true
   activation_checkpointing: true
 
 data:
@@ -33,25 +41,22 @@ data:
 
 train:
   amp_dtype: "bf16"
-  # 2×H800 DDP: per-GPU batch=64, world_size=2, grad_accum=2
-  # effective batch = 64 * 2 * 2 = 256
   batch_size: 64
   grad_accum_steps: 2
   lr: 3e-4
   eps: 1e-8
-  # 与 CC-iGPT 同节奏（CIFAR-10 用 120ep，ImageNet32 数据量足够，120ep 足以判断是否仍过拟合）
   epochs: 120
   log_freq: 200
   clip_max_norm: 1.0
   z_loss_weight: 1e-4
   lr_schedule: "cosine"
-  warmup_epochs: 6              # 5% epochs
-  stable_epochs: 84             # WSD 模式生效
+  warmup_epochs: 6
+  stable_epochs: 84
   decay_beta: 1.0
   compile: false
   swa:
     enabled: true
-    start_epoch: 108            # 90% epochs
+    start_epoch: 108
     update_interval: 1
   mup:
     enabled: false

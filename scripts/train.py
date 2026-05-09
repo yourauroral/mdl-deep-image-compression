@@ -459,8 +459,12 @@ def main():
     elif dataset_name in ("imagenet", "imagenet32"):
         train_dataset = ImageFolder(root=os.path.join(config["data"]["train"], "train"), transform=transform)
         valid_dataset = ImageFolder(root=os.path.join(config["data"]["valid"], "val"),   transform=transform)
+    elif dataset_name == "imagenet32_npy":
+        from mdlic.data.imagenet32_npy import ImageNet32Npy
+        train_dataset = ImageNet32Npy(root=config["data"]["train"], split="train")
+        valid_dataset = ImageNet32Npy(root=config["data"]["valid"], split="val")
     else:
-        raise ValueError(f"未知 dataset: '{dataset_name}'，支持 cifar10/cifar100/imagenet/imagenet32")
+        raise ValueError(f"未知 dataset: '{dataset_name}'，支持 cifar10/cifar100/imagenet/imagenet32/imagenet32_npy")
     if rank == 0:
         print(f"Dataset: {dataset_name} | Train: {len(train_dataset)} | Valid: {len(valid_dataset)}")
 
