@@ -3,8 +3,9 @@
 基于 **Minimum Description Length (MDL)** 原则的深度图像压缩系统设计与实现。核心命题：**压缩即预测** — CE loss 直接对应 Shannon 最优编码长度 (Shannon 1948, Delétang et al. 2024)。
 
 - **Phase A (完成)**: iGPT token-level 自回归压缩 + 8 个手写 Triton Kernel（7 个进入训练栈，1 个 `fused_linear_ce` 在 V=256 下经 roofline 分析证伪、保留作反面案例，~2,400 行），iGPT-S CIFAR-10 SWA **2.9739 bits/dim**
-- **Phase B (训练中)**: CC-iGPT（Coarse-Conditioned iGPT）双尺度条件自回归 — 浅层 coarse iGPT (8×8, 192 token) 独立编码进 bitstream，UP + 量化后通过 additive embedding（可学习标量 α）注入 fine iGPT (32×32, 3072 token)，目标 BPP_total < iGPT-S 2.9739。当前 120 epoch（早期 300 epoch 配置过拟合后下调）。
+- **Phase B (完成)**: CC-iGPT（Coarse-Conditioned iGPT）双尺度条件自回归 — 浅层 coarse iGPT (8×8, 192 token) 独立编码进 bitstream，UP + 量化后通过 additive embedding（可学习标量 α）注入 fine iGPT (32×32, 3072 token)，CIFAR-10 early-stop @ ep20 **2.8047 bits/dim**（Δ=−0.17 vs iGPT-S；ep25 后过拟合反弹 → 120 epoch 配置作废，结果取 early-stop）
 - **Phase C (完成)**: Demo 前端可视化系统 (FastAPI + Chart.js, 5 个展示面板)
+- **补充实验 (ImageNet 32×32)**: 在 ~1.28M 张训练图（25× CIFAR-10）上复跑 iGPT-S 与 CC-iGPT，验证 CIFAR-10 上 CC-iGPT 早过拟合是容量/数据 mismatch 而非结构 bug。120 epoch，warmup 6 / stable 84 / SWA start 108。
 
 ## Baseline 对比
 
@@ -23,6 +24,8 @@
 
 ```bash
 pip install torch torchvision pyyaml numpy pillow tensorboard triton
+# ImageNet32 补充实验额外依赖（parquet 解析 + 进度条）
+pip install pyarrow tqdm
 ```
 
 ```bash
@@ -37,8 +40,14 @@ torchrun --nproc_per_node=1 scripts/train.py --config configs/igpt_cifar10_s.yam
 torchrun --nproc_per_node=2 scripts/train.py --config configs/igpt_cifar10_s.yaml
 torchrun --nproc_per_node=2 scripts/train.py --config configs/ccigpt_cifar10_s.yaml
 
-# 训练 — ImageNet 32×32
+# 训练 — ImageNet 32×32 (补充实验, 120 epoch)
+# 先把 HuggingFace imagenet-1k parquet 放到 datasets/imagenet32_hf/
+#   train-00000..6-of-00007.parquet + val-00000-of-00001.parquet
+# 一次性预处理 → uint8 npy (PIL.Image.BOX resize, 对齐 Chrabaszcz 2017)
+python scripts/prepare_imagenet32.py \
+    --raw_dir datasets/imagenet32_hf --out_dir datasets/imagenet32_hf
 torchrun --nproc_per_node=2 scripts/train.py --config configs/igpt_imagenet32_s.yaml
+torchrun --nproc_per_node=2 scripts/train.py --config configs/ccigpt_imagenet32_s.yaml
 
 # 断点续训 (resume 会自动用 config 中的 lr 覆盖 checkpoint 旧值)
 torchrun --nproc_per_node=2 scripts/train.py \
@@ -83,6 +92,8 @@ git clone <repo-url> mdl-deep-image-compression
 cd mdl-deep-image-compression
 git checkout dev
 pip install torch torchvision pyyaml numpy pillow tensorboard triton
+# ImageNet32 补充实验额外依赖
+pip install pyarrow tqdm
 
 # 验证环境
 python scripts/dryrun_forward.py
@@ -297,9 +308,10 @@ src/mdlic/
 ├── models/    igpt.py, cc_igpt.py, layers.py
 ├── ops/       7 个 Triton kernels (flash_attn, fused_rms_norm, ...)
 ├── optim/     muon.py (Muon optimizer)
+├── data/      imagenet32_npy.py (mmap-backed Dataset)
 └── utils/     seed, BPP
-scripts/       train.py, evaluate.py, linear_probe.py, dryrun_forward.py, profile_kernels.py
-configs/       igpt_cifar10_s, igpt_cifar100_s, igpt_imagenet32_s, ccigpt_cifar10_s
+scripts/       train.py, evaluate.py, linear_probe.py, dryrun_forward.py, profile_kernels.py, prepare_imagenet32.py
+configs/       igpt_cifar10_s, igpt_cifar100_s, igpt_imagenet32_s, ccigpt_cifar10_s, ccigpt_imagenet32_s
 tests/         7 个 kernel 单元测试
 demo/
 ├── server.py          FastAPI 后端 (predict / metrics / probe / kernels / scales)
