@@ -71,4 +71,4 @@ eval:
   interval: 5
 
 checkpoint:
-  save_interval: 10
+  save_interval: 2
