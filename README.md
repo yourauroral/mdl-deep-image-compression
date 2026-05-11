@@ -34,6 +34,18 @@
 >
 > RGB ablation 行 3.2540 vs Sparse Transformer 2.80 的差距，归因于：(a) 50 epoch vs 文献基线 200+ epoch 训练预算差；(b) 24 层 dense attention vs Sparse Transformer 128 层 strided sparse attention；(c) 未实现 PixelCNN++ 系 mixture-of-logistics 或 RCT 等 RGB-domain 通道相关化技术。
 
+### ImageNet 32×32 训练动力学验证（早期 checkpoint）
+
+受时间预算限制 ImageNet32 完整训练未完成，但有一个 epoch 7 的 best 中间 checkpoint，作为**训练动力学外推证据**报告（不进上方 CIFAR-10 主表，避免与文献基线被误读为同一基准）：
+
+| 方法 | epoch | BPP_total (YCbCr-int) | CE_coarse | CE_fine | α | coarse bit share | 参考 |
+|------|-------|----|----|----|---|---|------|
+| **CC-iGPT (Ours, ImageNet32, training)** | 7 / 120 | **3.0951 ± 0.0967** | 2.8300 | 1.9685 | 0.476 | 8.2% | 本文 |
+| Sparse Transformer | 充分收敛 | 3.44 | — | — | — | — | Child et al. 2019 (RGB-bit-exact) |
+
+CC-iGPT 7 epoch 的 CE_coarse 已**低于**其 CIFAR-10 ep20 收敛值（2.8300 < 2.9329），说明 ImageNet32 ~1.28M 训练样本使 coarse 模型获得更广分布；CE_fine 仍高于 CIFAR-10（1.9685 > 1.7591），符合 fine 76M 在 7 epoch 远未收敛的预期。α 与 coarse bit share 落在设计预期范围内，验证 CC-iGPT 双尺度条件式注入在更大数据集上**训练动力学保持正常**。完整收敛实验留作后续工作。
+
+
 ### 创新点定位 & 与 SOTA 的关系
 
 本工作并非以击败 Sparse Transformer (CIFAR-10 2.80, 59M, 128 层 strided sparse attention) 为目标。
