@@ -588,7 +588,7 @@ def _load_dataset(config):
 
     dataset_name = config["data"].get("dataset", "cifar100")
     if dataset_name == "imagenet32_npy":
-        from mdlic.data.imagenet32_npy import ImageNet32Npy
+        from src.mdlic.data.imagenet32_npy import ImageNet32Npy
         test_dataset = ImageNet32Npy(root=config["data"]["valid"], split="val")
         return test_dataset, dataset_name
 
