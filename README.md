@@ -14,11 +14,14 @@
 | PixelCNN++ | 52M | 2.92 | Salimans et al., ICLR 2017 |
 | Image Transformer | 95M | 2.90 | Parmar et al., ICML 2018 |
 | PixelSNAIL | 380M | 2.85 | Chen et al., ICML 2018 |
+| Sparse Transformer | 59M | 2.80 | Child et al., 2019 (128 层 strided sparse attention) |
 | **iGPT-S (Ours, best)** | **76.05M** | **2.9792** | d_model=512, N=24, 200 epochs |
 | **iGPT-S (Ours, SWA)** | **76.05M** | **2.9739** | SWA averaged over 21 checkpoints |
 | **CC-iGPT (Ours)** | **~81M** | **2.8047 ± 0.0747** | 双尺度条件 AR (fine 76M + coarse 4.8M, pool=4×); early-stop @ epoch 20（CIFAR-10 容量过剩，详见 §实验讨论） |
 | PNG (lossless) | — | ~5.87 | 传统方法 |
 | WebP (lossless) | — | ~5.02 | 传统方法 |
+
+> **Domain caveat**: 上述 Ours 行 (`use_ycbcr=true`) 报告的是 **YCbCr-int 域** bits/dim — 输入先经 BT.601 RGB→YCbCr + `round()` 量化，AR 模型在 YCbCr uint8 上无损建模。`round()` 是 many-to-one 的，因此该数值与 PixelCNN++ / Sparse Transformer 等 **RGB-bit-exact** 基线不直接可比（差距估计 ~0.3–0.5 bpd，对应未编码的 RGB↔YCbCr 量化残差）。补充实验 [`configs/ccigpt_cifar10_s_rgb.yaml`](configs/ccigpt_cifar10_s_rgb.yaml) 关闭 `use_ycbcr` 在 RGB 域直接训练，给出可与上述 RGB 基线对齐的数（待训）。
 
 ## 快速开始
 
@@ -324,7 +327,7 @@ demo/
 
 **模型**: iGPT (Chen 2020), RoPE (Su 2021), RMSNorm (Zhang 2019), SwiGLU (Shazeer 2020), OLMo 2 (2025), QK-Norm (Dehghani 2023), Weight Tying (Press 2017), Linear Probe (Alain & Bengio 2017)
 
-**像素自回归**: PixelCNN++ (Salimans 2017), PixelSNAIL (Chen 2018), PixelCNN (van den Oord 2016)
+**像素自回归**: PixelCNN++ (Salimans 2017), PixelSNAIL (Chen 2018), PixelCNN (van den Oord 2016), Sparse Transformer (Child 2019)
 
 **多尺度**: VAR (Tian 2024), VQ-VAE (van den Oord 2017)
 
