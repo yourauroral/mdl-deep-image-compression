@@ -586,8 +586,13 @@ def _load_dataset(config):
     from torchvision import transforms
     from torchvision.datasets import CIFAR10, CIFAR100
 
-    transform = transforms.ToTensor()
     dataset_name = config["data"].get("dataset", "cifar100")
+    if dataset_name == "imagenet32_npy":
+        from mdlic.data.imagenet32_npy import ImageNet32Npy
+        test_dataset = ImageNet32Npy(root=config["data"]["valid"], split="val")
+        return test_dataset, dataset_name
+
+    transform = transforms.ToTensor()
     DatasetClass = CIFAR10 if dataset_name == "cifar10" else CIFAR100
     test_dataset = DatasetClass(root=config["data"]["valid"], train=False,
                                 download=False, transform=transform)
