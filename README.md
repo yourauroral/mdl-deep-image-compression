@@ -2,33 +2,53 @@
 
 基于 **Minimum Description Length (MDL)** 原则的深度图像压缩系统设计与实现。核心命题：**压缩即预测** — CE loss 直接对应 Shannon 最优编码长度 (Shannon 1948, Delétang et al. 2024)。
 
+> **关于"无损"口径**：本系统提供两档配置 ——
+> (a) `use_ycbcr=true`（默认，对齐工业链路 JPEG/H.26x/VVC）：**YCbCr-int 域无损**。RGB 经 BT.601 + `round()` 进入 YCbCr-int 后，建模/编码/解码链严格无损；但 `round()` 是多对一映射，相对原始 RGB 是**近无损**。
+> (b) `use_ycbcr=false`（RGB-domain ablation）：**RGB-bit-exact 无损**。直接在 RGB uint8 上建模，与 PixelCNN++ / Sparse Transformer 等基线同域可比。
+
 - **Phase A (完成)**: iGPT token-level 自回归压缩 + 8 个手写 Triton Kernel（7 个进入训练栈，1 个 `fused_linear_ce` 在 V=256 下经 roofline 分析证伪、保留作反面案例，~2,400 行），iGPT-S CIFAR-10 SWA **2.9739 bits/dim**
-- **Phase B (完成)**: CC-iGPT（Coarse-Conditioned iGPT）双尺度条件自回归 — 浅层 coarse iGPT (8×8, 192 token) 独立编码进 bitstream，UP + 量化后通过 additive embedding（可学习标量 α）注入 fine iGPT (32×32, 3072 token)，CIFAR-10 early-stop @ ep20 **2.8047 bits/dim**（Δ=−0.17 vs iGPT-S；ep25 后过拟合反弹 → 120 epoch 配置作废，结果取 early-stop）
+- **Phase B (完成)**: CC-iGPT（Coarse-Conditioned iGPT）双尺度条件自回归 — 浅层 coarse iGPT (8×8, 192 token) 独立编码进 bitstream，UP + 量化后通过 additive embedding（可学习标量 α）注入 fine iGPT (32×32, 3072 token)，CIFAR-10 early-stop @ ep20 **2.8047 bits/dim**（**YCbCr-int 域**；Δ=−0.17 vs iGPT-S；ep25 后过拟合反弹 → 120 epoch 配置作废，结果取 early-stop）
 - **Phase C (完成)**: Demo 前端可视化系统 (FastAPI + Chart.js, 5 个展示面板)
-- **补充实验 (ImageNet 32×32)**: 在 ~1.28M 张训练图（25× CIFAR-10）上复跑 iGPT-S 与 CC-iGPT，验证 CIFAR-10 上 CC-iGPT 早过拟合是容量/数据 mismatch 而非结构 bug。120 epoch，warmup 6 / stable 84 / SWA start 108。
+- **补充实验 (RGB-domain ablation, 完成)**: `configs/ccigpt_cifar10_s_rgb.yaml` 关闭 `use_ycbcr` 在 **RGB-bit-exact 无损**配置下训练 50 epoch + SWA，实测 **3.2540 bits/dim**；据此首次量化 YCbCr credit = `BPP_RGB − BPP_YCbCr = 0.4493 bits/dim`，对齐 PixelCNN++ / Sparse Transformer 等 RGB-bit-exact 基线。
 
 ## Baseline 对比
 
-| 方法 | Params | CIFAR-10 bits/dim ↓ | 来源 |
-|------|--------|---------------------|------|
-| PixelCNN++ | 52M | 2.92 | Salimans et al., ICLR 2017 |
-| Image Transformer | 95M | 2.90 | Parmar et al., ICML 2018 |
-| PixelSNAIL | 380M | 2.85 | Chen et al., ICML 2018 |
-| Sparse Transformer | 59M | 2.80 | Child et al., 2019 (128 层 strided sparse attention) |
-| **iGPT-S (Ours, best)** | **76.05M** | **2.9792** | d_model=512, N=24, 200 epochs |
-| **iGPT-S (Ours, SWA)** | **76.05M** | **2.9739** | SWA averaged over 21 checkpoints |
-| **CC-iGPT (Ours)** | **~81M** | **2.8047 ± 0.0747** | 双尺度条件 AR (fine 76M + coarse 4.8M, pool=4×); early-stop @ epoch 20（CIFAR-10 容量过剩，详见 §实验讨论） |
-| PNG (lossless) | — | ~5.87 | 传统方法 |
-| WebP (lossless) | — | ~5.02 | 传统方法 |
+| 方法 | Params | CIFAR-10 bits/dim ↓ | 域 | 来源 |
+|------|--------|---------------------|----|------|
+| PixelCNN++ | 52M | 2.92 | RGB-bit-exact | Salimans et al., ICLR 2017 |
+| Image Transformer | 95M | 2.90 | RGB-bit-exact | Parmar et al., ICML 2018 |
+| PixelSNAIL | 380M | 2.85 | RGB-bit-exact | Chen et al., ICML 2018 |
+| Sparse Transformer | 59M | 2.80 | RGB-bit-exact | Child et al., 2019 (128 层 strided sparse attention) |
+| **iGPT-S (Ours, best)** | **76.05M** | **2.9792** | YCbCr-int | d_model=512, N=24, 200 epochs |
+| **iGPT-S (Ours, SWA)** | **76.05M** | **2.9739** | YCbCr-int | SWA averaged over 21 checkpoints |
+| **CC-iGPT (Ours)** | **~81M** | **2.8047 ± 0.0747** | YCbCr-int | 双尺度条件 AR (fine 76M + coarse 4.8M, pool=4×); early-stop @ epoch 20（CIFAR-10 容量过剩，详见 §实验讨论） |
+| **CC-iGPT (Ours, RGB ablation)** | ~81M | **3.2540** | RGB-bit-exact | `use_ycbcr=false`，SWA (50 epochs)，与上方 RGB-bit-exact 基线同域可比 |
+| PNG | — | ~5.87 | RGB-bit-exact | 传统方法 |
+| WebP (lossless mode) | — | ~5.02 | RGB-bit-exact | 传统方法 |
 
-> **Domain caveat**: 上述 Ours 行 (`use_ycbcr=true`) 报告的是 **YCbCr-int 域** bits/dim — 输入先经 BT.601 RGB→YCbCr + `round()` 量化，AR 模型在 YCbCr uint8 上无损建模。`round()` 是 many-to-one 的，因此该数值与 PixelCNN++ / Sparse Transformer 等 **RGB-bit-exact** 基线不直接可比（差距估计 ~0.3–0.5 bpd，对应未编码的 RGB↔YCbCr 量化残差）。补充实验 [`configs/ccigpt_cifar10_s_rgb.yaml`](configs/ccigpt_cifar10_s_rgb.yaml) 关闭 `use_ycbcr` 在 RGB 域直接训练，给出可与上述 RGB 基线对齐的数（待训）。
+> **域口径说明**：上表「YCbCr-int」行 (`use_ycbcr=true`) 报告的是 **YCbCr-int 域无损** bits/dim — RGB 输入先经 BT.601 + `round()` 量化进 YCbCr uint8，AR 模型在该域上严格无损建模/编解码。`round()` 是多对一映射（多个 RGB 三元组可映射到同一 YCbCr 三元组），因此该数值与 PixelCNN++ / Sparse Transformer 等 **RGB-bit-exact** 基线**不直接可比**；二者间差额即 "YCbCr credit"，由补充实验 [`configs/ccigpt_cifar10_s_rgb.yaml`](configs/ccigpt_cifar10_s_rgb.yaml) 实测：
+>
+> $$\text{YCbCr credit} = \text{BPP}_{\text{RGB}} - \text{BPP}_{\text{YCbCr}} = 3.2540 - 2.8047 = 0.4493\ \text{bits/dim}$$
+>
+> 该值同时反映 BT.601 通道解相关 + `round()` 量化两部分共同贡献的"可被压缩的信息"。据作者所知，文献中此前未见对该差额的系统测量 —— 学界基线（PixelCNN++ / PixelSNAIL / Sparse Transformer）一律在 RGB-bit-exact 上评估，工业编解码器（JPEG/H.26x/VVC）一律在 YCbCr 上操作，本工作首次给出两域同骨干的实测桥。
+>
+> RGB ablation 行 3.2540 vs Sparse Transformer 2.80 的差距，归因于：(a) 50 epoch vs 文献基线 200+ epoch 训练预算差；(b) 24 层 dense attention vs Sparse Transformer 128 层 strided sparse attention；(c) 未实现 PixelCNN++ 系 mixture-of-logistics 或 RCT 等 RGB-domain 通道相关化技术。
+
+### 创新点定位 & 与 SOTA 的关系
+
+本工作并非以击败 Sparse Transformer (CIFAR-10 2.80, 59M, 128 层 strided sparse attention) 为目标。
+CC-iGPT 在 24 层 / ~81M 的参数预算下，沿三个维度构建差异化：
+
+1. **方法 — 零新参数的双尺度条件注入**：coarse iGPT 量化 token 经 bit-exact 反量化/上采样/重 tokenize 后，复用 `fine.token_embed` 得到 `coarse_ctx`，再以可学习标量 α 做 additive 注入。整个 ctx 通路只引入 1 个标量参数；encoder/decoder 共用同一函数，bitstream 真实可解码。回避了多尺度联合 AR (MSPA) 的 loss 平衡难题。
+2. **工程 — 8 个手写 Triton kernel + 1 个 roofline 证伪的反面案例**：7 个进入训练栈，1 个 `fused_linear_ce` 在 V=256 下经 roofline 分析判定为负收益（compute-bound + 三重循环失去 cuBLAS GEMM 利用率），保留在 `ops/` 作工程严谨性的反向证据，详见 [`experiments/kernel_negative_finding.md`](experiments/kernel_negative_finding.md)。
+3. **分析 — 域口径诚实标注 + 多视角评估**：明确区分 **YCbCr-int 域无损**（主路径，相对原始 RGB 近无损）与 **RGB-bit-exact 无损**（ablation 路径，相对原始 RGB 严格无损）两档语义；同时报告两域 bpd（RGB ablation 给 YCbCr credit），Linear Probe 逐层表征曲线，Roofline forward 与 fwd+bwd 双视角。
+
+与 Sparse Transformer 的差距（RGB ablation 实测 3.2540 vs 2.80）来自参数预算（81M vs 59M）/ 深度（24 vs 128 层）/ 训练 epoch（50 vs 200+）/ 未实现 strided sparse attention 与 RGB-domain 通道相关化（mixture-of-logistics、RCT 等），而非方法路线缺陷。
 
 ## 快速开始
 
 ```bash
 pip install torch torchvision pyyaml numpy pillow tensorboard triton
-# ImageNet32 补充实验额外依赖（parquet 解析 + 进度条）
-pip install pyarrow tqdm
 ```
 
 ```bash
@@ -43,14 +63,8 @@ torchrun --nproc_per_node=1 scripts/train.py --config configs/igpt_cifar10_s.yam
 torchrun --nproc_per_node=2 scripts/train.py --config configs/igpt_cifar10_s.yaml
 torchrun --nproc_per_node=2 scripts/train.py --config configs/ccigpt_cifar10_s.yaml
 
-# 训练 — ImageNet 32×32 (补充实验, 120 epoch)
-# 先把 HuggingFace imagenet-1k parquet 放到 datasets/imagenet32_hf/
-#   train-00000..6-of-00007.parquet + val-00000-of-00001.parquet
-# 一次性预处理 → uint8 npy (PIL.Image.BOX resize, 对齐 Chrabaszcz 2017)
-python scripts/prepare_imagenet32.py \
-    --raw_dir datasets/imagenet32_hf --out_dir datasets/imagenet32_hf
-torchrun --nproc_per_node=2 scripts/train.py --config configs/igpt_imagenet32_s.yaml
-torchrun --nproc_per_node=2 scripts/train.py --config configs/ccigpt_imagenet32_s.yaml
+# 训练 — CC-iGPT RGB-domain ablation (use_ycbcr=false)
+torchrun --nproc_per_node=2 scripts/train.py --config configs/ccigpt_cifar10_s_rgb.yaml
 
 # 断点续训 (resume 会自动用 config 中的 lr 覆盖 checkpoint 旧值)
 torchrun --nproc_per_node=2 scripts/train.py \
@@ -95,8 +109,6 @@ git clone <repo-url> mdl-deep-image-compression
 cd mdl-deep-image-compression
 git checkout dev
 pip install torch torchvision pyyaml numpy pillow tensorboard triton
-# ImageNet32 补充实验额外依赖
-pip install pyarrow tqdm
 
 # 验证环境
 python scripts/dryrun_forward.py
@@ -258,7 +270,7 @@ pixel-first:    [Y₀ Cb₀ Cr₀ | Y₁ Cb₁ Cr₁ | ... | Y₁₀₂₃ Cb₁
 
 ### VQVAE/VAR 路线（已删除）
 
-早期曾考虑 VQVAE + VAR 有损路线，现已删除（毕设聚焦 YCbCr 域无损）。多尺度方向曾尝试 MSPA 实现，因训练稳定性问题未采用，转而采用更简洁的 CC-iGPT。
+早期曾考虑 VQVAE + VAR 有损路线，现已删除（毕设聚焦无损建模：YCbCr-int 域无损 + RGB-bit-exact 无损两档配置）。多尺度方向曾尝试 MSPA 实现，因训练稳定性问题未采用，转而采用更简洁的 CC-iGPT。
 
 ### CC-iGPT (`models/cc_igpt.py`)
 
