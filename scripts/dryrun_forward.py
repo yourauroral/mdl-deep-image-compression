@@ -7,7 +7,7 @@ Quick forward pass sanity check — 验证模型构建和 forward 是否正常�
   2. 子像素自回归 backward
   3. CC-iGPT smoke (coarse + fine + ctx_alpha 梯度检查)
   4. Fused kernel 状态检查
-  5. Numerical sanity（loss 有限、BPP 合理范围）
+  5. Numerical sanity（loss 有限、bits/dim 合理范围）
 
 Usage:
     python scripts/dryrun_forward.py
@@ -35,10 +35,10 @@ def _check_finite(out: dict, tag: str):
     ce_val = out['ce_loss'].item()
     assert math.isfinite(loss_val), f"[{tag}] loss is {loss_val} (NaN/Inf!)"
     assert math.isfinite(ce_val), f"[{tag}] ce_loss is {ce_val} (NaN/Inf!)"
-    bpp = ce_val / math.log(2)
-    assert 0.0 < bpp < 50.0, f"[{tag}] bits/dim={bpp:.2f} 超出合理范围 (0, 50)"
+    bpd = ce_val / math.log(2)
+    assert 0.0 < bpd < 50.0, f"[{tag}] bits/dim={bpd:.2f} 超出合理范围 (0, 50)"
     logits_info = out['logits'].shape if out['logits'] is not None else "None"
-    print(f"  [{tag}] loss={loss_val:.4f}  ce_loss={ce_val:.4f}  bits/dim={bpp:.2f}  logits={logits_info}")
+    print(f"  [{tag}] loss={loss_val:.4f}  ce_loss={ce_val:.4f}  bits/dim={bpd:.2f}  logits={logits_info}")
 
 
 def main():
@@ -111,15 +111,15 @@ def main():
         dropout=0.0,
     ).to(device)
     out5 = model5(x)
-    bpp5 = out5["bpp"].item()
+    bpd5 = out5["bpd"].item()
     loss5 = out5["loss"].item()
     ce5_c = out5["ce_loss_coarse"].item()
     ce5_f = out5["ce_loss_fine"].item()
     alpha5 = out5["ctx_alpha"].item()
     assert math.isfinite(loss5), "CC-iGPT loss NaN/Inf"
-    assert 0.0 < bpp5 < 50.0, f"CC-iGPT BPP={bpp5:.2f} 超出合理范围"
+    assert 0.0 < bpd5 < 50.0, f"CC-iGPT bits/dim={bpd5:.2f} 超出合理范围"
     print(f"  [ccigpt] loss={loss5:.4f}  ce_coarse={ce5_c:.4f}  ce_fine={ce5_f:.4f}  "
-          f"bpp_total={bpp5:.4f}  α={alpha5:.3f}")
+          f"bpd_total={bpd5:.4f}  α={alpha5:.3f}")
     out5["loss"].backward()
     grad_ok5 = all(p.grad is not None for p in model5.parameters() if p.requires_grad)
     assert grad_ok5, "CC-iGPT: some params missing gradients"

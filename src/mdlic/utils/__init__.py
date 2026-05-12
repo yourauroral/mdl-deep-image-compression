@@ -76,11 +76,16 @@ def clean_state_dict(sd: dict) -> dict:
     return filter_legacy_buffers(strip_module_prefix(sd))
 
 
-def compute_bpp(ce_loss: torch.Tensor) -> torch.Tensor:
+def compute_bpd(ce_loss: torch.Tensor) -> torch.Tensor:
     """
-    从交叉熵损失计算 bits/dim (bits per sub-pixel)。
+    从交叉熵损失计算 bits/dim (bpd, bits per sub-pixel)。
 
     bits/dim = CE_loss / ln(2)
+
+    注：术语区分——bpd（bits per dimension/sub-pixel）是生成模型无损压缩
+    文献的标准度量；bpp（bits per pixel）= bpd × C（彩色图 C=3）。
+    本仓库以 bpd 为主指标，与 iGPT / PixelCNN++ / Sparse Transformer 等
+    基线原文口径一致。
 
     参考:
       [1] Shannon, "A Mathematical Theory of Communication," 1948 —

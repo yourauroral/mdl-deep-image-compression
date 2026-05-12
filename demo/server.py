@@ -8,11 +8,11 @@ Demo 可视化后端 — FastAPI + 静态文件。
 
 端点:
   GET  /                — 前端页面
-  GET  /api/metrics     — BPP 对比表数据
+  GET  /api/metrics     — bits/dim 对比表数据
   GET  /api/probe       — Linear Probe 各层准确率
   GET  /api/kernels     — Triton Kernel 性能数据
   GET  /api/scales      — CC-iGPT coarse/fine token 分配
-  POST /api/predict     — 上传图片 → 返回 BPP 热力图 + 数值
+  POST /api/predict     — 上传图片 → 返回 bits/dim 热力图 + 数值
 """
 
 import json
@@ -93,8 +93,8 @@ async def get_scales():
 async def predict(file: UploadFile = File(...)):
     """
     上传一张图片，返回:
-      - bpp: 整体 BPP（CC-iGPT 为 BPP_total，iGPT 由 CE 推算）
-      - heatmap: base64 编码的 BPP 热力图 PNG（仅 iGPT）
+      - bpd: 整体 bits/dim（CC-iGPT 为 bpd_total，iGPT 由 CE 推算）
+      - heatmap: base64 编码的 BPP 热力图 PNG（仅 iGPT；单位 bits/pixel = bpd × C）
     """
     try:
         import torch
@@ -129,13 +129,13 @@ async def predict(file: UploadFile = File(...)):
         out = model(x)
 
     ce_loss = out["ce_loss"].item()
-    if "bpp" in out and out["bpp"] is not None:
-        bpp = out["bpp"].item()
+    if "bpd" in out and out["bpd"] is not None:
+        bpd = out["bpd"].item()
     else:
         # iGPT: CE 是 per-token nats，bits/dim = CE / ln2 （已按 H·W·C 归一化）
-        bpp = ce_loss / math.log(2)
+        bpd = ce_loss / math.log(2)
 
-    # CC-iGPT 的 ce_loss 仅含 fine 分支 CE，与 BPP_total（含 coarse overhead）
+    # CC-iGPT 的 ce_loss 仅含 fine 分支 CE，与 bpd_total（含 coarse overhead）
     # 在尺度上不对应；前端"CE Loss"卡片若直接显示 ce_loss 会误导观感。
     # 这里把 ce_coarse / ce_fine / α 也一起返回，前端按 model_type 分别渲染。
     extras = {}
@@ -151,7 +151,7 @@ async def predict(file: UploadFile = File(...)):
         heatmap_b64 = _make_heatmap_b64(model, x, out["logits"])
 
     return JSONResponse({
-        "bpp": round(bpp, 4),
+        "bpd": round(bpd, 4),
         "ce_loss": round(ce_loss, 4),
         "model_type": model_type,
         "heatmap": heatmap_b64,
@@ -212,9 +212,10 @@ def _get_cached_model(device):
 
 
 def _make_heatmap_b64(model, x, logits):
-    """根据已计算的 logits 生成 32×32 BPP 热力图，返回 base64 PNG。
+    """根据已计算的 logits 生成 32×32 BPP 热力图 (bits/pixel)，返回 base64 PNG。
 
-    复用 predict() 中已经做过的 forward，避免重复计算。
+    复用 predict() 中已经做过的 forward，避免重复计算。单位是 bits/pixel
+    （对 C 通道求和），与 /api/predict 主返回字段 bpd (bits/dim) 差 C 倍。
     """
     import torch
     import torch.nn.functional as F
@@ -244,11 +245,11 @@ def _make_heatmap_b64(model, x, logits):
         target.reshape(-1),
         reduction="none",
     )
-    bpp_vals = (per_token_ce / math.log(2)).cpu().numpy()
+    bpd_vals = (per_token_ce / math.log(2)).cpu().numpy()
 
     seq_len = C * H * W
     full = np.zeros(seq_len)
-    full[1:] = bpp_vals[:seq_len - 1]
+    full[1:] = bpd_vals[:seq_len - 1]
     if use_subpixel_ar:
         # pixel-first → (H, W, C) → 沿 C 求和得到 (H, W)
         heatmap = full.reshape(H, W, C).sum(axis=-1)

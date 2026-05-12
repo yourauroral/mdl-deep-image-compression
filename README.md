@@ -9,7 +9,7 @@
 - **Phase A (完成)**: iGPT token-level 自回归压缩 + 8 个手写 Triton Kernel（7 个进入训练栈，1 个 `fused_linear_ce` 在 V=256 下经 roofline 分析证伪、保留作反面案例，~2,400 行），iGPT-S CIFAR-10 SWA **2.9739 bits/dim**
 - **Phase B (完成)**: CC-iGPT（Coarse-Conditioned iGPT）双尺度条件自回归 — 浅层 coarse iGPT (8×8, 192 token) 独立编码进 bitstream，UP + 量化后通过 additive embedding（可学习标量 α）注入 fine iGPT (32×32, 3072 token)，CIFAR-10 early-stop @ ep20 **2.8047 bits/dim**（**YCbCr-int 域**；Δ=−0.17 vs iGPT-S；ep25 后过拟合反弹 → 120 epoch 配置作废，结果取 early-stop）
 - **Phase C (完成)**: Demo 前端可视化系统 (FastAPI + Chart.js, 5 个展示面板)
-- **补充实验 (RGB-domain ablation, 完成)**: `configs/ccigpt_cifar10_s_rgb.yaml` 关闭 `use_ycbcr` 在 **RGB-bit-exact 无损**配置下训练 50 epoch + SWA，实测 **3.2540 bits/dim**；据此首次量化 YCbCr credit = `BPP_RGB − BPP_YCbCr = 0.4493 bits/dim`，对齐 PixelCNN++ / Sparse Transformer 等 RGB-bit-exact 基线。
+- **补充实验 (RGB-domain ablation, 完成)**: `configs/ccigpt_cifar10_s_rgb.yaml` 关闭 `use_ycbcr` 在 **RGB-bit-exact 无损**配置下训练 50 epoch + SWA，实测 **3.2540 bits/dim**；据此首次量化 YCbCr credit = `bpd_RGB − bpd_YCbCr = 0.4493 bits/dim`，对齐 PixelCNN++ / Sparse Transformer 等 RGB-bit-exact 基线。
 
 ## Baseline 对比
 
@@ -28,7 +28,7 @@
 
 > **域口径说明**：上表「YCbCr-int」行 (`use_ycbcr=true`) 报告的是 **YCbCr-int 域无损** bits/dim — RGB 输入先经 BT.601 + `round()` 量化进 YCbCr uint8，AR 模型在该域上严格无损建模/编解码。`round()` 是多对一映射（多个 RGB 三元组可映射到同一 YCbCr 三元组），因此该数值与 PixelCNN++ / Sparse Transformer 等 **RGB-bit-exact** 基线**不直接可比**；二者间差额即 "YCbCr credit"，由补充实验 [`configs/ccigpt_cifar10_s_rgb.yaml`](configs/ccigpt_cifar10_s_rgb.yaml) 实测：
 >
-> $$\text{YCbCr credit} = \text{BPP}_{\text{RGB}} - \text{BPP}_{\text{YCbCr}} = 3.2540 - 2.8047 = 0.4493\ \text{bits/dim}$$
+> $$\text{YCbCr credit} = \text{bpd}_{\text{RGB}} - \text{bpd}_{\text{YCbCr}} = 3.2540 - 2.8047 = 0.4493\ \text{bits/dim}$$
 >
 > 该值同时反映 BT.601 通道解相关 + `round()` 量化两部分共同贡献的"可被压缩的信息"。据作者所知，文献中此前未见对该差额的系统测量 —— 学界基线（PixelCNN++ / PixelSNAIL / Sparse Transformer）一律在 RGB-bit-exact 上评估，工业编解码器（JPEG/H.26x/VVC）一律在 YCbCr 上操作，本工作首次给出两域同骨干的实测桥。
 >
@@ -38,7 +38,7 @@
 
 受时间预算限制 ImageNet32 完整训练未完成，但有一个 epoch 7 的 best 中间 checkpoint，作为**训练动力学外推证据**报告（不进上方 CIFAR-10 主表，避免与文献基线被误读为同一基准）：
 
-| 方法 | epoch | BPP_total (YCbCr-int) | CE_coarse | CE_fine | α | coarse bit share | 参考 |
+| 方法 | epoch | bits/dim (YCbCr-int) | CE_coarse | CE_fine | α | coarse bit share | 参考 |
 |------|-------|----|----|----|---|---|------|
 | **CC-iGPT (Ours, ImageNet32, training)** | 7 / 120 | **3.0951 ± 0.0967** | 2.8300 | 1.9685 | 0.476 | 8.2% | 本文 |
 | Sparse Transformer | 充分收敛 | 3.44 | — | — | — | — | Child et al. 2019 (RGB-bit-exact) |
@@ -87,7 +87,7 @@ torchrun --nproc_per_node=2 scripts/train.py \
 python scripts/evaluate.py --config configs/igpt_cifar10_s.yaml \
     --checkpoint experiments/igpt_cifar10_s/checkpoints/best.pth
 
-# 评测 — CC-iGPT (含 coarse / fine CE 分解 + BPP_total)
+# 评测 — CC-iGPT (含 coarse / fine CE 分解 + bpd_total)
 python scripts/evaluate.py --config configs/ccigpt_cifar10_s.yaml \
     --checkpoint experiments/ccigpt_cifar10_s/checkpoints/best.pth
 # SWA vs best 对比（同时评测 best.pth 和 swa.pth）
@@ -235,9 +235,11 @@ scp -P <port> root@<autodl-host>:/root/autodl-tmp/mdl-deep-image-compression/exp
                     | (Fused CE Triton)   |
                     +---------+-----------+
                               |
-              iGPT:    BPP = CE × T / ln(2) / (H·W·C)
-              CC-iGPT: BPP_total = (CE_c · N_c + CE_f · N_f) / ln(2) / N_f
-                       (coarse + fine 联合压缩率，N_f = H·W·C)
+              iGPT:    bpd = CE × T / ln(2) / (H·W·C)
+              CC-iGPT: bpd_total = (CE_c · N_c + CE_f · N_f) / ln(2) / N_f
+                       (coarse + fine 联合压缩率，N_f = H·W·C；
+                        bpd = bits per dimension/sub-pixel；
+                        bpp = bpd × C)
 ```
 
 **OLMo 2 Reordered Norm**:  `x = x + RMSNorm(Attention(x))`, `x = x + RMSNorm(FFN(x))`
@@ -295,7 +297,7 @@ Coarse-Conditioned iGPT —— 双尺度条件式自回归。回避了多尺度 
 | **Bit-exact ctx 路径** | encoder/decoder 必须看到**同一个** `coarse_ctx`，否则 fine 端算术编码不可解。统一管线：coarse 量化 token → 反量化 RGB（YCbCr 时走 BT.601 inverse）→ bilinear UP 到 32×32 → 与 fine encoder 同规则 re-tokenize → `fine.token_embed` |
 | Ctx 注入 | AR shift `coarse_ctx[:-1]` → `α · coarse_ctx`（additive，仅引入 1 个标量参数 α） |
 | 可学习 α | `nn.Parameter(torch.ones(1))`，初始 1.0；模型自适应注入强度，避免 ctx 过强压制 fine token embed |
-| 联合 BPP | `BPP_total = (CE_c · 192 + CE_f · 3072) / ln(2) / 3072`（按 H·W·C 归一化） |
+| 联合 bits/dim | `bpd_total = (CE_c · 192 + CE_f · 3072) / ln(2) / 3072`（按 H·W·C 子像素数归一化） |
 | 训练 | 端到端联合 `loss = loss_coarse + loss_fine`，无尺度间加权 |
 | 关闭 ctx | `fine(x, coarse_ctx=None)` 严格等价 vanilla iGPT（unit test 校验 CE diff < 1e-6） |
 | 一致性回归 | `tests/test_ccigpt_smoke.py` 同时断言 (a) encoder/decoder ctx max diff < 1e-6 (b) `coarse_tokens.view(B,C,S,S)` 与 `rgb_to_ycbcr_int(x_c_float)` byte-exact，覆盖 YCbCr/RGB 两条路径 |
@@ -336,13 +338,13 @@ src/mdlic/
 ├── ops/       7 个 Triton kernels (flash_attn, fused_rms_norm, ...)
 ├── optim/     muon.py (Muon optimizer)
 ├── data/      imagenet32_npy.py (mmap-backed Dataset)
-└── utils/     seed, BPP
+└── utils/     seed, bpd
 scripts/       train.py, evaluate.py, linear_probe.py, dryrun_forward.py, profile_kernels.py, prepare_imagenet32.py
 configs/       igpt_cifar10_s, igpt_cifar100_s, igpt_imagenet32_s, ccigpt_cifar10_s, ccigpt_imagenet32_s
 tests/         7 个 kernel 单元测试
 demo/
 ├── server.py          FastAPI 后端 (predict / metrics / probe / kernels / scales)
-├── static/            HTML + JS (Chart.js) + CSS 前端，5 个面板：上传预测、BPP 对比、
+├── static/            HTML + JS (Chart.js) + CSS 前端，5 个面板：上传预测、bits/dim 对比、
 │                       Linear Probe、Triton kernel 加速比、CC-iGPT coarse/fine token 分配
 └── data/              预计算 JSON 数据 (训练后替换为真实结果)
 ```

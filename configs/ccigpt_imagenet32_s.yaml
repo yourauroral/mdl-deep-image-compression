@@ -2,7 +2,7 @@ exp_name: "ccigpt_imagenet32_s"
 
 # Coarse-Conditioned iGPT on ImageNet 32×32
 # 用于验证 CC-iGPT 在 CIFAR-10 过拟合是容量/数据 mismatch 而非结构 bug。
-# ImageNet32 (~1.28M) 数据量足够，预期 fine 76M 不再早过拟合，BPP_total 持续下降。
+# ImageNet32 (~1.28M) 数据量足够，预期 fine 76M 不再早过拟合，bpd_total 持续下降。
 
 model:
   type: ccigpt

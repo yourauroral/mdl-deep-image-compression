@@ -2,15 +2,15 @@
   "model": "CC-iGPT",
   "image_size": 32,
   "scales": [
-    {"scale": "Coarse", "resolution": "8x8",   "tokens": 192,  "role": "独立编码进 bitstream", "ce_nats": 2.9289, "bpp_share": 0.2641, "share_pct": 9.4},
-    {"scale": "Fine",   "resolution": "32x32", "tokens": 3072, "role": "条件 fine NTP（注入 α·coarse_ctx）", "ce_nats": 1.7610, "bpp_share": 2.5406, "share_pct": 90.6}
+    {"scale": "Coarse", "resolution": "8x8",   "tokens": 192,  "role": "独立编码进 bitstream", "ce_nats": 2.9289, "bpd_share": 0.2641, "share_pct": 9.4},
+    {"scale": "Fine",   "resolution": "32x32", "tokens": 3072, "role": "条件 fine NTP（注入 α·coarse_ctx）", "ce_nats": 1.7610, "bpd_share": 2.5406, "share_pct": 90.6}
   ],
   "total_tokens": 3264,
-  "bpp_total": 2.8047,
-  "bpp_std": 0.0747,
+  "bpd_total": 2.8047,
+  "bpd_std": 0.0747,
   "ctx_alpha": 0.5407,
   "baseline_igpt_s_swa": 2.9739,
   "improvement_bits_per_dim": 0.1692,
   "improvement_pct": 5.7,
-  "note": "early-stop @ epoch 20 (CIFAR-10 + fine 76M 容量过剩，120ep 训练第 25 epoch val BPP 反弹至 2.86)"
+  "note": "early-stop @ epoch 20 (CIFAR-10 + fine 76M 容量过剩，120ep 训练第 25 epoch val bits/dim 反弹至 2.86)"
 }

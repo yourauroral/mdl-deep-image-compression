@@ -13,7 +13,7 @@ class CCIGPT(nn.Module):
     主线 fine iGPT，coarse 经 DOWN→UP→quantize 后通过 fine.token_embed 查表，
     作为 additive embedding (`α · coarse_ctx`) 注入 fine。
 
-    BPP_total = (CE_coarse · N_coarse + CE_fine · N_fine) / ln2 / N_fine
+    bpd_total = (CE_coarse · N_coarse + CE_fine · N_fine) / ln2 / N_fine
 
     Refs:
       Burt & Adelson, "The Laplacian Pyramid as a Compact Image Code," 1983
@@ -125,7 +125,8 @@ class CCIGPT(nn.Module):
         返回 dict:
           loss / ce_loss (= ce_fine, 与 train.py 主指标兼容) /
           ce_loss_coarse / ce_loss_fine /
-          bpp (BPP_total, 按 H·W·C 归一化) /
+          bpd (bits/dim, 按 H·W·C 子像素数归一化；
+               对应 BPD_total = (CE_c·N_c + CE_f·N_f) / ln2 / N_f) /
           ctx_alpha (detached) / logits (fused path 下为 None)
         """
         x = x.clamp(0, 1).to(torch.float32)              # encoder/decoder 一致性
@@ -139,14 +140,14 @@ class CCIGPT(nn.Module):
                           coarse_ctx=self.ctx_alpha * coarse_ctx)
 
         N_c, N_f = self.coarse.seq_len, self.fine.seq_len
-        bpp_total = (out_c["ce_loss"] * N_c + out_f["ce_loss"] * N_f) / math.log(2.0) / N_f
+        bpd_total = (out_c["ce_loss"] * N_c + out_f["ce_loss"] * N_f) / math.log(2.0) / N_f
 
         return {
             "loss": out_c["loss"] + out_f["loss"],
             "ce_loss": out_f["ce_loss"],
             "ce_loss_coarse": out_c["ce_loss"],
             "ce_loss_fine": out_f["ce_loss"],
-            "bpp": bpp_total,
+            "bpd": bpd_total,
             "ctx_alpha": self.ctx_alpha.detach(),
             "logits": out_f["logits"],
         }

@@ -151,7 +151,7 @@ main {
   margin-bottom: 1rem;
 }
 
-/* BPP 对比是水平 lollipop 图，5 行神经 AR 方法 */
+/* bits/dim 对比是水平 lollipop 图，5 行神经 AR 方法 */
 #panel-metrics .chart-container {
   max-height: none;
   height: 300px;

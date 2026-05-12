@@ -34,7 +34,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from src.mdlic.models.igpt import IGPT
 from src.mdlic.models.cc_igpt import CCIGPT
 from src.mdlic.models.layers import get_fused_kernel_status
-from src.mdlic.utils import seed_everything, compute_bpp, clean_state_dict
+from src.mdlic.utils import seed_everything, compute_bpd, clean_state_dict
 
 
 def _validate_config(config: dict):
@@ -195,7 +195,7 @@ def train_one_epoch(model, loader, optimizer, scaler, device,
                     distributed=False, rank=0):
     model.train()
     total_loss = 0
-    total_bpp = 0
+    total_bpd = 0
     steps = len(loader)
 
     optimizer.zero_grad(set_to_none=True)
@@ -229,13 +229,15 @@ def train_one_epoch(model, loader, optimizer, scaler, device,
                 out = model(x, z_loss_weight=z_loss_weight)
                 loss = out["loss"]
                 ce_loss = out["ce_loss"]
-                # BPP：优先使用模型返回的 bpp（CC-iGPT 联合 coarse+fine 的 BPP_total
-                # 需自行按 H·W·C 归一化），否则按 iGPT 约定计算。
+                # bits/dim：优先使用模型返回的 bpd（CC-iGPT 联合 coarse+fine
+                # 的 bpd_total 已按 H·W·C 子像素数归一化），否则按 iGPT 约定从
+                # CE 推算。bpd = bits per dimension/sub-pixel，与 iGPT /
+                # PixelCNN++ 等基线原文口径一致；真正的 bits-per-pixel = bpd × C。
                 # Ref: Shannon, "A Mathematical Theory of Communication," 1948
-                if "bpp" in out and out["bpp"] is not None:
-                    bpp = out["bpp"]
+                if "bpd" in out and out["bpd"] is not None:
+                    bpd = out["bpd"]
                 else:
-                    bpp = compute_bpp(ce_loss)
+                    bpd = compute_bpd(ce_loss)
             loss_scaled = loss / grad_accum_steps
             if scaler is not None:
                 scaler.scale(loss_scaled).backward()
@@ -265,13 +267,13 @@ def train_one_epoch(model, loader, optimizer, scaler, device,
         # 用 tensor 累加，避免每步 .item() 触发 GPU→CPU 同步
         # Ref: CS336 — 只在 log 时才 .item()
         total_loss += loss.detach()
-        total_bpp  += bpp.detach()
+        total_bpd  += bpd.detach()
 
         # NaN/Inf 检测：loss 异常时提前警告，避免浪费 GPU 时间
         # Ref: PyTorch Lightning — NaN detection callback 的设计思路
         if (i + 1) % log_freq == 0:
             loss_val = loss.item()
-            bpp_val  = bpp.item()
+            bpd_val  = bpd.item()
             if not math.isfinite(loss_val) and rank == 0:
                 print(f"WARNING: loss is {loss_val} at epoch {epoch} step {i+1}/{steps}. "
                       f"LR={optimizer.param_groups[0]['lr']:.2e}. Training may diverge.")
@@ -281,23 +283,23 @@ def train_one_epoch(model, loader, optimizer, scaler, device,
                     extra = (f" | CE_c: {out['ce_loss_coarse'].item():.4f}"
                              f" | CE_f: {out['ce_loss_fine'].item():.4f}"
                              f" | α: {out['ctx_alpha'].item():.3f}")
-                print(f"Epoch {epoch} Step {i+1}/{steps} | Loss: {loss_val:.4f} | BPP: {bpp_val:.4f}{extra}")
+                print(f"Epoch {epoch} Step {i+1}/{steps} | Loss: {loss_val:.4f} | bits/dim: {bpd_val:.4f}{extra}")
             if writer:
                 step = epoch * steps + i
                 writer.add_scalar('train/loss', loss_val, step)
-                writer.add_scalar('train/bpp',  bpp_val,  step)
+                writer.add_scalar('train/bpd',  bpd_val,  step)
                 if "ce_loss_coarse" in out and "ce_loss_fine" in out:
                     writer.add_scalar('train/ce_coarse', out['ce_loss_coarse'].item(), step)
                     writer.add_scalar('train/ce_fine',   out['ce_loss_fine'].item(),   step)
                     writer.add_scalar('train/ctx_alpha', out['ctx_alpha'].item(),      step)
 
-    return total_loss.item() / steps, total_bpp.item() / steps
+    return total_loss.item() / steps, total_bpd.item() / steps
 
 
 # ==================== Validation ====================
 @torch.no_grad()
 def validate(model, loader, device, amp_dtype=None):
-    """验证集评估，返回 (avg_bpp, std_bpp_batch, avg_loss)。
+    """验证集评估，返回 (avg_bpd, std_bpd_batch, avg_loss)。
 
     DDP-aware：每个 rank 通过 DistributedSampler 处理一个分片，最后用
     all_reduce(SUM) 聚合 weighted sums + n_total，避免 rank 0 单跑导致 barrier 超时。
@@ -305,19 +307,19 @@ def validate(model, loader, device, amp_dtype=None):
     amp_dtype: 传入 AMP dtype（如 torch.bfloat16）以在验证时也使用混合精度，
                减少显存占用和加速。None 则使用 fp32。
 
-    std_bpp 语义（重要，论文报告时注意）:
-        当前的 `std_bpp` 是 **batch 级加权波动**，不是图像级标准差。
-        公式 var = E[batch_mean_bpp² · B] / n_total − avg_bpp² 里 batch_mean_bpp
-        已经是 batch 内平均，按 B 加权后得到的是 batch 间平均 BPP 的加权方差，
+    std_bpd 语义（重要，论文报告时注意）:
+        当前的 `std_bpd` 是 **batch 级加权波动**，不是图像级标准差。
+        公式 var = E[batch_mean_bpd² · B] / n_total − avg_bpd² 里 batch_mean_bpd
+        已经是 batch 内平均，按 B 加权后得到的是 batch 间平均 bpd 的加权方差，
         数值通常比 per-image std 小（batch 内部方差被平均抹掉）。
         论文若要报告 per-image std，需让 forward 返回 reduction='none' 的
         per-token/per-image CE 后重算。此处保留 batch-level 便于训练监控，
         evaluate.py cmd_single 也使用同样语义。
     """
     model.eval()
-    total_bpp_weighted = 0.0
+    total_bpd_weighted = 0.0
     total_loss_weighted = 0.0
-    sum_sq_bpp_batch = 0.0   # Σ (batch_mean_bpp)² · B ，batch-level std
+    sum_sq_bpd_batch = 0.0   # Σ (batch_mean_bpd)² · B ，batch-level std
     n_total = 0
     use_amp = amp_dtype is not None and device.type == 'cuda'
     for batch in loader:
@@ -331,30 +333,30 @@ def validate(model, loader, device, amp_dtype=None):
             out = model(x)
         loss = out["loss"]
         ce_loss = out["ce_loss"]
-        if "bpp" in out and out["bpp"] is not None:
-            bpp = out["bpp"]
+        if "bpd" in out and out["bpd"] is not None:
+            bpd = out["bpd"]
         else:
-            bpp = compute_bpp(ce_loss)
-        bpp_val = bpp.item()
+            bpd = compute_bpd(ce_loss)
+        bpd_val = bpd.item()
         loss_val = loss.item()
-        total_bpp_weighted += bpp_val * B
+        total_bpd_weighted += bpd_val * B
         total_loss_weighted += loss_val * B
-        sum_sq_bpp_batch += (bpp_val ** 2) * B
+        sum_sq_bpd_batch += (bpd_val ** 2) * B
         n_total += B
 
     # DDP 聚合：跨 rank 求和后再求平均，结果在所有 rank 上一致
     if dist.is_available() and dist.is_initialized():
-        agg = torch.tensor([total_bpp_weighted, total_loss_weighted, sum_sq_bpp_batch, float(n_total)],
+        agg = torch.tensor([total_bpd_weighted, total_loss_weighted, sum_sq_bpd_batch, float(n_total)],
                            device=device, dtype=torch.float64)
         dist.all_reduce(agg, op=dist.ReduceOp.SUM)
-        total_bpp_weighted, total_loss_weighted, sum_sq_bpp_batch, n_total_f = agg.tolist()
+        total_bpd_weighted, total_loss_weighted, sum_sq_bpd_batch, n_total_f = agg.tolist()
         n_total = int(n_total_f)
 
-    avg_bpp = total_bpp_weighted / n_total
+    avg_bpd = total_bpd_weighted / n_total
     avg_loss = total_loss_weighted / n_total
-    var_bpp_batch = max(sum_sq_bpp_batch / n_total - avg_bpp ** 2, 0.0)
-    std_bpp_batch = float(math.sqrt(var_bpp_batch))
-    return avg_bpp, std_bpp_batch, avg_loss
+    var_bpd_batch = max(sum_sq_bpd_batch / n_total - avg_bpd ** 2, 0.0)
+    std_bpd_batch = float(math.sqrt(var_bpd_batch))
+    return avg_bpd, std_bpd_batch, avg_loss
 
 
 
@@ -368,7 +370,7 @@ def main():
     parser.add_argument('--seed', type=int, default=None, help='Random seed (overrides config)')
     # --export_csv: 导出训练/验证曲线为 CSV，方便 matplotlib 画论文图
     parser.add_argument('--export_csv', action='store_true',
-                        help='导出 loss/BPP/LR 曲线为 CSV 文件')
+                        help='导出 loss/bpd/LR 曲线为 CSV 文件')
     args = parser.parse_args()
 
     if not os.path.isfile(args.config):
@@ -419,8 +421,8 @@ def main():
         csv_path = os.path.join(log_dir, 'training_curves.csv')
         csv_file = open(csv_path, 'w', newline='')
         csv_writer = csv.writer(csv_file)
-        csv_writer.writerow(['epoch', 'train_loss', 'train_bpp', 'val_loss',
-                             'val_bpp', 'val_bpp_std', 'lr'])
+        csv_writer.writerow(['epoch', 'train_loss', 'train_bpd', 'val_loss',
+                             'val_bpd', 'val_bpd_std', 'lr'])
 
     # Dataset: 根据 config 选择 CIFAR-10 / CIFAR-100 / ImageNet32 npy
     from torchvision.datasets import CIFAR10, CIFAR100
@@ -456,7 +458,7 @@ def main():
     # drop_last=True: 避免 DistributedSampler 默认 padding（重复 dataset 头部样本
     # 让每个 rank 拿到整除分片）造成验证集统计偏差。代价是最多丢 world_size-1
     # 个样本（CIFAR-10/100 val=10000、ImageNet32 val=50000 在 world=2 下整除，
-    # 不丢；world=3 时丢 1 个，不影响 BPP 数值精度）。
+    # 不丢；world=3 时丢 1 个，不影响 bpd 数值精度）。
     valid_sampler = (DistributedSampler(valid_dataset, shuffle=False, drop_last=True)
                      if distributed else None)
     valid_loader = DataLoader(valid_dataset, batch_size=valid_batch_size, shuffle=False,
@@ -585,7 +587,7 @@ def main():
         if rank == 0:
             print(f"SWA enabled: start_epoch={swa_start_epoch}, interval={swa_update_interval}")
 
-    best_bpp = float('inf')
+    best_bpd = float('inf')
     start_epoch = 1
 
     # ── DDP / torch.compile state_dict 统一处理 ──
@@ -641,7 +643,7 @@ def main():
             if 'optimizer_state_dict' in ckpt:
                 optimizer.load_state_dict(ckpt['optimizer_state_dict'])
             start_epoch = ckpt.get('epoch', 0) + 1
-            best_bpp = ckpt.get('best_bpp', float('inf'))
+            best_bpd = ckpt.get('best_bpd', float('inf'))
             if scheduler is not None and 'scheduler_state_dict' in ckpt:
                 scheduler.load_state_dict(ckpt['scheduler_state_dict'])
             if scaler is not None and 'scaler_state_dict' in ckpt:
@@ -660,7 +662,7 @@ def main():
                 scheduler.last_epoch = start_epoch - 1
 
             if rank == 0:
-                print(f"Resumed from checkpoint '{args.resume}' (epoch {ckpt.get('epoch', '?')}, best_bpp={best_bpp:.4f})")
+                print(f"Resumed from checkpoint '{args.resume}' (epoch {ckpt.get('epoch', '?')}, best_bpd={best_bpd:.4f})")
                 print(f"  LR overridden to config value: {base_lr:.2e} (schedule continues from epoch {start_epoch})")
 
     for epoch in range(start_epoch, config['train']['epochs'] + 1):
@@ -668,7 +670,7 @@ def main():
             train_sampler.set_epoch(epoch)
 
         # ── 训练一个 epoch (iGPT/CC-iGPT 共用 NTP 训练循环) ──
-        avg_loss, avg_bpp = train_one_epoch(
+        avg_loss, avg_bpd = train_one_epoch(
             model, train_loader, optimizer, scaler,
             device=device,
             epoch=epoch,
@@ -684,27 +686,27 @@ def main():
 
         if rank == 0:
             current_lr = optimizer.param_groups[0]['lr']
-            print(f"Epoch {epoch} | Loss: {avg_loss:.4f} | BPP: {avg_bpp:.4f} | LR: {current_lr:.2e}")
+            print(f"Epoch {epoch} | Loss: {avg_loss:.4f} | bits/dim: {avg_bpd:.4f} | LR: {current_lr:.2e}")
             if writer:
                 writer.add_scalar('train/lr', current_lr, epoch)
 
         # ── 验证 (DDP: 所有 rank 跑分片，all_reduce 聚合；rank 0 写日志/保存) ──
         if epoch % config['eval']['interval'] == 0:
-            bpp_avg, std_bpp, loss_avg = validate(model, valid_loader, device, amp_dtype=amp_dtype)
+            bpd_avg, std_bpd, loss_avg = validate(model, valid_loader, device, amp_dtype=amp_dtype)
             if rank == 0:
-                print(f"Validation: Loss {loss_avg:.4f} | BPP {bpp_avg:.4f} ± {std_bpp:.4f}")
+                print(f"Validation: Loss {loss_avg:.4f} | bits/dim {bpd_avg:.4f} ± {std_bpd:.4f}")
                 if writer:
                     writer.add_scalar('val/loss', loss_avg, epoch)
-                    writer.add_scalar('val/bpp', bpp_avg, epoch)
-                    writer.add_scalar('val/bpp_std', std_bpp, epoch)
+                    writer.add_scalar('val/bpd', bpd_avg, epoch)
+                    writer.add_scalar('val/bpd_std', std_bpd, epoch)
                 if csv_writer:
                     current_lr = optimizer.param_groups[0]['lr']
-                    csv_writer.writerow([epoch, f'{avg_loss:.6f}', f'{avg_bpp:.6f}',
-                                         f'{loss_avg:.6f}', f'{bpp_avg:.6f}',
-                                         f'{std_bpp:.6f}', f'{current_lr:.2e}'])
+                    csv_writer.writerow([epoch, f'{avg_loss:.6f}', f'{avg_bpd:.6f}',
+                                         f'{loss_avg:.6f}', f'{bpd_avg:.6f}',
+                                         f'{std_bpd:.6f}', f'{current_lr:.2e}'])
                     csv_file.flush()
-                if bpp_avg < best_bpp:
-                    best_bpp = bpp_avg
+                if bpd_avg < best_bpd:
+                    best_bpd = bpd_avg
                     _atomic_save(raw_model.state_dict(), os.path.join(checkpoint_dir, 'best.pth'))
 
         if scheduler is not None:
@@ -740,7 +742,7 @@ def main():
                 'model_state_dict': raw_model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'loss': avg_loss,
-                'best_bpp': best_bpp,
+                'best_bpd': best_bpd,
             }
             if scheduler is not None:
                 ckpt_data['scheduler_state_dict'] = scheduler.state_dict()
@@ -774,12 +776,12 @@ def main():
             if dist.is_available() and dist.is_initialized():
                 for param in raw_model.parameters():
                     dist.broadcast(param.data, src=0)
-            bpp_avg, std_bpp, loss_avg = validate(model, valid_loader, device, amp_dtype=amp_dtype)
+            bpd_avg, std_bpd, loss_avg = validate(model, valid_loader, device, amp_dtype=amp_dtype)
             if rank == 0:
-                print(f"SWA Validation: Loss {loss_avg:.4f} | BPP {bpp_avg:.4f} ± {std_bpp:.4f}")
+                print(f"SWA Validation: Loss {loss_avg:.4f} | bits/dim {bpd_avg:.4f} ± {std_bpd:.4f}")
                 _atomic_save(raw_model.state_dict(), os.path.join(checkpoint_dir, 'swa.pth'))
                 if writer:
-                    writer.add_scalar('val/swa_bpp', bpp_avg, total_epochs)
+                    writer.add_scalar('val/swa_bpd', bpd_avg, total_epochs)
         elif rank == 0:
             print("SWA: 训练期间未发生任何 SWA 更新（swa_start_epoch 可能大于实际 epoch 数），跳过 finalize")
 

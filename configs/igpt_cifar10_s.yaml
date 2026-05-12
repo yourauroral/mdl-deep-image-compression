@@ -3,7 +3,7 @@ exp_name: "igpt_cifar10_s"
 # iGPT-S 级别架构: N=24, d_model=512, ~76M 参数
 # Ref: Chen et al., "Generative Pretraining from Pixels," ICML 2020
 # 对比原 iGPT-S (ImageNet 预训练) —— 本实验在 CIFAR-10 上专门化训练，
-# 目标 BPP ≤ 3.0 (PixelCNN++ baseline 2.92)
+# 目标 bits/dim ≤ 3.0 (PixelCNN++ baseline 2.92)
 
 model:
   type: igpt

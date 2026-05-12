@@ -19,7 +19,7 @@ Chart.defaults.borderColor = "#2a2d3a";
   const input = $("file-input");
   const preview = $("preview-img");
   const placeholder = $("upload-placeholder");
-  const bppEl = $("result-bpp");
+  const bpdEl = $("result-bpd");
   const ceEl = $("result-ce");
   const modelEl = $("result-model");
   const hmImg = $("heatmap-img");
@@ -44,7 +44,7 @@ Chart.defaults.borderColor = "#2a2d3a";
     };
     reader.readAsDataURL(file);
 
-    bppEl.textContent = ceEl.textContent = modelEl.textContent = "...";
+    bpdEl.textContent = ceEl.textContent = modelEl.textContent = "...";
 
     const form = new FormData();
     form.append("file", file);
@@ -52,12 +52,12 @@ Chart.defaults.borderColor = "#2a2d3a";
       const res = await fetch(API + "/api/predict", { method: "POST", body: form });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        bppEl.textContent = "N/A";
+        bpdEl.textContent = "N/A";
         modelEl.textContent = err.detail || "错误";
         return;
       }
       const data = await res.json();
-      bppEl.textContent = data.bpp;
+      bpdEl.textContent = data.bpd;
       ceEl.textContent = data.ce_loss;
       modelEl.textContent = data.model_type.toUpperCase();
 
@@ -72,13 +72,13 @@ Chart.defaults.borderColor = "#2a2d3a";
           ? "CC-iGPT 模型暂不支持热力图" : "热力图不可用";
       }
     } catch (e) {
-      bppEl.textContent = "离线";
+      bpdEl.textContent = "离线";
       modelEl.textContent = "无法连接后端";
     }
   }
 })();
 
-// ── Panel 2: BPP 对比 ──
+// ── Panel 2: bits/dim 对比 ──
 // 设计：传统方法 (PNG ~5.87, WebP ~5.02) 与神经 AR (~2.81-2.97) 量级差异过大，
 // 同图柱状图会把神经方法间的差异挤成视觉噪声。改为聚焦神经 AR 的 lollipop 图，
 // 横轴聚焦 2.70-3.05，数值标签贴在点末端；传统方法放表格 / 副标题作为上下文。
@@ -87,12 +87,12 @@ Chart.defaults.borderColor = "#2a2d3a";
   if (!data) return;
 
   const isTraditional = (n) => n.includes("PNG") || n.includes("WebP");
-  const traditional = data.methods.filter(m => isTraditional(m.name) && m.bpp !== null);
-  const neural = data.methods.filter(m => !isTraditional(m.name) && m.bpp !== null)
-                             .sort((a, b) => a.bpp - b.bpp);
+  const traditional = data.methods.filter(m => isTraditional(m.name) && m.bpd !== null);
+  const neural = data.methods.filter(m => !isTraditional(m.name) && m.bpd !== null)
+                             .sort((a, b) => a.bpd - b.bpd);
 
   const labels = neural.map(m => m.name);
-  const values = neural.map(m => m.bpp);
+  const values = neural.map(m => m.bpd);
 
   const colorFor = (m) => {
     if (m.name === "CC-iGPT (Ours)") return "#6c8cff";
@@ -108,10 +108,10 @@ Chart.defaults.borderColor = "#2a2d3a";
   const desc = document.createElement("p");
   desc.className = "panel-desc";
   desc.innerHTML =
-    `聚焦神经自回归方法 (BPP ∈ [2.7, 3.0])。传统无损基线作为参照: ` +
-    traditional.map(m => `<b>${m.name.replace(" (lossless)", "")}</b> ${m.bpp.toFixed(2)}`).join(" · ") +
+    `聚焦神经自回归方法 (bits/dim ∈ [2.7, 3.0])。传统无损基线作为参照: ` +
+    traditional.map(m => `<b>${m.name.replace(" (lossless)", "")}</b> ${m.bpd.toFixed(2)}`).join(" · ") +
     (ourBest && ourBaseline
-      ? ` &nbsp;|&nbsp; <span style="color:#6c8cff">CC-iGPT 较 iGPT-S baseline 改善 <b>−${(ourBaseline.bpp - ourBest.bpp).toFixed(2)}</b> bits/dim</span>`
+      ? ` &nbsp;|&nbsp; <span style="color:#6c8cff">CC-iGPT 较 iGPT-S baseline 改善 <b>−${(ourBaseline.bpd - ourBest.bpd).toFixed(2)}</b> bits/dim</span>`
       : "");
   const panel = document.getElementById("panel-metrics");
   const chartCt = panel.querySelector(".chart-container");
@@ -129,7 +129,7 @@ Chart.defaults.borderColor = "#2a2d3a";
       const { ctx, chartArea, scales } = chart;
       // baseline 虚线 (iGPT-S)
       if (ourBaseline) {
-        const x = scales.x.getPixelForValue(ourBaseline.bpp);
+        const x = scales.x.getPixelForValue(ourBaseline.bpd);
         ctx.save();
         ctx.strokeStyle = "rgba(155,176,255,0.35)";
         ctx.setLineDash([4, 4]);
@@ -163,7 +163,7 @@ Chart.defaults.borderColor = "#2a2d3a";
     data: {
       labels,
       datasets: [{
-        label: "BPP",
+        label: "bits/dim",
         data: values,
         backgroundColor: colors,
         borderRadius: 0,
@@ -197,14 +197,14 @@ Chart.defaults.borderColor = "#2a2d3a";
             label: (item) => {
               const m = neural[item.dataIndex];
               const std = m.std ? ` ± ${m.std.toFixed(2)}` : "";
-              return [`BPP: ${m.bpp.toFixed(2)}${std}`, m.note];
+              return [`bits/dim: ${m.bpd.toFixed(2)}${std}`, m.note];
             }
           }
         }
       },
       scales: {
         x: {
-          title: { display: true, text: "BPP (bits/dim) — 越低越好 ↓" },
+          title: { display: true, text: "bits/dim — 越低越好 ↓" },
           min: X_MIN,
           max: X_MAX,
           grid: { color: "rgba(255,255,255,0.04)" },
@@ -235,7 +235,7 @@ Chart.defaults.borderColor = "#2a2d3a";
     const isOurs = m.name.includes("Ours");
     tr.innerHTML = `
       <td class="${isOurs ? "highlight" : ""}">${m.name}</td>
-      <td class="${isOurs ? "highlight" : ""}">${m.bpp !== null ? m.bpp.toFixed(2) : "TBD"}</td>
+      <td class="${isOurs ? "highlight" : ""}">${m.bpd !== null ? m.bpd.toFixed(2) : "TBD"}</td>
       <td>${m.note}</td>`;
     tbody.appendChild(tr);
   });

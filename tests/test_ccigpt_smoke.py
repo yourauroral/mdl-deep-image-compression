@@ -1,4 +1,4 @@
-"""CC-iGPT 单元测试: 验证 coarse_ctx 注入正确性、shape 对齐、BPP 公式与
+"""CC-iGPT 单元测试: 验证 coarse_ctx 注入正确性、shape 对齐、bits/dim 公式与
 关闭 ctx 时退化为 vanilla iGPT。"""
 import math
 import os
@@ -46,16 +46,16 @@ def test_coarse_aligned_tokens_valid(device):
 def test_forward_shapes_and_finite(small_ccigpt, device):
     x = torch.rand(2, 3, 32, 32, device=device)
     out = small_ccigpt(x)
-    for k in ["loss", "ce_loss", "ce_loss_coarse", "ce_loss_fine", "bpp", "ctx_alpha"]:
+    for k in ["loss", "ce_loss", "ce_loss_coarse", "ce_loss_fine", "bpd", "ctx_alpha"]:
         assert k in out, f"missing key: {k}"
     assert torch.isfinite(out["loss"]).item()
-    assert torch.isfinite(out["bpp"]).item()
-    bpp = out["bpp"].item()
-    assert 0.0 < bpp < 50.0
+    assert torch.isfinite(out["bpd"]).item()
+    bpd = out["bpd"].item()
+    assert 0.0 < bpd < 50.0
 
 
-def test_bpp_formula_consistency(small_ccigpt, device):
-    """BPP_total = (CE_c · N_c + CE_f · N_f) / ln2 / N_f, 手算对照。"""
+def test_bpd_formula_consistency(small_ccigpt, device):
+    """bpd_total = (CE_c · N_c + CE_f · N_f) / ln2 / N_f, 手算对照。"""
     x = torch.rand(2, 3, 32, 32, device=device)
     out = small_ccigpt(x)
     N_c = small_ccigpt.coarse.seq_len  # 8*8*3 = 192
@@ -63,7 +63,7 @@ def test_bpp_formula_consistency(small_ccigpt, device):
     ce_c = out["ce_loss_coarse"].item()
     ce_f = out["ce_loss_fine"].item()
     expected = (ce_c * N_c + ce_f * N_f) / math.log(2.0) / N_f
-    assert abs(out["bpp"].item() - expected) < 1e-5
+    assert abs(out["bpd"].item() - expected) < 1e-5
 
 
 def test_disable_ctx_equivalent_to_vanilla_igpt(device):

@@ -32,8 +32,8 @@
     <div class="result-area">
       <div class="metric-cards">
         <div class="metric-card">
-          <span class="metric-label">BPP</span>
-          <span class="metric-value" id="result-bpp">—</span>
+          <span class="metric-label">bits/dim</span>
+          <span class="metric-value" id="result-bpd">—</span>
         </div>
         <div class="metric-card">
           <span class="metric-label">CE Loss</span>
@@ -45,7 +45,7 @@
         </div>
       </div>
       <div class="heatmap-container">
-        <p class="heatmap-title">Per-position BPP 热力图</p>
+        <p class="heatmap-title">Per-position BPP 热力图 (bits/pixel)</p>
         <img id="heatmap-img" class="heatmap-img" hidden>
         <p id="heatmap-placeholder" class="hint">上传图片后生成（仅 iGPT 模型）</p>
       </div>
@@ -53,14 +53,14 @@
   </div>
 </section>
 
-<!-- Panel 2: BPP 对比表 -->
+<!-- Panel 2: bits/dim 对比表 -->
 <section class="panel" id="panel-metrics">
-  <h2>BPP 方法对比</h2>
+  <h2>bits/dim 方法对比</h2>
   <div class="chart-container">
     <canvas id="chart-metrics"></canvas>
   </div>
   <table id="table-metrics" class="data-table">
-    <thead><tr><th>方法</th><th>BPP ↓</th><th>备注</th></tr></thead>
+    <thead><tr><th>方法</th><th>bits/dim ↓</th><th>备注</th></tr></thead>
     <tbody></tbody>
   </table>
 </section>
