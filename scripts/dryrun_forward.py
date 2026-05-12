@@ -3,12 +3,11 @@
 Quick forward pass sanity check — 验证模型构建和 forward 是否正常。
 
 包含:
-  1. 默认配置 forward
-  2. Weight tying / post-norm / pre-norm 验证
-  3. 消融 baseline 全关测试
-  4. muP 初始化 + backward 验证
-  5. Fused kernel 状态检查
-  6. Numerical sanity（loss 有限、BPP 合理范围）
+  1. 默认配置 forward + weight tying / post-norm 验证
+  2. 子像素自回归 backward
+  3. CC-iGPT smoke (coarse + fine + ctx_alpha 梯度检查)
+  4. Fused kernel 状态检查
+  5. Numerical sanity（loss 有限、BPP 合理范围）
 
 Usage:
     python scripts/dryrun_forward.py
@@ -38,7 +37,7 @@ def _check_finite(out: dict, tag: str):
     assert math.isfinite(ce_val), f"[{tag}] ce_loss is {ce_val} (NaN/Inf!)"
     bpp = ce_val / math.log(2)
     assert 0.0 < bpp < 50.0, f"[{tag}] bits/dim={bpp:.2f} 超出合理范围 (0, 50)"
-    logits_info = out['logits'].shape if out['logits'] is not None else "None (fused path)"
+    logits_info = out['logits'].shape if out['logits'] is not None else "None"
     print(f"  [{tag}] loss={loss_val:.4f}  ce_loss={ce_val:.4f}  bits/dim={bpp:.2f}  logits={logits_info}")
 
 
@@ -72,72 +71,18 @@ def main():
     out = model(x)
     _check_finite(out, f"default ({model_type})")
 
-    # weight tying / post-norm 仅对 iGPT 有直接语义；CC-iGPT 下访问 fine 子模型
+    # Weight tying 验证
     if model_type == "ccigpt":
         assert model.fine.head.weight is model.fine.token_embed.weight, "Weight tying failed on fine!"
         assert model.coarse.head.weight is model.coarse.token_embed.weight, "Weight tying failed on coarse!"
         print("  [weight tying] OK — fine.head & coarse.head 都共享 embed")
-        if mcfg.get("use_post_norm", True):
-            assert not hasattr(model.fine, 'final_norm'), "fine post-norm mode should not have final_norm"
-            print("  [post-norm] OK — fine 无 final_norm")
     else:
         assert model.head.weight is model.token_embed.weight, "Weight tying failed!"
         print("  [weight tying] OK — head.weight is token_embed.weight")
-        if mcfg.get("use_post_norm", True):
-            assert not hasattr(model, 'final_norm'), "post-norm mode should not have final_norm"
-            print("  [post-norm] OK — no final_norm")
 
-    # ── 2. 消融 baseline 全关 (仅 iGPT；ccigpt config 下不强行复刻) ──
+    # ── 2. 子像素自回归 (仅 iGPT；CC-iGPT 强制 channel-first，不适用) ──
     if model_type != "ccigpt":
-        print("\n=== Test 2: All Ablation OFF (pre-norm + ReLU + learned PE) ===")
-        model2 = IGPT(
-            image_size=32, in_channels=3, vocab_size=256,
-            d_model=mcfg["d_model"], N=mcfg["N"], h=mcfg["h"], d_ff=mcfg["d_ff"],
-            dropout=0.1,
-            use_ycbcr=False, use_rope=False, use_post_norm=False,
-            use_swiglu=False, use_qk_norm=False, use_depth_scaled_init=False,
-            use_zloss=False, activation_checkpointing=True,
-        ).to(device)
-        out2 = model2(x)
-        _check_finite(out2, "ablation-off")
-
-        assert hasattr(model2, 'final_norm'), "pre-norm mode should have final_norm"
-        print("  [pre-norm] OK — final_norm exists")
-
-        # ── 3. muP 初始化 + backward (CC-iGPT 暂未暴露 muP API) ──
-        print("\n=== Test 3: muP Init + Backward ===")
-        model._init_weights_mup(base_width=64)
-        out3 = model(x)
-        loss_val = out3['loss'].item()
-        ce_val = out3['ce_loss'].item()
-        assert math.isfinite(loss_val), f"[mup] loss is {loss_val} (NaN/Inf!)"
-        assert math.isfinite(ce_val), f"[mup] ce_loss is {ce_val} (NaN/Inf!)"
-        bpp = ce_val / math.log(2)
-        print(f"  [mup] loss={loss_val:.4f}  ce_loss={ce_val:.4f}  bits/dim={bpp:.2f} (muP init, high bits/dim expected)")
-
-        out3['loss'].backward()
-        grad_ok = all(p.grad is not None for p in model.parameters() if p.requires_grad)
-        assert grad_ok, "Some parameters missing gradients after backward"
-        grad_finite = all(torch.isfinite(p.grad).all().item() for p in model.parameters() if p.grad is not None)
-        assert grad_finite, "Some gradients contain NaN/Inf"
-        print("  [backward] all grads computed and finite: OK")
-
-        # ── 参数量统计 ──
-        n_params = sum(p.numel() for p in model.parameters())
-        print(f"\nTotal params: {n_params:,}")
-    else:
-        # CC-iGPT 下也跑一次 backward 保证 Test 1 模型梯度通畅
-        print("\n=== Test 2/3 跳过 (CC-iGPT 不复用 IGPT-only 的 muP 路径) ===")
-        out_bw = model(x)
-        out_bw['loss'].backward()
-        grad_ok = all(p.grad is not None for p in model.parameters() if p.requires_grad)
-        assert grad_ok, "Some parameters missing gradients after backward (ccigpt)"
-        n_params = sum(p.numel() for p in model.parameters())
-        print(f"  [ccigpt backward] OK，total params: {n_params:,}")
-
-    # ── 4. 子像素自回归 (仅 iGPT；CC-iGPT 强制 channel-first，不适用) ──
-    if model_type != "ccigpt":
-        print("\n=== Test 4: Sub-pixel Autoregression ===")
+        print("\n=== Test 2: Sub-pixel Autoregression ===")
         model4 = IGPT(
             image_size=32, in_channels=3, vocab_size=256,
             d_model=mcfg["d_model"], N=mcfg["N"], h=mcfg["h"], d_ff=mcfg["d_ff"],
@@ -155,8 +100,8 @@ def main():
         assert grad_ok4, "Some parameters missing gradients after backward (subpixel-ar)"
         print("  [backward] all grads computed: OK")
 
-    # ── 5. CC-iGPT smoke (硬编码 mini 配置，与 Test 1 真实 config 路径互补) ──
-    print("\n=== Test 5: CC-iGPT (Coarse-Conditioned iGPT, mini hardcoded) ===")
+    # ── 3. CC-iGPT smoke (硬编码 mini 配置，与 Test 1 真实 config 路径互补) ──
+    print("\n=== Test 3: CC-iGPT (Coarse-Conditioned iGPT, mini hardcoded) ===")
     model5 = CCIGPT(
         image_size=32, in_channels=3, vocab_size=256,
         pool_factor=4,

@@ -225,11 +225,18 @@ def _make_heatmap_b64(model, x, logits):
     H = W = model.image_size
     C = model.in_channels
     use_ycbcr = getattr(model, "use_ycbcr", True)
+    use_subpixel_ar = getattr(model, "use_subpixel_ar", False)
 
     logits = logits.float()
-    tokens = (rgb_to_ycbcr_int(x.clamp(0, 1)) if use_ycbcr
-              else (x.clamp(0, 1) * 255).round().long())
-    target = tokens.reshape(1, -1)[:, 1:]
+    int_tokens = (rgb_to_ycbcr_int(x.clamp(0, 1)) if use_ycbcr
+                  else (x.clamp(0, 1) * 255).round().long())
+    # token 排布必须与 IGPT._tokenize 一致：subpixel AR 是 pixel-first
+    # [Y0,Cb0,Cr0, Y1,Cb1,Cr1, ...]，否则是 channel-first [Y_all|Cb_all|Cr_all]。
+    if use_subpixel_ar:
+        tokens = int_tokens.permute(0, 2, 3, 1).reshape(1, -1)
+    else:
+        tokens = int_tokens.reshape(1, -1)
+    target = tokens[:, 1:]
 
     per_token_ce = F.cross_entropy(
         logits.reshape(-1, logits.shape[-1]),
@@ -241,7 +248,11 @@ def _make_heatmap_b64(model, x, logits):
     seq_len = C * H * W
     full = np.zeros(seq_len)
     full[1:] = bpp_vals[:seq_len - 1]
-    heatmap = full.reshape(C, H, W).sum(axis=0)
+    if use_subpixel_ar:
+        # pixel-first → (H, W, C) → 沿 C 求和得到 (H, W)
+        heatmap = full.reshape(H, W, C).sum(axis=-1)
+    else:
+        heatmap = full.reshape(C, H, W).sum(axis=0)
 
     try:
         import matplotlib

@@ -16,12 +16,6 @@ model:
   d_ff: 1376
   dropout: 0.0
   use_ycbcr: true
-  use_rope: true
-  use_post_norm: true
-  use_swiglu: true
-  use_qk_norm: true
-  use_depth_scaled_init: true
-  use_zloss: true
   use_subpixel_ar: true
   activation_checkpointing: true
 
@@ -46,21 +40,11 @@ train:
   z_loss_weight: 1e-4
   lr_schedule: "cosine"
   warmup_epochs: 6              # 5% epochs
-  stable_epochs: 84             # WSD 模式生效
-  decay_beta: 1.0
   compile: false
   swa:
     enabled: true
     start_epoch: 108            # 90% epochs
     update_interval: 1
-  mup:
-    enabled: false
-    base_width: 64
-  muon:
-    enabled: false
-    lr: 0.02
-    momentum: 0.95
-    ns_steps: 5
 
 eval:
   interval: 5

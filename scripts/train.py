@@ -107,18 +107,12 @@ def _validate_config(config: dict):
 
 
 def _shared_igpt_kwargs(mcfg: dict) -> dict:
-    """提取 iGPT / CC-iGPT 共用的消融开关字段（默认值与 IGPT.__init__ 对齐）。"""
+    """提取 iGPT / CC-iGPT 共用字段。"""
     return dict(
         in_channels=mcfg["in_channels"],
         vocab_size=mcfg["vocab_size"],
         dropout=mcfg["dropout"],
         use_ycbcr=mcfg.get("use_ycbcr", True),
-        use_rope=mcfg.get("use_rope", True),
-        use_post_norm=mcfg.get("use_post_norm", True),
-        use_swiglu=mcfg.get("use_swiglu", True),
-        use_qk_norm=mcfg.get("use_qk_norm", True),
-        use_depth_scaled_init=mcfg.get("use_depth_scaled_init", True),
-        use_zloss=mcfg.get("use_zloss", True),
         activation_checkpointing=mcfg.get("activation_checkpointing", False),
     )
 
@@ -151,45 +145,16 @@ def _build_ccigpt_from_config(mcfg: dict, device) -> CCIGPT:
     ).to(device)
 
 
-def _get_param_groups(model, weight_decay=0.1, mup_enabled=False,
-                      mup_base_width=64, d_model=128, base_lr=1e-4):
-    """
-    构建 AdamW 参数组：embedding/norm/bias 不做 weight decay。
-    muP 启用时，hidden 层 LR 按 base_width/d_model 缩放。
-    Ref: Yang et al., arXiv:2203.03466, Table 8.
-    """
+def _get_param_groups(model, weight_decay=0.1):
+    """构建 AdamW 参数组：embedding/norm/bias/ctx_alpha 不做 weight decay。"""
     no_decay = set()
-    mup_hidden = set()
     for name, _ in model.named_parameters():
-        if any(nd in name for nd in ['token_embed', 'pos_embed', 'channel_embed', 'norm', 'bias', 'ctx_alpha']):
+        if any(nd in name for nd in ['token_embed', 'channel_embed', 'norm', 'bias', 'ctx_alpha']):
             no_decay.add(name)
-        if mup_enabled and not name.endswith('head.weight') \
-           and 'token_embed' not in name and 'pos_embed' not in name \
-           and 'channel_embed' not in name and 'ctx_alpha' not in name:
-            mup_hidden.add(name)
-
-    if mup_enabled:
-        mup_lr_scale = mup_base_width / d_model
-        groups = [
-            {"params": [p for n, p in model.named_parameters()
-                        if n not in no_decay and n in mup_hidden],
-             "weight_decay": weight_decay, "lr": base_lr * mup_lr_scale},
-            {"params": [p for n, p in model.named_parameters()
-                        if n in no_decay and n in mup_hidden],
-             "weight_decay": 0.0, "lr": base_lr * mup_lr_scale},
-            {"params": [p for n, p in model.named_parameters()
-                        if n not in no_decay and n not in mup_hidden],
-             "weight_decay": weight_decay, "lr": base_lr},
-            {"params": [p for n, p in model.named_parameters()
-                        if n in no_decay and n not in mup_hidden],
-             "weight_decay": 0.0, "lr": base_lr},
-        ]
-        return [g for g in groups if g["params"]]
-    else:
-        return [
-            {"params": [p for n, p in model.named_parameters() if n not in no_decay], "weight_decay": weight_decay},
-            {"params": [p for n, p in model.named_parameters() if n in no_decay],     "weight_decay": 0.0},
-        ]
+    return [
+        {"params": [p for n, p in model.named_parameters() if n not in no_decay], "weight_decay": weight_decay},
+        {"params": [p for n, p in model.named_parameters() if n in no_decay],     "weight_decay": 0.0},
+    ]
 
 
 # ==================== Training ====================
@@ -208,20 +173,13 @@ def train_one_epoch(model, loader, optimizer, scaler, device,
                     epoch, log_freq, writer, clip_max_norm,
                     amp_dtype=torch.float16, grad_accum_steps=1,
                     z_loss_weight=1e-4,
-                    distributed=False, optimizers=None, rank=0):
-    """
-    optimizers: Muon 模式下传入 [muon_opt, adamw_opt] 列表，
-                非 Muon 模式下为 None（仅使用 optimizer 参数）。
-    """
+                    distributed=False, rank=0):
     model.train()
     total_loss = 0
     total_bpp = 0
     steps = len(loader)
 
-    # 统一的 zero_grad / step 帮助函数
-    all_opts = optimizers if optimizers else [optimizer]
-    for opt in all_opts:
-        opt.zero_grad(set_to_none=True)
+    optimizer.zero_grad(set_to_none=True)
 
     for i, batch in enumerate(loader):
         if isinstance(batch, (list, tuple)):
@@ -267,18 +225,15 @@ def train_one_epoch(model, loader, optimizer, scaler, device,
 
         # 同步步：完整的累积窗口完成 OR epoch 末尾残余 micro-batch（见上方 is_last_step 注释）
         if (i + 1) % grad_accum_steps == 0 or (i + 1) == steps:
-            # Unscale → clip → step → update（统一 scaler/非 scaler 路径）
+            # Unscale → clip → step → update
             if scaler is not None:
-                for opt in all_opts:
-                    scaler.unscale_(opt)
+                scaler.unscale_(optimizer)
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), clip_max_norm)
             if scaler is not None:
-                for opt in all_opts:
-                    scaler.step(opt)
+                scaler.step(optimizer)
                 scaler.update()
             else:
-                for opt in all_opts:
-                    opt.step()
+                optimizer.step()
 
             if writer and (i + 1) % log_freq == 0:
                 step = epoch * steps + i
@@ -286,8 +241,7 @@ def train_one_epoch(model, loader, optimizer, scaler, device,
                 if scaler is not None:
                     writer.add_scalar('train/loss_scale', scaler.get_scale(), step)
 
-            for opt in all_opts:
-                opt.zero_grad(set_to_none=True)
+            optimizer.zero_grad(set_to_none=True)
 
         # 用 tensor 累加，避免每步 .item() 触发 GPU→CPU 同步
         # Ref: CS336 — 只在 log 时才 .item()
@@ -418,15 +372,10 @@ def main():
     os.makedirs(checkpoint_dir, exist_ok=True)
     os.makedirs(log_dir, exist_ok=True)
 
-    # CSV 导出器：将训练曲线写入 CSV，方便 matplotlib 画论文图
+    # CSV 导出器延迟到 rank 检测之后初始化（仅 rank 0 写盘，避免 DDP 下多 rank
+    # 用 'w' 模式同时打开同一文件造成 truncate race / 半截文件）。
     csv_file = None
     csv_writer = None
-    if args.export_csv:
-        csv_path = os.path.join(log_dir, 'training_curves.csv')
-        csv_file = open(csv_path, 'w', newline='')
-        csv_writer = csv.writer(csv_file)
-        csv_writer.writerow(['epoch', 'train_loss', 'train_bpp', 'val_loss',
-                             'val_bpp', 'val_bpp_std', 'lr'])
 
     # Distributed training: 自动检测 torchrun 环境
     # torchrun 会设置 WORLD_SIZE、RANK、LOCAL_RANK 等环境变量，
@@ -447,8 +396,15 @@ def main():
     device = torch.device(f'cuda:{local_rank}' if distributed else 'cuda' if torch.cuda.is_available() else 'cpu')
     writer = SummaryWriter(log_dir=log_dir) if rank == 0 else None
 
-    # Dataset: 根据 config 选择 CIFAR-10 / CIFAR-100 / ImageNet
-    from torchvision.datasets import CIFAR10, CIFAR100, ImageFolder
+    if args.export_csv and rank == 0:
+        csv_path = os.path.join(log_dir, 'training_curves.csv')
+        csv_file = open(csv_path, 'w', newline='')
+        csv_writer = csv.writer(csv_file)
+        csv_writer.writerow(['epoch', 'train_loss', 'train_bpp', 'val_loss',
+                             'val_bpp', 'val_bpp_std', 'lr'])
+
+    # Dataset: 根据 config 选择 CIFAR-10 / CIFAR-100 / ImageNet32 npy
+    from torchvision.datasets import CIFAR10, CIFAR100
     transform = transforms.ToTensor()
     dataset_name = config["data"].get("dataset", "cifar100")
 
@@ -456,15 +412,12 @@ def main():
         DatasetClass = CIFAR10 if dataset_name == "cifar10" else CIFAR100
         train_dataset = DatasetClass(root=config["data"]["train"], train=True,  download=False, transform=transform)
         valid_dataset = DatasetClass(root=config["data"]["valid"], train=False, download=False, transform=transform)
-    elif dataset_name in ("imagenet", "imagenet32"):
-        train_dataset = ImageFolder(root=os.path.join(config["data"]["train"], "train"), transform=transform)
-        valid_dataset = ImageFolder(root=os.path.join(config["data"]["valid"], "val"),   transform=transform)
     elif dataset_name == "imagenet32_npy":
-        from mdlic.data.imagenet32_npy import ImageNet32Npy
+        from src.mdlic.data.imagenet32_npy import ImageNet32Npy
         train_dataset = ImageNet32Npy(root=config["data"]["train"], split="train")
         valid_dataset = ImageNet32Npy(root=config["data"]["valid"], split="val")
     else:
-        raise ValueError(f"未知 dataset: '{dataset_name}'，支持 cifar10/cifar100/imagenet/imagenet32/imagenet32_npy")
+        raise ValueError(f"未知 dataset: '{dataset_name}'，支持 cifar10/cifar100/imagenet32_npy")
     if rank == 0:
         print(f"Dataset: {dataset_name} | Train: {len(train_dataset)} | Valid: {len(valid_dataset)}")
 
@@ -516,20 +469,6 @@ def main():
         for name, avail in kernel_status.items():
             print(f"  {name}: {'ON' if avail else 'OFF (fallback to PyTorch)'}")
 
-    # muP 初始化（iGPT/CC-iGPT）
-    # Ref: Yang et al., "Tensor Programs V," arXiv:2203.03466, 2022.
-    mup_cfg = config["train"].get("mup", {})
-    mup_enabled = mup_cfg.get("enabled", False) and model_type in ('igpt', 'ccigpt')
-    mup_base_width = mup_cfg.get("base_width", 64)
-    if mup_enabled:
-        if model_type == "ccigpt":
-            model.coarse._init_weights_mup(mup_base_width)
-            model.fine._init_weights_mup(mup_base_width)
-        else:
-            model._init_weights_mup(mup_base_width)
-        if rank == 0:
-            print(f"muP init enabled: base_width={mup_base_width}, d_model={mcfg['d_model']}")
-
     # torch.compile（Phase 2.3）— 在 DDP 包装前编译
     # Ref: PyTorch 2.0+ torch.compile 文档
     if config["train"].get("compile", False):
@@ -542,48 +481,14 @@ def main():
             model, device_ids=[local_rank], output_device=local_rank
         )
 
-    # Optimizer with parameter groups (no weight decay for embeddings/norm/bias)
-    # muP 启用时: hidden 层 LR 按 base_width/d_model 缩放 [1] Table 8
+    # Optimizer: AdamW with parameter groups (no weight decay for embeddings/norm/bias)
     base_lr = float(config["train"]["lr"])
-    d_model = mcfg.get("d_model", 128)
-
-    # Muon 优化器（仅 iGPT/CC-iGPT）
-    muon_cfg = config["train"].get("muon", {})
-    muon_enabled = muon_cfg.get("enabled", False) and model_type in ('igpt', 'ccigpt')
-
-    if muon_enabled:
-        from src.mdlic.optim.muon import build_muon_adamw
-        muon_opt, adamw_opt = build_muon_adamw(
-            model,
-            muon_lr=float(muon_cfg.get("lr", 0.02)),
-            muon_momentum=float(muon_cfg.get("momentum", 0.95)),
-            muon_ns_steps=int(muon_cfg.get("ns_steps", 5)),
-            adamw_lr=base_lr,
-            adamw_betas=(0.9, 0.95),
-            adamw_eps=float(config["train"].get("eps", 1e-8)),
-            adamw_wd=0.1,
-            no_decay_keywords=['token_embed', 'pos_embed', 'channel_embed', 'norm', 'bias', 'ctx_alpha'],
-        )
-        # 包装成统一接口：optimizer 是一个 list，后续代码统一处理
-        optimizers = [opt for opt in [muon_opt, adamw_opt] if opt is not None]
-        # 用 adamw_opt 作为主 optimizer（scheduler 挂在它上面）
-        optimizer = adamw_opt if adamw_opt is not None else muon_opt
-        if rank == 0:
-            n_muon = sum(p.numel() for g in muon_opt.param_groups for p in g['params']) if muon_opt else 0
-            n_adamw = sum(p.numel() for g in adamw_opt.param_groups for p in g['params']) if adamw_opt else 0
-            print(f"Muon enabled: {n_muon:,} params (2D) → Muon (lr={muon_cfg.get('lr', 0.02)}), "
-                  f"{n_adamw:,} params → AdamW (lr={base_lr})")
-    else:
-        optimizers = None  # 标记未使用 Muon
-
-        optimizer = optim.AdamW(
-            _get_param_groups(model, weight_decay=0.1, mup_enabled=mup_enabled,
-                              mup_base_width=mup_base_width, d_model=d_model,
-                              base_lr=base_lr),
-            lr=base_lr,
-            betas=(0.9, 0.95),
-            eps=float(config["train"].get("eps", 1e-8)),
-        )
+    optimizer = optim.AdamW(
+        _get_param_groups(model, weight_decay=0.1),
+        lr=base_lr,
+        betas=(0.9, 0.95),
+        eps=float(config["train"].get("eps", 1e-8)),
+    )
 
     # Learning rate scheduler
     #
@@ -718,9 +623,6 @@ def main():
                 raw_model.load_state_dict(sd)
             if 'optimizer_state_dict' in ckpt:
                 optimizer.load_state_dict(ckpt['optimizer_state_dict'])
-            if optimizers and 'optimizers_state_dict' in ckpt:
-                for opt, sd in zip(optimizers, ckpt['optimizers_state_dict']):
-                    opt.load_state_dict(sd)
             start_epoch = ckpt.get('epoch', 0) + 1
             best_bpp = ckpt.get('best_bpp', float('inf'))
             if scheduler is not None and 'scheduler_state_dict' in ckpt:
@@ -732,30 +634,12 @@ def main():
                 swa_n = ckpt.get('swa_n', 0)
             # resume 后用 config 中的 lr 覆盖 checkpoint 里的旧值，
             # 使得修改 yaml lr 后 resume 能立即生效。
-            # 关键：保留 muP per-group 缩放比例（pg['lr'] / pg['initial_lr']）。
             for pg in optimizer.param_groups:
-                old_initial = pg.get('initial_lr', pg['lr'])
-                scale = pg['lr'] / old_initial if old_initial > 0 else 1.0
                 pg['initial_lr'] = base_lr
-                pg['lr'] = base_lr * scale
-            # Muon optimizer（如启用）：从 yaml 重新读 muon.lr 覆盖
-            if optimizers:
-                muon_lr_new = float(muon_cfg.get("lr", 0.02)) if muon_enabled else None
-                for opt in optimizers:
-                    if opt is optimizer:
-                        continue  # 已处理
-                    for pg in opt.param_groups:
-                        if muon_lr_new is not None:
-                            old_initial = pg.get('initial_lr', pg['lr'])
-                            scale = pg['lr'] / old_initial if old_initial > 0 else 1.0
-                            pg['initial_lr'] = muon_lr_new
-                            pg['lr'] = muon_lr_new * scale
+                pg['lr'] = base_lr
             # Scheduler base_lrs 同步（cosine/wsd 的 lr_lambda 乘以 base_lr）
             if scheduler is not None:
                 scheduler.base_lrs = [pg['initial_lr'] for pg in optimizer.param_groups]
-                # last_epoch = start_epoch - 1：主循环 epoch=start_epoch 结束时
-                # scheduler.step() 推进到 start_epoch。**不**在这里多 step 一次
-                # （否则 off-by-one：第一个 resume epoch 会用到 start_epoch+1 的 LR）
                 scheduler.last_epoch = start_epoch - 1
 
             if rank == 0:
@@ -778,7 +662,6 @@ def main():
             grad_accum_steps=grad_accum_steps,
             z_loss_weight=float(config["train"].get("z_loss_weight", 1e-4)),
             distributed=distributed,
-            optimizers=optimizers,
             rank=rank,
         )
 
@@ -842,9 +725,6 @@ def main():
                 'loss': avg_loss,
                 'best_bpp': best_bpp,
             }
-            # Muon 模式下额外保存所有 optimizer 状态
-            if optimizers:
-                ckpt_data['optimizers_state_dict'] = [opt.state_dict() for opt in optimizers]
             if scheduler is not None:
                 ckpt_data['scheduler_state_dict'] = scheduler.state_dict()
             if scaler is not None:

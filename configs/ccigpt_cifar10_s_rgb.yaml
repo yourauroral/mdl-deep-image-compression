@@ -24,12 +24,6 @@ model:
   coarse_d_ff: 688
 
   use_ycbcr: false              # ablation 主开关：关掉 BT.601 + round 量化
-  use_rope: true
-  use_post_norm: true
-  use_swiglu: true
-  use_qk_norm: true
-  use_depth_scaled_init: true
-  use_zloss: true
   activation_checkpointing: true
 
 data:
@@ -50,21 +44,11 @@ train:
   z_loss_weight: 1e-4
   lr_schedule: "cosine"
   warmup_epochs: 3              # 6% epochs
-  stable_epochs: 35             # 仅 WSD 模式生效（cosine 模式不读此值，70% epochs）
-  decay_beta: 1.0
   compile: false
   swa:
     enabled: true
     start_epoch: 45             # 最后 5 epoch 启动 SWA（90% epochs）
     update_interval: 1
-  mup:
-    enabled: false
-    base_width: 64
-  muon:
-    enabled: false
-    lr: 0.02
-    momentum: 0.95
-    ns_steps: 5
 
 eval:
   interval: 2                   # ep20 前后过拟合反弹观测窗口，间隔收紧到 2

@@ -88,19 +88,6 @@ ACADEMIC_BASELINES = {
     ],
 }
 
-# 消融实验编号 → 配置覆盖映射
-# Ref: future.md Section 3.2 消融实验表
-ABLATION_CONFIGS = OrderedDict([
-    ("E0", {}),                                           # Full Proposed Model
-    ("E1", {"use_ycbcr": False}),                         # w/o YCbCr
-    ("E2", {"use_rope": False}),                          # w/o RoPE
-    ("E3", {"use_post_norm": False}),                     # w/o Post-Norm
-    ("E4", {"use_swiglu": False}),                        # w/o SwiGLU
-    ("E5", {"use_qk_norm": False}),                       # w/o QK-Norm
-    ("E6", {"use_depth_scaled_init": False}),              # w/o 深度缩放 Init
-    ("E7", {"use_zloss": False}),                         # w/o z-loss
-])
-
 
 @torch.no_grad()
 def evaluate_model(model, loader, device, amp_dtype=None):
@@ -194,25 +181,10 @@ def evaluate_per_channel(model, loader, device, amp_dtype=None,
     use_amp = amp_dtype is not None and device.type == 'cuda'
     channel_names = ["Y", "Cb", "Cr"] if use_ycbcr else ["R", "G", "B"]
 
-    # ── Fused Linear CE 路径与 per-channel 评测不兼容 ──
-    # 训练期开启 _USE_FUSED_LINEAR_CE 时，IGPT.forward 会直接用 Triton kernel
-    # 算 (hidden @ W.T → logsumexp → CE) 融合输出 loss，不实例化完整 (B*T, V)
-    # logits 张量以节省显存；因此 out["logits"] 为 None。
-    # per-channel 评测需要按通道切分 logits 后分别做 CE，必须拿到完整 logits，
-    # 所以此处临时关闭 fused 开关，评测完在 finally 里复位（try/finally 确保
-    # 即便异常退出也不会污染全局状态，影响后续评测命令）。
-    #
-    # Ref: Hsu et al., "Liger Kernel: Efficient Triton Kernels for LLM Training,"
-    #      arXiv:2410.10989 — Fused Linear Cross Entropy pattern 的出处。
-    from src.mdlic.models import igpt as _igpt_mod
-    _saved_fused_linear_ce = _igpt_mod._USE_FUSED_LINEAR_CE
-    _igpt_mod._USE_FUSED_LINEAR_CE = False
-
     # 每个通道的 CE loss 列表
     channel_ce = {ch: [] for ch in channel_names}
 
-    try:
-     for batch in loader:
+    for batch in loader:
         if isinstance(batch, (list, tuple)):
             x = batch[0]
         else:
@@ -273,8 +245,6 @@ def evaluate_per_channel(model, loader, device, amp_dtype=None,
                 reduction="mean"
             )
             channel_ce[ch_name].append(ch_ce.item())
-    finally:
-        _igpt_mod._USE_FUSED_LINEAR_CE = _saved_fused_linear_ce
 
     # 汇总
     channel_bpps = {}
@@ -341,18 +311,7 @@ def evaluate_position_bpp(model, loader, device, amp_dtype=None,
     position_ce_sum = torch.zeros(seq_len - 1, device=device)
     n_samples = 0
 
-    # ── Fused Linear CE 与 per-position 评测不兼容 ──
-    # 与 evaluate_per_channel 同款处理：临时关闭融合开关，让 forward 返回完整
-    # logits；try/finally 保证状态复位。这样可以避免之前手动复刻 IGPT.forward
-    # 的 token_embed/channel_embed/blocks/final_norm/head 一长串细节，
-    # 否则 _embed_inputs 内部任何调整（例如 CC-iGPT 注入位置变化）都会让这里
-    # 静默失同步。
-    from src.mdlic.models import igpt as _igpt_mod
-    _saved_fused_linear_ce = _igpt_mod._USE_FUSED_LINEAR_CE
-    _igpt_mod._USE_FUSED_LINEAR_CE = False
-
-    try:
-     for batch in loader:
+    for batch in loader:
         if isinstance(batch, (list, tuple)):
             x = batch[0]
         else:
@@ -366,8 +325,8 @@ def evaluate_position_bpp(model, loader, device, amp_dtype=None,
         logits = out["logits"]
         if logits is None:
             raise RuntimeError(
-                "evaluate_position_bpp: model returned logits=None even after disabling "
-                "fused linear CE. Please check igpt.py forward path."
+                "evaluate_position_bpp: model returned logits=None. "
+                "Please check igpt.py forward path."
             )
         logits = logits.float()
 
@@ -393,8 +352,6 @@ def evaluate_position_bpp(model, loader, device, amp_dtype=None,
         # 对 batch 维度求和
         position_ce_sum += per_token_ce.sum(dim=0)
         n_samples += B_cur
-    finally:
-        _igpt_mod._USE_FUSED_LINEAR_CE = _saved_fused_linear_ce
 
     # 平均 CE per position
     position_ce_avg = (position_ce_sum / n_samples).cpu().numpy()  # (seq_len-1,)
@@ -553,34 +510,6 @@ def print_results_table(dataset_name, model_bpp, model_std,
     print()
 
 
-def print_ablation_table(results):
-    """
-    打印消融实验 Markdown 表格。
-
-    参数:
-      results: list[(str, str, float, float, float)] —
-               [(exp_id, description, bpp, std, delta_bpp), ...]
-    """
-    print(f"\n{'='*80}")
-    print(f"  消融实验结果")
-    print(f"{'='*80}\n")
-
-    print("| 实验 | 配置 | BPP ↓ | ΔBPP | 备注 |")
-    print("|------|------|-------|------|------|")
-
-    baseline_bpp = None
-    for exp_id, desc, bpp, std, delta in results:
-        if baseline_bpp is None:
-            baseline_bpp = bpp
-            delta_str = "—"
-            note = "baseline"
-        else:
-            delta_str = f"+{delta:.4f}" if delta > 0 else f"{delta:.4f}"
-            note = "↑ 移除有损" if delta > 0 else "↓ 移除有益" if delta < 0 else "≈ 无影响"
-        print(f"| {exp_id} | {desc} | {bpp:.4f} ± {std:.4f} | {delta_str} | {note} |")
-    print()
-
-
 def _load_dataset(config):
     """加载测试数据集"""
     from torchvision import transforms
@@ -591,7 +520,10 @@ def _load_dataset(config):
         from src.mdlic.data.imagenet32_npy import ImageNet32Npy
         test_dataset = ImageNet32Npy(root=config["data"]["valid"], split="val")
         return test_dataset, dataset_name
-
+    if dataset_name not in ("cifar10", "cifar100"):
+        raise ValueError(
+            f"未知 dataset: '{dataset_name}'，支持 cifar10/cifar100/imagenet32_npy"
+        )
     transform = transforms.ToTensor()
     DatasetClass = CIFAR10 if dataset_name == "cifar10" else CIFAR100
     test_dataset = DatasetClass(root=config["data"]["valid"], train=False,
@@ -764,105 +696,6 @@ def cmd_swa(args, config, device):
     print()
 
 
-def cmd_ablation(args, config, device):
-    """
-    消融批量评测 — 扫描实验目录下的 checkpoint，生成消融对比表。
-
-    目录结构约定:
-      {ablation_dir}/
-        E0_full/checkpoints/best.pth
-        E1_no_ycbcr/checkpoints/best.pth
-        E2_no_rope/checkpoints/best.pth
-        ...
-
-    或者: 手动指定 checkpoint 列表（通过 --ablation_checkpoints）。
-    """
-    test_dataset, dataset_name = _load_dataset(config)
-    test_loader = DataLoader(test_dataset, batch_size=args.batch_size,
-                             shuffle=False, num_workers=2, pin_memory=True)
-
-    mcfg = config["model"]
-    amp_dtype, amp_dtype_str = _get_amp_dtype(config)
-
-    results = []
-    baseline_bpp = None
-
-    # 方式 1: 扫描目录
-    ablation_dir = args.ablation_dir
-    if ablation_dir:
-        # 按 E0, E1, ... 排序扫描
-        exp_dirs = sorted(os.listdir(ablation_dir))
-        for exp_name in exp_dirs:
-            exp_path = os.path.join(ablation_dir, exp_name)
-            ckpt_path = os.path.join(exp_path, "checkpoints", "best.pth")
-            if not os.path.isfile(ckpt_path):
-                continue
-
-            # 从目录名推断实验编号 (E0_full → E0)；只接受 ABLATION_CONFIGS 中已知的 ID，
-            # 避免将随机命名的目录误判为消融实验
-            exp_id = exp_name.split("_")[0].upper()
-            if not re.fullmatch(r"E\d+", exp_id) or exp_id not in ABLATION_CONFIGS:
-                continue
-            ablation_overrides = ABLATION_CONFIGS.get(exp_id, {})
-
-            # 构建模型配置（应用消融覆盖）
-            mcfg_ablation = dict(mcfg)
-            mcfg_ablation.update(ablation_overrides)
-
-            desc = exp_name
-            if ablation_overrides:
-                removed = [f"{k}=False" for k, v in ablation_overrides.items()
-                           if v is False]
-                desc = ", ".join(removed) if removed else exp_name
-
-            print(f"\n评测 {exp_id} ({desc})...")
-            model = _build_from_config(mcfg_ablation, device)
-            _load_checkpoint(model, ckpt_path, device)
-            bpp, std, _, _ = evaluate_model(model, test_loader, device,
-                                              amp_dtype=amp_dtype)
-
-            if baseline_bpp is None:
-                baseline_bpp = bpp
-            delta = bpp - baseline_bpp
-
-            results.append((exp_id, desc, bpp, std, delta))
-            print(f"  BPP: {bpp:.4f} ± {std:.4f}, ΔBPP: {delta:+.4f}")
-
-    # 方式 2: 手动指定 checkpoint 列表
-    elif args.ablation_checkpoints:
-        ckpts = args.ablation_checkpoints.split(",")
-        for i, ckpt_path in enumerate(ckpts):
-            ckpt_path = ckpt_path.strip()
-            if not os.path.isfile(ckpt_path):
-                print(f"跳过不存在的 checkpoint: {ckpt_path}")
-                continue
-
-            exp_id = f"E{i}"
-            desc = os.path.basename(os.path.dirname(os.path.dirname(ckpt_path)))
-
-            print(f"\n评测 {exp_id} ({desc})...")
-            model = _build_from_config(mcfg, device)
-            _load_checkpoint(model, ckpt_path, device)
-            bpp, std, _, _ = evaluate_model(model, test_loader, device,
-                                              amp_dtype=amp_dtype)
-
-            if baseline_bpp is None:
-                baseline_bpp = bpp
-            delta = bpp - baseline_bpp
-
-            results.append((exp_id, desc, bpp, std, delta))
-            print(f"  BPP: {bpp:.4f} ± {std:.4f}, ΔBPP: {delta:+.4f}")
-
-    if results:
-        print_ablation_table(results)
-    else:
-        print("\n未找到任何 checkpoint，请检查 --ablation_dir 路径。")
-        print("目录结构约定:")
-        print("  {ablation_dir}/E0_full/checkpoints/best.pth")
-        print("  {ablation_dir}/E1_no_ycbcr/checkpoints/best.pth")
-        print("  ...")
-
-
 def main():
     parser = argparse.ArgumentParser(
         description="iGPT 无损压缩评测",
@@ -872,10 +705,6 @@ def main():
   # 单模型
   python scripts/evaluate.py --config configs/igpt_cifar10_s.yaml \\
       --checkpoint best.pth
-
-  # 消融批量
-  python scripts/evaluate.py --config configs/igpt_cifar10_s.yaml \\
-      --ablation_dir experiments/
 
   # Per-channel + 传统方法
   python scripts/evaluate.py --config configs/igpt_cifar10_s.yaml \\
@@ -900,11 +729,6 @@ def main():
                         help='同时评测 SWA checkpoint（swa.pth vs best.pth）')
     parser.add_argument('--batch_size', type=int, default=64,
                         help='评测 batch size')
-    # 消融批量评测
-    parser.add_argument('--ablation_dir', type=str, default=None,
-                        help='消融实验目录（扫描子目录下的 checkpoints/best.pth）')
-    parser.add_argument('--ablation_checkpoints', type=str, default=None,
-                        help='消融 checkpoint 列表（逗号分隔路径）')
     args = parser.parse_args()
 
     with open(args.config, 'r') as f:
@@ -914,14 +738,12 @@ def main():
     print(f"Device: {device}")
 
     # 根据模式分发
-    if args.ablation_dir or args.ablation_checkpoints:
-        cmd_ablation(args, config, device)
-    elif args.swa and args.checkpoint:
+    if args.swa and args.checkpoint:
         cmd_swa(args, config, device)
     elif args.checkpoint:
         cmd_single(args, config, device)
     else:
-        parser.error("请指定 --checkpoint 或 --ablation_dir")
+        parser.error("请指定 --checkpoint")
 
 
 if __name__ == '__main__':

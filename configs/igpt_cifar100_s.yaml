@@ -15,12 +15,6 @@ model:
   d_ff: 1376        # SwiGLU hidden dim: (8/3)*512≈1365, 向上取整到16倍数
   dropout: 0.0
   use_ycbcr: true
-  use_rope: true
-  use_post_norm: true
-  use_swiglu: true
-  use_qk_norm: true
-  use_depth_scaled_init: true
-  use_zloss: true
   use_subpixel_ar: true
   activation_checkpointing: true   # N=24 必须开，否则 OOM
 
@@ -44,21 +38,11 @@ train:
   z_loss_weight: 1e-4
   lr_schedule: "cosine"
   warmup_epochs: 10
-  stable_epochs: 140
-  decay_beta: 1.0
   compile: false
   swa:
     enabled: true
     start_epoch: 180
     update_interval: 1
-  mup:
-    enabled: false
-    base_width: 64
-  muon:
-    enabled: false
-    lr: 0.02
-    momentum: 0.95
-    ns_steps: 5
 
 eval:
   interval: 5

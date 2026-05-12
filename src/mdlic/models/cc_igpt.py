@@ -32,14 +32,7 @@ class CCIGPT(nn.Module):
         # coarse 模型（小且浅）
         coarse_d_model=256, coarse_N=6, coarse_h=4, coarse_d_ff=688,
         dropout=0.1,
-        # 共享开关
         use_ycbcr: bool = True,
-        use_rope: bool = True,
-        use_post_norm: bool = True,
-        use_swiglu: bool = True,
-        use_qk_norm: bool = True,
-        use_depth_scaled_init: bool = True,
-        use_zloss: bool = True,
         activation_checkpointing: bool = False,
     ):
         super().__init__()
@@ -54,9 +47,7 @@ class CCIGPT(nn.Module):
 
         shared = dict(
             in_channels=in_channels, vocab_size=vocab_size, dropout=dropout,
-            use_ycbcr=use_ycbcr, use_rope=use_rope, use_post_norm=use_post_norm,
-            use_swiglu=use_swiglu, use_qk_norm=use_qk_norm,
-            use_depth_scaled_init=use_depth_scaled_init, use_zloss=use_zloss,
+            use_ycbcr=use_ycbcr,
             activation_checkpointing=activation_checkpointing,
             use_subpixel_ar=False,  # CC-iGPT 强制 channel-first 对齐 ctx
         )
@@ -90,6 +81,10 @@ class CCIGPT(nn.Module):
           token (YCbCr or RGB int 0-255) → 反量化 float → 若是 YCbCr 则 BT.601 inverse
           → bilinear UP 到 fine 分辨率 → clamp → 再 tokenize (与 fine encoder 同规则)
           → fine.token_embed
+
+        强制 autocast(enabled=False)：encoder/decoder 必须在完全相同的 dtype 下
+        跑此函数才能 bit-exact。bilinear interp + round + token_embed 在 bf16/fp16
+        下结果会跟 fp32 差 ±1 token，导致 bitstream 不可解。
         """
         # 该 reshape 依赖 channel-first 平铺 (IGPT._tokenize 的 use_subpixel_ar=False
         # 行为)。__init__ 已强制 coarse channel-first；此处再加运行时断言，防止
@@ -99,30 +94,31 @@ class CCIGPT(nn.Module):
             "_compute_coarse_ctx 依赖 channel-first token 布局；"
             "self.coarse.use_subpixel_ar 必须为 False"
         )
-        B = coarse_tokens.size(0)
-        S, C = self.coarse_size, self.in_channels
-        rec = coarse_tokens.view(B, C, S, S).float() / 255.0
+        with torch.amp.autocast(device_type='cuda', enabled=False):
+            B = coarse_tokens.size(0)
+            S, C = self.coarse_size, self.in_channels
+            rec = coarse_tokens.view(B, C, S, S).float() / 255.0
 
-        if self.use_ycbcr:
-            # ITU-R BT.601 inverse: YCbCr [0,1] → RGB [0,1]
-            y, cb, cr = rec[:, 0], rec[:, 1], rec[:, 2]
-            r = y + 1.402 * (cr - 0.5)
-            g = y - 0.344136 * (cb - 0.5) - 0.714136 * (cr - 0.5)
-            b = y + 1.772 * (cb - 0.5)
-            rec = torch.stack([r, g, b], dim=1)
-        rec = rec.clamp(0.0, 1.0)
+            if self.use_ycbcr:
+                # ITU-R BT.601 inverse: YCbCr [0,1] → RGB [0,1]
+                y, cb, cr = rec[:, 0], rec[:, 1], rec[:, 2]
+                r = y + 1.402 * (cr - 0.5)
+                g = y - 0.344136 * (cb - 0.5) - 0.714136 * (cr - 0.5)
+                b = y + 1.772 * (cb - 0.5)
+                rec = torch.stack([r, g, b], dim=1)
+            rec = rec.clamp(0.0, 1.0)
 
-        x_up = F.interpolate(
-            rec, size=(self.image_size, self.image_size),
-            mode='bilinear', align_corners=False,
-        )
-        if self.use_ycbcr:
-            x_up_tok = rgb_to_ycbcr_int(x_up)
-        else:
-            x_up_tok = (x_up.clamp(0, 1) * 255).round().long()
-        x_up_tok = x_up_tok.reshape(B, -1)                       # (B, H*W*C)
-        coarse_ctx = self.fine.token_embed(x_up_tok)             # (B, T, d_model)
-        return coarse_ctx[:, :-1]                                 # AR shift
+            x_up = F.interpolate(
+                rec, size=(self.image_size, self.image_size),
+                mode='bilinear', align_corners=False,
+            )
+            if self.use_ycbcr:
+                x_up_tok = rgb_to_ycbcr_int(x_up)
+            else:
+                x_up_tok = (x_up.clamp(0, 1) * 255).round().long()
+            x_up_tok = x_up_tok.reshape(B, -1)                       # (B, H*W*C)
+            coarse_ctx = self.fine.token_embed(x_up_tok)             # (B, T, d_model)
+            return coarse_ctx[:, :-1]                                 # AR shift
 
     def forward(self, x, z_loss_weight: float = 1e-4):
         """
