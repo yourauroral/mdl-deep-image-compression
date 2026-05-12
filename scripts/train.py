@@ -104,6 +104,14 @@ def _validate_config(config: dict):
         assert mcfg['coarse_d_model'] % mcfg['coarse_h'] == 0, (
             f"coarse_d_model ({mcfg['coarse_d_model']}) 必须能被 coarse_h ({mcfg['coarse_h']}) 整除"
         )
+        # CC-iGPT 强制 channel-first 对齐 coarse_ctx 的 (B,C,S,S) reshape，
+        # 不允许 use_subpixel_ar=true（cc_igpt.py 内部硬编码 False，否则会与
+        # _compute_coarse_ctx 的 view 假设不一致）。在此 fail fast，避免配置被静默忽略。
+        assert not mcfg.get('use_subpixel_ar', False), (
+            "CC-iGPT 不支持 use_subpixel_ar=true（cc_igpt 强制 channel-first 布局，"
+            "否则 _compute_coarse_ctx 的 view(B,C,S,S) 会与 token 排列错位）。"
+            "请从 ccigpt config 删除 use_subpixel_ar 字段或设为 false。"
+        )
 
 
 def _shared_igpt_kwargs(mcfg: dict) -> dict:
@@ -569,23 +577,37 @@ def main():
     best_bpp = float('inf')
     start_epoch = 1
 
-    # ── DDP state_dict 统一处理 ──
+    # ── DDP / torch.compile state_dict 统一处理 ──
     # DistributedDataParallel 会在所有参数名前加 `module.` 前缀
     # (torch/nn/parallel/distributed.py: DDP.__init__ 将原 module 挂到 self.module)，
-    # 若直接保存 `model.state_dict()`，单卡评测/线性探测脚本加载时所有 key 都将不匹配。
-    # 这里统一用 raw_model（DDP 解包后的原始 nn.Module）来保存；加载时再用
-    # _strip_module_prefix 兼容历史遗留的 `module.` 前缀 checkpoint。
+    # torch.compile 会再包一层 OptimizedModule，state_dict key 多 `_orig_mod.` 前缀。
+    # 两者可能同时出现（DDP(compile(model)) 时 key 形如 `module._orig_mod.xxx`）。
+    # 若直接保存 wrap 后的 `model.state_dict()`，单卡裸模型加载时全部 key mismatch。
+    # 这里统一用 raw_model（解 DDP + 解 compile 后的原始 nn.Module）来保存；加载
+    # 时再用 _strip_module_prefix 兼容历史遗留的前缀 checkpoint。
     #
     # Ref: PyTorch DDP Tutorial
     #      https://docs.pytorch.org/tutorials/intermediate/ddp_tutorial.html
     #      ("Save and Load Checkpoints" 小节推荐 `model.module.state_dict()`)
     raw_model = model.module if distributed else model
+    # torch.compile 包装后 raw_model 是 OptimizedModule，真正的 nn.Module 在
+    # _orig_mod 上；保存其 state_dict 才能被未 compile 的脚本直接 load。
+    raw_model = getattr(raw_model, '_orig_mod', raw_model)
 
     def _strip_module_prefix(sd):
-        """兼容历史遗留 / 外部传入带 `module.` 前缀的 state_dict。"""
-        if any(k.startswith('module.') for k in sd.keys()):
-            return {(k[len('module.'):] if k.startswith('module.') else k): v
-                    for k, v in sd.items()}
+        """剥离 DDP `module.` 与 torch.compile `_orig_mod.` 前缀（任意顺序、可嵌套）。"""
+        prefixes = ('module.', '_orig_mod.')
+        def _strip_one(k):
+            changed = True
+            while changed:
+                changed = False
+                for p in prefixes:
+                    if k.startswith(p):
+                        k = k[len(p):]
+                        changed = True
+            return k
+        if any(k.startswith(prefixes) for k in sd.keys()):
+            return {_strip_one(k): v for k, v in sd.items()}
         return sd
 
     if args.resume:

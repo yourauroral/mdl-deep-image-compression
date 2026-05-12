@@ -5,10 +5,10 @@
 
 功能:
   1. 单模型评测: --checkpoint best.pth
-  2. 消融批量评测: --ablation_dir experiments/ (扫描多个 checkpoint)
-  3. Per-channel BPP 分解: --per_channel (Y/Cb/Cr 或 R/G/B)
-  4. SWA checkpoint 对比: --swa (同时评测 best.pth 和 swa.pth)
-  5. 传统方法对比: --traditional (PNG/WebP lossless BPP)
+  2. Per-channel BPP 分解: --per_channel (Y/Cb/Cr 或 R/G/B)
+  3. SWA checkpoint 对比: --swa (同时评测 best.pth 和 swa.pth)
+  4. 传统方法对比: --traditional (PNG/WebP lossless BPP)
+  5. Per-position BPP 热力图: --heatmap (仅 iGPT)
 
 输出 Markdown 格式的对比表格，可直接粘贴到论文中。
 
@@ -16,10 +16,6 @@ Usage:
     # 单模型评测
     python scripts/evaluate.py --config configs/igpt_cifar10_s.yaml \
         --checkpoint experiments/igpt_cifar10_s/checkpoints/best.pth
-
-    # 消融批量评测（扫描目录下所有实验）
-    python scripts/evaluate.py --config configs/igpt_cifar10_s.yaml \
-        --ablation_dir experiments/
 
     # Per-channel BPP 分解
     python scripts/evaluate.py --config configs/igpt_cifar10_s.yaml \
