@@ -38,7 +38,7 @@ from torchvision.datasets import CIFAR10, CIFAR100
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from scripts.train import _build_model_from_config, _build_ccigpt_from_config
-from src.mdlic.utils import strip_module_prefix
+from src.mdlic.utils import clean_state_dict
 
 
 # ──────────────────────────────────────────────────────────────
@@ -67,15 +67,16 @@ def build_model(mcfg, device):
 def load_checkpoint(model, ckpt_path, device):
     """加载 checkpoint（支持完整 ckpt 和纯 state_dict）。
 
-    透明剥 `module.` / `_orig_mod.` 前缀，兼容历史 DDP / torch.compile ckpt。
+    透明剥 `module.` / `_orig_mod.` 前缀并过滤遗留 persistent=False buffer
+    (如 RoPE inv_freq)，兼容历史 DDP / torch.compile ckpt。
     """
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     if 'model_state_dict' in ckpt:
-        model.load_state_dict(strip_module_prefix(ckpt['model_state_dict']))
+        model.load_state_dict(clean_state_dict(ckpt['model_state_dict']))
         epoch = ckpt.get('epoch', '?')
         print(f"[Linear Probe] 加载 checkpoint (epoch {epoch}): {ckpt_path}")
     else:
-        model.load_state_dict(strip_module_prefix(ckpt))
+        model.load_state_dict(clean_state_dict(ckpt))
         print(f"[Linear Probe] 加载 state_dict: {ckpt_path}")
 
 

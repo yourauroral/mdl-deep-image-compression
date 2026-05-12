@@ -34,7 +34,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from src.mdlic.models.igpt import IGPT
 from src.mdlic.models.cc_igpt import CCIGPT
 from src.mdlic.models.layers import get_fused_kernel_status
-from src.mdlic.utils import seed_everything, compute_bpp, strip_module_prefix
+from src.mdlic.utils import seed_everything, compute_bpp, clean_state_dict
 
 
 def _validate_config(config: dict):
@@ -595,7 +595,7 @@ def main():
     # 两者可能同时出现（DDP(compile(model)) 时 key 形如 `module._orig_mod.xxx`）。
     # 若直接保存 wrap 后的 `model.state_dict()`，单卡裸模型加载时全部 key mismatch。
     # 这里统一用 raw_model（解 DDP + 解 compile 后的原始 nn.Module）来保存；加载
-    # 时再用 _strip_module_prefix 兼容历史遗留的前缀 checkpoint。
+    # 时再用 clean_state_dict 兼容历史遗留的前缀 / inv_freq buffer。
     #
     # Ref: PyTorch DDP Tutorial
     #      https://docs.pytorch.org/tutorials/intermediate/ddp_tutorial.html
@@ -609,12 +609,12 @@ def main():
         ckpt = torch.load(args.resume, map_location=device, weights_only=False)
         if 'model_state_dict' not in ckpt:
             # 允许 resume 参数指向裸 state_dict
-            raw_model.load_state_dict(strip_module_prefix(ckpt))
+            raw_model.load_state_dict(clean_state_dict(ckpt))
             start_epoch = 1
             if rank == 0:
                 print(f"Loaded bare state_dict from '{args.resume}' (resume 将从 epoch 1 开始)")
         else:
-            sd = strip_module_prefix(ckpt['model_state_dict'])
+            sd = clean_state_dict(ckpt['model_state_dict'])
             model_keys = set(raw_model.state_dict().keys())
             ckpt_keys = set(sd.keys())
             missing = model_keys - ckpt_keys

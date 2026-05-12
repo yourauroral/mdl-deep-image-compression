@@ -53,6 +53,29 @@ def strip_module_prefix(sd: dict) -> dict:
     return sd
 
 
+# 已知不再持久化的 buffer 后缀，旧 ckpt 里可能仍保留。
+# - inv_freq: RoPE 频率表，改为 persistent=False 后由模型运行时重算，
+#   旧 ckpt 携带会导致 load_state_dict strict 报 unexpected key。
+_LEGACY_BUFFER_SUFFIXES = ('.inv_freq',)
+
+
+def filter_legacy_buffers(sd: dict) -> dict:
+    """过滤掉历史 ckpt 里残留的非持久 buffer（当前只剔 `.inv_freq`）。
+
+    让旧 ckpt 在新代码下仍可 strict=True 加载，避免每处 loader 各自写 strict=False
+    掩盖真问题。若将来引入新的 persistent=False buffer，按需补 suffix。
+    """
+    if not any(k.endswith(_LEGACY_BUFFER_SUFFIXES) for k in sd.keys()):
+        return sd
+    return {k: v for k, v in sd.items()
+            if not k.endswith(_LEGACY_BUFFER_SUFFIXES)}
+
+
+def clean_state_dict(sd: dict) -> dict:
+    """加载侧标准清洗：strip DDP/compile 前缀 + 过滤遗留 buffer。"""
+    return filter_legacy_buffers(strip_module_prefix(sd))
+
+
 def compute_bpp(ce_loss: torch.Tensor) -> torch.Tensor:
     """
     从交叉熵损失计算 bits/dim (bits per sub-pixel)。
