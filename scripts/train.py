@@ -34,7 +34,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from src.mdlic.models.igpt import IGPT
 from src.mdlic.models.cc_igpt import CCIGPT
 from src.mdlic.models.layers import get_fused_kernel_status
-from src.mdlic.utils import seed_everything, compute_bpp
+from src.mdlic.utils import seed_everything, compute_bpp, strip_module_prefix
 
 
 def _validate_config(config: dict):
@@ -88,6 +88,17 @@ def _validate_config(config: dict):
     assert lr_schedule in ('cosine', 'wsd', 'multistep'), (
         f"train.lr_schedule 必须是 cosine/wsd/multistep，got '{lr_schedule}'"
     )
+
+    # SWA 与 epochs 交叉校验：start_epoch > epochs 时训练不会触发任何 SWA 更新，
+    # 尾部 finalize 走 warning 路径但 swa.pth 不会落盘。提前 fail-fast 避免训完
+    # 才发现 SWA 配错。
+    swa_cfg = tcfg.get('swa', {})
+    if swa_cfg.get('enabled', False):
+        swa_start = swa_cfg.get('start_epoch', 0)
+        assert swa_start <= tcfg['epochs'], (
+            f"train.swa.start_epoch ({swa_start}) 不能大于 train.epochs "
+            f"({tcfg['epochs']})，否则 SWA 永不触发，swa.pth 无法生成。"
+        )
 
     # 以下校验仅适用于自回归模型 (iGPT / CC-iGPT)
     if model_type in ('igpt', 'ccigpt'):
@@ -594,32 +605,16 @@ def main():
     # _orig_mod 上；保存其 state_dict 才能被未 compile 的脚本直接 load。
     raw_model = getattr(raw_model, '_orig_mod', raw_model)
 
-    def _strip_module_prefix(sd):
-        """剥离 DDP `module.` 与 torch.compile `_orig_mod.` 前缀（任意顺序、可嵌套）。"""
-        prefixes = ('module.', '_orig_mod.')
-        def _strip_one(k):
-            changed = True
-            while changed:
-                changed = False
-                for p in prefixes:
-                    if k.startswith(p):
-                        k = k[len(p):]
-                        changed = True
-            return k
-        if any(k.startswith(prefixes) for k in sd.keys()):
-            return {_strip_one(k): v for k, v in sd.items()}
-        return sd
-
     if args.resume:
         ckpt = torch.load(args.resume, map_location=device, weights_only=False)
         if 'model_state_dict' not in ckpt:
             # 允许 resume 参数指向裸 state_dict
-            raw_model.load_state_dict(_strip_module_prefix(ckpt))
+            raw_model.load_state_dict(strip_module_prefix(ckpt))
             start_epoch = 1
             if rank == 0:
                 print(f"Loaded bare state_dict from '{args.resume}' (resume 将从 epoch 1 开始)")
         else:
-            sd = _strip_module_prefix(ckpt['model_state_dict'])
+            sd = strip_module_prefix(ckpt['model_state_dict'])
             model_keys = set(raw_model.state_dict().keys())
             ckpt_keys = set(sd.keys())
             missing = model_keys - ckpt_keys

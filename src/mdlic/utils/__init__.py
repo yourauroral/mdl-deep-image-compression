@@ -28,6 +28,31 @@ def seed_everything(seed: int = 42, deterministic: bool = False):
         torch.backends.cudnn.benchmark = False
 
 
+def strip_module_prefix(sd: dict) -> dict:
+    """剥离 DDP `module.` 与 torch.compile `_orig_mod.` 前缀（任意顺序、可嵌套）。
+
+    DDP 包装给 state_dict key 加 `module.`，torch.compile 再加 `_orig_mod.`；
+    两者可能嵌套出现 `module._orig_mod.xxx`。新版 train.py 已统一保存裸 state_dict
+    （无前缀），但历史 ckpt 仍可能带前缀，本函数让 evaluate / linear_probe / demo
+    等加载侧透明兼容。
+    """
+    prefixes = ('module.', '_orig_mod.')
+
+    def _strip_one(k: str) -> str:
+        changed = True
+        while changed:
+            changed = False
+            for p in prefixes:
+                if k.startswith(p):
+                    k = k[len(p):]
+                    changed = True
+        return k
+
+    if any(k.startswith(prefixes) for k in sd.keys()):
+        return {_strip_one(k): v for k, v in sd.items()}
+    return sd
+
+
 def compute_bpp(ce_loss: torch.Tensor) -> torch.Tensor:
     """
     从交叉熵损失计算 bits/dim (bits per sub-pixel)。

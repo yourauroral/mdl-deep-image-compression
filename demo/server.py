@@ -197,10 +197,11 @@ def _get_cached_model(device):
         # 等非 tensor 字段，weights_only=True 会失败）。若部署到公网或允许第三方上传
         # checkpoint，必须切换到 weights_only=True 并改造为只接收 state_dict。
         ckpt = torch.load(str(ckpt_path), map_location=device, weights_only=False)
+        from src.mdlic.utils import strip_module_prefix
         if "model_state_dict" in ckpt:
-            model.load_state_dict(ckpt["model_state_dict"])
+            model.load_state_dict(strip_module_prefix(ckpt["model_state_dict"]))
         else:
-            model.load_state_dict(ckpt)
+            model.load_state_dict(strip_module_prefix(ckpt))
         model.eval()
 
         _MODEL_CACHE["model"] = model

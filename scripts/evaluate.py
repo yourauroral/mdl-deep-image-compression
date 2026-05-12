@@ -56,7 +56,7 @@ from torch.amp import autocast
 from torch.utils.data import DataLoader
 from src.mdlic.models.igpt import IGPT, rgb_to_ycbcr_int
 from src.mdlic.models.cc_igpt import CCIGPT
-from src.mdlic.utils import compute_bpp
+from src.mdlic.utils import compute_bpp, strip_module_prefix
 from scripts.train import _build_model_from_config, _build_ccigpt_from_config
 
 
@@ -528,14 +528,17 @@ def _load_dataset(config):
 
 
 def _load_checkpoint(model, ckpt_path, device):
-    """加载 checkpoint（支持完整 ckpt 和纯 state_dict）"""
+    """加载 checkpoint（支持完整 ckpt 和纯 state_dict）。
+
+    透明剥 `module.` / `_orig_mod.` 前缀，兼容历史 DDP / torch.compile ckpt。
+    """
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     if 'model_state_dict' in ckpt:
-        model.load_state_dict(ckpt['model_state_dict'])
+        model.load_state_dict(strip_module_prefix(ckpt['model_state_dict']))
         epoch = ckpt.get('epoch', '?')
         return epoch
     else:
-        model.load_state_dict(ckpt)
+        model.load_state_dict(strip_module_prefix(ckpt))
         return '?'
 
 
