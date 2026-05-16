@@ -1,0 +1,66 @@
+exp_name: "ccigpt_cifar10_s_ycocg"
+
+# CC-iGPT + YCoCg-R 主路径（RGB-bit-exact 域）
+#
+# 与 ccigpt_cifar10_s.yaml 的差异：
+#   - color_transform: ycocg_r（替代 BT.601 + round 的有损前端）
+#   - vocab_size: 512（YCoCg-R 后 Co/Cg 偏移需要 512 词表）
+#   - min_lr_ratio: 0.1（cosine 末段保留 10% 峰值 LR，让 SWA 有效）
+#
+# 目标：在严格 RGB-bit-exact 语义下达到 bpd ≤ 2.85。
+# 论据：YCoCg-R 是整数 lifting 可逆变换，去相关效率 ≈ BT.601，但解码端可逐位
+#       重算 ⌊·/2⌋，无 round() 损失（H.264/HEVC 无损模式与 JPEG-XR 都用此变换）。
+
+model:
+  type: ccigpt
+  image_size: 32
+  in_channels: 3
+  vocab_size: 512               # YCoCg-R 后 Co/Cg 偏移到 [1,511]，统一到 512
+  pool_factor: 4                # 32 → 8（coarse 192 tokens, ~6% overhead）
+
+  # fine 模型（与 iGPT-S 一致，~76M 参数；vocab 512 后 token_embed +0.13M）
+  d_model: 512
+  N: 24
+  h: 8
+  d_ff: 1376
+  dropout: 0.0
+
+  # coarse 模型
+  coarse_d_model: 256
+  coarse_N: 6
+  coarse_h: 4
+  coarse_d_ff: 688
+
+  color_transform: "ycocg_r"    # 主开关：bit-exact 整数 lifting 色彩去相关
+  activation_checkpointing: true
+
+data:
+  dataset: "cifar10"
+  train: datasets/
+  valid: datasets/
+  num_workers: 8
+
+train:
+  amp_dtype: "bf16"
+  batch_size: 64
+  grad_accum_steps: 2
+  lr: 3e-4
+  eps: 1e-8
+  epochs: 120                   # 完整训练（RGB ablation 50ep 无过拟合反弹，可放心拉满）
+  log_freq: 50
+  clip_max_norm: 1.0
+  z_loss_weight: 1e-4
+  lr_schedule: "cosine"
+  warmup_epochs: 6              # 5% epochs
+  min_lr_ratio: 0.1             # cosine 末段保 10% 峰值 LR（避免 SWA "假平均"）
+  compile: false
+  swa:
+    enabled: true
+    start_epoch: 108            # 最后 12 epoch 启动 SWA（90% epochs）
+    update_interval: 1
+
+eval:
+  interval: 5
+
+checkpoint:
+  save_interval: 10

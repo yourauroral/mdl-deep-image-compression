@@ -34,7 +34,7 @@ def rgb_to_ycbcr_int(x: torch.Tensor) -> torch.Tensor:
 
   注意：BT.601 的系数为实数，最终的 round() 是多对一映射，因此从原始 RGB 进入
   YCbCr-int 域是**有损前端**（相对原 RGB 近无损）；YCbCr-int 域内部建模/编解码
-  仍严格无损。若需 RGB-bit-exact 无损，传 use_ycbcr=False。
+  仍严格无损。若需 RGB-bit-exact 无损，使用 rgb_to_ycocg_r_int 或 color_transform="none"。
 
   参数:
     x: (B, 3, H, W) float tensor，值域 [0, 1]，通道顺序 RGB
@@ -47,6 +47,86 @@ def rgb_to_ycbcr_int(x: torch.Tensor) -> torch.Tensor:
   cr =  0.5      * r - 0.418688 * g - 0.081312 * b + 0.5
   ycbcr = torch.stack([y, cb, cr], dim=1).clamp(0.0, 1.0)
   return (ycbcr * 255).round().long()
+
+
+# ── YCoCg-R: bit-exact 可逆色彩变换（lifting scheme）──
+#
+# Malvar & Sullivan, "YCoCg-R: A Color Space with RGB Reversibility and Low
+# Dynamic Range," JVT-I014r3, 2003. 已纳入 H.264/HEVC RExt ACT、JPEG-XR 标准。
+#
+# 与 BT.601 + round() 的关键区别：每一步 ⌊·/2⌋ 的输入（Co、Cg）都作为输出存进
+# bitstream，解码端可逐位重算 ⌊·/2⌋，因此整条管线是 RGB-bit-exact 可逆的；
+# BT.601 的浮点 round 没有这个补偿通道，是真正多对一。
+#
+# Token 编码约定（vocab=512 共享 embedding）：
+#   Y  ∈ [0, 255]      → token id ∈ [0, 255]
+#   Co ∈ [-255, 255]   → token id = Co + 256 ∈ [1, 511]
+#   Cg ∈ [-255, 255]   → token id = Cg + 256 ∈ [1, 511]
+# Y 与 Co/Cg 的有效区段自然不相交（Y≤255, Co/Cg id ≥1 但跨 256 边界），模型可
+# 经 channel-first 上下文位置学到"该位置只该出现哪一段 token"。
+_YCOCG_R_OFFSET = 256
+
+
+def rgb_to_ycocg_r_int(x: torch.Tensor) -> torch.Tensor:
+  """RGB float [0,1] → YCoCg-R 整数 token 序列 (channel-first 平铺前的 (B,3,H,W))。
+
+  正向 lifting:
+      Co = R - B
+      t  = B + ⌊Co/2⌋
+      Cg = G - t
+      Y  = t + ⌊Cg/2⌋
+  返回 (B, 3, H, W) long，通道顺序 [Y, Co_idx, Cg_idx]，已偏移到非负 token id。
+  """
+  x_int = (x.clamp(0, 1) * 255).round().long()       # (B, 3, H, W) ∈ [0, 255]
+  R, G, B = x_int[:, 0], x_int[:, 1], x_int[:, 2]
+  Co = R - B
+  t  = B + (Co >> 1)                                  # 算术右移 = ⌊·/2⌋
+  Cg = G - t
+  Y  = t + (Cg >> 1)
+  Co_idx = Co + _YCOCG_R_OFFSET                       # ∈ [1, 511]
+  Cg_idx = Cg + _YCOCG_R_OFFSET
+  return torch.stack([Y, Co_idx, Cg_idx], dim=1)
+
+
+def ycocg_r_int_to_rgb(yc: torch.Tensor) -> torch.Tensor:
+  """YCoCg-R 整数 token (B, 3, H, W) long → RGB float [0,1]。
+
+  反向 lifting:
+      t = Y - ⌊Cg/2⌋
+      G = Cg + t
+      B = t - ⌊Co/2⌋
+      R = Co + B
+  输入 yc 中 Co/Cg 已偏移；本函数先减去 _YCOCG_R_OFFSET 复原符号整数。
+  """
+  Y      = yc[:, 0]
+  Co     = yc[:, 1] - _YCOCG_R_OFFSET
+  Cg     = yc[:, 2] - _YCOCG_R_OFFSET
+  t = Y - (Cg >> 1)
+  G = Cg + t
+  B = t - (Co >> 1)
+  R = Co + B
+  rgb = torch.stack([R, G, B], dim=1).clamp(0, 255).float() / 255.0
+  return rgb
+
+
+_VALID_COLOR_TRANSFORMS = ("bt601", "ycocg_r", "none")
+
+
+def _resolve_color_transform(color_transform: str = None,
+                             use_ycbcr: bool = None) -> str:
+  """统一 color_transform 字段；向后兼容旧的 use_ycbcr 布尔字段。
+
+  优先级：显式 color_transform > use_ycbcr 翻译 > 默认 "bt601"。
+  use_ycbcr=True → "bt601"；use_ycbcr=False → "none"。
+  """
+  if color_transform is not None:
+    assert color_transform in _VALID_COLOR_TRANSFORMS, (
+      f"color_transform 必须是 {_VALID_COLOR_TRANSFORMS} 之一，got '{color_transform}'"
+    )
+    return color_transform
+  if use_ycbcr is not None:
+    return "bt601" if use_ycbcr else "none"
+  return "bt601"
 
 class IGPT(nn.Module):
   """
@@ -69,7 +149,8 @@ class IGPT(nn.Module):
     h=4,
     d_ff=1024,
     dropout=0.1,
-    use_ycbcr: bool = True,
+    color_transform: str = None,
+    use_ycbcr: bool = None,           # deprecated，保留向后兼容
     activation_checkpointing: bool = False,
     # 子像素自回归 (Sub-pixel Autoregression):
     # 将序列从 channel-first [Y_all, Cb_all, Cr_all] 改为 pixel-first
@@ -79,13 +160,20 @@ class IGPT(nn.Module):
     use_subpixel_ar: bool = False,
   ):
     super().__init__()
+    self.color_transform = _resolve_color_transform(color_transform, use_ycbcr)
+    if self.color_transform == "ycocg_r":
+      assert vocab_size >= 512, (
+        f"color_transform='ycocg_r' 需要 vocab_size >= 512（Co/Cg 偏移后 token id "
+        f"上界 511），got vocab_size={vocab_size}"
+      )
     self.seq_len = image_size * image_size * in_channels
     self.in_channels = in_channels
     self.image_size = image_size
     self.vocab_size = vocab_size
     self.d_model = d_model
     self.N_layers = N
-    self.use_ycbcr = use_ycbcr
+    # 保留 use_ycbcr 属性供 demo / evaluate 等旧调用读取（True 当且仅当 BT.601）
+    self.use_ycbcr = (self.color_transform == "bt601")
     self.use_subpixel_ar = use_subpixel_ar
     self.token_embed = nn.Embedding(vocab_size, d_model)
 
@@ -137,12 +225,17 @@ class IGPT(nn.Module):
     """RGB float [0,1] → 整数 token 序列 (B, T)。"""
     B = x.size(0)
     x = x.clamp(0, 1)
-    x = rgb_to_ycbcr_int(x) if self.use_ycbcr else (x * 255).round().long()
+    if self.color_transform == "bt601":
+      x = rgb_to_ycbcr_int(x)
+    elif self.color_transform == "ycocg_r":
+      x = rgb_to_ycocg_r_int(x)
+    else:  # "none"
+      x = (x * 255).round().long()
     if self.use_subpixel_ar:
-        # pixel-first: [Y0,Cb0,Cr0, Y1,Cb1,Cr1, ...]
-        x = x.permute(0, 2, 3, 1).reshape(B, -1)
+      # pixel-first: [Y0,Cb0,Cr0, Y1,Cb1,Cr1, ...]
+      x = x.permute(0, 2, 3, 1).reshape(B, -1)
     else:
-        x = x.reshape(B, -1)
+      x = x.reshape(B, -1)
     return x
 
   def _embed_inputs(self, input_tokens: torch.Tensor,

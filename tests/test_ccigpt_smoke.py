@@ -11,7 +11,12 @@ import torch.nn.functional as F
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from src.mdlic.models.cc_igpt import CCIGPT
-from src.mdlic.models.igpt import IGPT, rgb_to_ycbcr_int
+from src.mdlic.models.igpt import (
+    IGPT,
+    rgb_to_ycbcr_int,
+    rgb_to_ycocg_r_int,
+    ycocg_r_int_to_rgb,
+)
 
 
 @pytest.fixture
@@ -218,3 +223,136 @@ def test_backward_grads_flow(small_ccigpt, device):
     )
     assert coarse_grad_sum > 0
     assert fine_grad_sum > 0
+
+
+# ========================= YCoCg-R 相关测试 =========================
+
+def test_ycocg_r_roundtrip_bit_exact(device):
+    """YCoCg-R lifting 必须 bit-exact 可逆：encode → decode 还原原始 RGB int。
+
+    覆盖：50K 个随机像素 + 8 个角点 (0/255 的全部组合)。
+    """
+    torch.manual_seed(0)
+    # 50K 随机 RGB 像素
+    x_rand = torch.randint(0, 256, (1, 3, 224, 224), device=device)
+    # 角点 8 组合 (0/255)^3，reshape 成 (1, 3, 8, 1)
+    corner = torch.tensor(
+        [[r, g, b] for r in (0, 255) for g in (0, 255) for b in (0, 255)],
+        device=device, dtype=torch.long,
+    ).t().reshape(1, 3, 8, 1).contiguous()
+
+    for x_int in (x_rand, corner):
+        x_float = x_int.float() / 255.0
+        yc = rgb_to_ycocg_r_int(x_float)
+        assert yc.dtype == torch.long
+        # token id 范围: Y ∈ [0,255], Co_idx/Cg_idx ∈ [1, 511]
+        assert yc[:, 0].min().item() >= 0 and yc[:, 0].max().item() <= 255
+        assert yc[:, 1].min().item() >= 1 and yc[:, 1].max().item() <= 511
+        assert yc[:, 2].min().item() >= 1 and yc[:, 2].max().item() <= 511
+
+        rgb_back = ycocg_r_int_to_rgb(yc)
+        rgb_back_int = (rgb_back * 255).round().long()
+        assert torch.equal(rgb_back_int, x_int), (
+            f"YCoCg-R roundtrip 不是 bit-exact (shape={tuple(x_int.shape)})"
+        )
+
+
+def test_ycocg_r_igpt_forward(device):
+    """IGPT(color_transform='ycocg_r', vocab_size=512) 前向能跑通。"""
+    torch.manual_seed(0)
+    m = IGPT(
+        image_size=32, in_channels=3, vocab_size=512,
+        d_model=64, N=2, h=4, d_ff=128, dropout=0.0,
+        color_transform="ycocg_r",
+    ).to(device).eval()
+    x = torch.rand(2, 3, 32, 32, device=device)
+    out = m(x)
+    assert torch.isfinite(out["loss"]).item()
+    assert out["logits"].shape[-1] == 512
+    # token id 不应越界 vocab=512
+    tokens = m._tokenize(x)
+    assert tokens.min().item() >= 0
+    assert tokens.max().item() < 512
+
+
+def test_ycocg_r_vocab_assert():
+    """color_transform='ycocg_r' 配 vocab_size<512 必须 fail-fast。"""
+    with pytest.raises(AssertionError, match="vocab_size"):
+        IGPT(
+            image_size=32, in_channels=3, vocab_size=256,
+            d_model=64, N=2, h=4, d_ff=128, dropout=0.0,
+            color_transform="ycocg_r",
+        )
+
+
+def test_ycocg_r_ccigpt_ctx_consistency(device):
+    """CC-iGPT YCoCg-R 路径下，encoder forward 实际使用的 ctx 必须等于
+    decoder 仅凭 coarse bitstream tokens 重建的 ctx（与 BT.601 路径同一不变量）。"""
+    torch.manual_seed(2)
+    m = CCIGPT(
+        image_size=32, in_channels=3, vocab_size=512, pool_factor=4,
+        fine_d_model=64, fine_N=2, fine_h=2, fine_d_ff=128,
+        coarse_d_model=64, coarse_N=2, coarse_h=2, coarse_d_ff=64,
+        dropout=0.0, color_transform="ycocg_r",
+    ).to(device).eval()
+    x = torch.rand(2, 3, 32, 32, device=device)
+
+    captured = {}
+    orig = m._compute_coarse_ctx
+    def spy(tokens):
+        out = orig(tokens)
+        captured["tokens"] = tokens.detach().clone()
+        captured["ctx"] = out.detach().clone()
+        return out
+    m._compute_coarse_ctx = spy
+    try:
+        with torch.no_grad():
+            m(x)
+    finally:
+        m._compute_coarse_ctx = orig
+
+    ctx_dec = m._compute_coarse_ctx(captured["tokens"])
+    max_diff = (captured["ctx"] - ctx_dec).abs().max().item()
+    assert max_diff < 1e-6, (
+        f"YCoCg-R 路径 ctx 不一致 (max diff={max_diff:.6e})"
+    )
+
+    # tokens 必须可独立从 coarse._tokenize(x_c_float) 复现
+    x_c_float = F.adaptive_avg_pool2d(x.clamp(0, 1), m.coarse_size)
+    expected_tokens = m.coarse._tokenize(x_c_float)
+    assert (captured["tokens"] == expected_tokens).all()
+
+
+def test_ycocg_r_ccigpt_forward_finite(device):
+    """CC-iGPT YCoCg-R 路径 forward 必须给出有限的 loss/bpd 和合法 logits。"""
+    torch.manual_seed(3)
+    m = CCIGPT(
+        image_size=32, in_channels=3, vocab_size=512, pool_factor=4,
+        fine_d_model=64, fine_N=2, fine_h=2, fine_d_ff=128,
+        coarse_d_model=64, coarse_N=2, coarse_h=2, coarse_d_ff=64,
+        dropout=0.0, color_transform="ycocg_r",
+    ).to(device).eval()
+    x = torch.rand(2, 3, 32, 32, device=device)
+    out = m(x)
+    assert torch.isfinite(out["loss"]).item()
+    assert torch.isfinite(out["bpd"]).item()
+    assert 0.0 < out["bpd"].item() < 50.0
+    assert out["logits"].shape[-1] == 512
+
+
+def test_use_ycbcr_backward_compat(device):
+    """旧 use_ycbcr=True/False 接口必须仍然工作（向后兼容）。"""
+    torch.manual_seed(4)
+    m_old_true = IGPT(
+        image_size=32, in_channels=3, vocab_size=256,
+        d_model=64, N=2, h=4, d_ff=128, dropout=0.0,
+        use_ycbcr=True,
+    ).to(device).eval()
+    assert m_old_true.color_transform == "bt601"
+
+    m_old_false = IGPT(
+        image_size=32, in_channels=3, vocab_size=256,
+        d_model=64, N=2, h=4, d_ff=128, dropout=0.0,
+        use_ycbcr=False,
+    ).to(device).eval()
+    assert m_old_false.color_transform == "none"

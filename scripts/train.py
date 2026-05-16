@@ -126,12 +126,17 @@ def _validate_config(config: dict):
 
 
 def _shared_igpt_kwargs(mcfg: dict) -> dict:
-    """提取 iGPT / CC-iGPT 共用字段。"""
+    """提取 iGPT / CC-iGPT 共用字段。
+
+    color_transform 优先；缺省时 fall back 到旧的 use_ycbcr 布尔字段
+    （True→'bt601', False→'none'），以兼容历史 config。
+    """
     return dict(
         in_channels=mcfg["in_channels"],
         vocab_size=mcfg["vocab_size"],
         dropout=mcfg["dropout"],
-        use_ycbcr=mcfg.get("use_ycbcr", True),
+        color_transform=mcfg.get("color_transform"),
+        use_ycbcr=mcfg.get("use_ycbcr"),
         activation_checkpointing=mcfg.get("activation_checkpointing", False),
     )
 
@@ -529,11 +534,19 @@ def main():
     total_epochs  = config["train"]["epochs"]
 
     if lr_schedule == "cosine":
+        # min_lr_ratio: cosine 末段 LR 下限相对峰值的比例（默认 0.0 即衰到 0）。
+        # 设为 >0 可避免末段 LR 过低导致 SWA 平均的是几乎相同的快照（"假平均"）。
+        # Ref: Hagele et al., arXiv:2405.18392 §4.2 — SWA 需要权重仍在变化才有意义。
+        min_lr_ratio = float(config["train"].get("min_lr_ratio", 0.0))
+        assert 0.0 <= min_lr_ratio < 1.0, (
+            f"train.min_lr_ratio 必须在 [0, 1)，got {min_lr_ratio}"
+        )
         def lr_lambda(epoch):
             if epoch < warmup_epochs:
                 return float(epoch + 1) / float(max(1, warmup_epochs))
             progress = float(epoch - warmup_epochs) / float(max(1, total_epochs - warmup_epochs))
-            return 0.5 * (1.0 + math.cos(math.pi * progress))
+            cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+            return min_lr_ratio + (1.0 - min_lr_ratio) * cosine
         scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
     elif lr_schedule == "wsd":
         # WSD: Warmup-Stable-Decay

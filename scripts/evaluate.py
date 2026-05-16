@@ -151,26 +151,26 @@ def evaluate_model(model, loader, device, amp_dtype=None):
 
 @torch.no_grad()
 def evaluate_per_channel(model, loader, device, amp_dtype=None,
-                         use_ycbcr=True, use_subpixel_ar=False):
+                         color_transform: str = "bt601", use_subpixel_ar=False):
     """
-    Per-channel bits/dim 分解 — 分别计算 Y/Cb/Cr (或 R/G/B) 各通道的 bpd。
+    Per-channel bits/dim 分解 — 分别计算 Y/Cb/Cr 或 Y/Co/Cg 或 R/G/B 的 bpd。
 
     原理:
       模型预测整个 token 序列，将 logits 和 targets 按通道拆分后分别计算 CE loss。
 
       序列布局:
-        - channel-first (use_subpixel_ar=False): [Y_all, Cb_all, Cr_all]
-        - pixel-first  (use_subpixel_ar=True):  [Y0,Cb0,Cr0, Y1,Cb1,Cr1, ...]
+        - channel-first (use_subpixel_ar=False): [ch0_all, ch1_all, ch2_all]
+        - pixel-first  (use_subpixel_ar=True):  [c0_p0,c1_p0,c2_p0, c0_p1,...]
 
       bpd_channel = CE_channel / ln(2)
-      bpd_total = mean(bpd_Y, bpd_Cb, bpd_Cr)  (三通道 token 数相等)
+      bpd_total = mean(bpd_ch0, bpd_ch1, bpd_ch2)  (三通道 token 数相等)
 
     参数:
       model: IGPT 模型
       loader: DataLoader
       device: torch.device
       amp_dtype: AMP 精度
-      use_ycbcr: bool — 模型是否使用 YCbCr（决定通道名称）
+      color_transform: "bt601" | "ycocg_r" | "none"，决定通道命名
       use_subpixel_ar: bool — 是否使用子像素自回归（pixel-first 布局）
 
     返回:
@@ -179,7 +179,12 @@ def evaluate_per_channel(model, loader, device, amp_dtype=None,
     """
     model.eval()
     use_amp = amp_dtype is not None and device.type == 'cuda'
-    channel_names = ["Y", "Cb", "Cr"] if use_ycbcr else ["R", "G", "B"]
+    if color_transform == "bt601":
+        channel_names = ["Y", "Cb", "Cr"]
+    elif color_transform == "ycocg_r":
+        channel_names = ["Y", "Co", "Cg"]
+    else:
+        channel_names = ["R", "G", "B"]
 
     # 每个通道的 CE loss 列表
     channel_ce = {ch: [] for ch in channel_names}
@@ -203,17 +208,8 @@ def evaluate_per_channel(model, loader, device, amp_dtype=None,
             )
         logits = out["logits"].float()  # (B, T, vocab_size), T = seq_len - 1
 
-        # 重建 target tokens（与 model forward 一致）
-        if use_ycbcr:
-            tokens = rgb_to_ycbcr_int(x.clamp(0, 1))
-        else:
-            tokens = (x.clamp(0, 1) * 255).round().long()
-
-        if use_subpixel_ar:
-            # pixel-first: (B, C, H, W) → (B, H, W, C) → (B, H*W*C)
-            tokens = tokens.permute(0, 2, 3, 1).reshape(B, -1)
-        else:
-            tokens = tokens.reshape(B, -1)  # channel-first: (B, seq_len)
+        # 复用模型自身的 tokenize 路径（保证与 forward 完全一致）
+        tokens = model._tokenize(x)
         target_tokens = tokens[:, 1:]    # (B, T)
 
         # 按通道拆分: 根据序列布局提取每通道的 token
@@ -271,7 +267,7 @@ def evaluate_per_channel(model, loader, device, amp_dtype=None,
 
 @torch.no_grad()
 def evaluate_position_bpp(model, loader, device, amp_dtype=None,
-                           image_size=32, in_channels=3, use_ycbcr=True,
+                           image_size=32, in_channels=3, color_transform: str = "bt601",
                            use_subpixel_ar=False):
     """
     Per-position BPP 热力图 — 计算每个像素位置的平均 bits-per-pixel。
@@ -293,7 +289,7 @@ def evaluate_position_bpp(model, loader, device, amp_dtype=None,
       amp_dtype: AMP 精度
       image_size: int — 图像边长
       in_channels: int — 通道数
-      use_ycbcr: bool — 模型是否使用 YCbCr
+      color_transform: "bt601" | "ycocg_r" | "none"，决定通道命名
 
     返回:
       heatmap: np.ndarray (H, W) — 每个像素位置的平均 BPP (bits/pixel)
@@ -304,7 +300,12 @@ def evaluate_position_bpp(model, loader, device, amp_dtype=None,
     C = in_channels
     H = W = image_size
     seq_len = H * W * C
-    channel_names = ["Y", "Cb", "Cr"] if use_ycbcr else ["R", "G", "B"]
+    if color_transform == "bt601":
+        channel_names = ["Y", "Cb", "Cr"]
+    elif color_transform == "ycocg_r":
+        channel_names = ["Y", "Co", "Cg"]
+    else:
+        channel_names = ["R", "G", "B"]
 
     # 累积每个 token 位置的 CE loss
     # 序列布局: [ch0_pixel0, ch0_pixel1, ..., ch1_pixel0, ..., ch2_pixelN]
@@ -331,16 +332,8 @@ def evaluate_position_bpp(model, loader, device, amp_dtype=None,
             )
         logits = logits.float()
 
-        # 重建 target tokens（与 model forward 一致）
-        x_clamped = x.clamp(0, 1)
-        if use_ycbcr:
-            tokens = rgb_to_ycbcr_int(x_clamped)
-        else:
-            tokens = (x_clamped * 255).round().long()
-        if use_subpixel_ar:
-            tokens = tokens.permute(0, 2, 3, 1).reshape(B_cur, -1)
-        else:
-            tokens = tokens.reshape(B_cur, -1)
+        # 复用模型自身的 tokenize 路径
+        tokens = model._tokenize(x)
         target_tokens = tokens[:, 1:]
 
         # Per-token CE loss: (B, T)
@@ -597,11 +590,11 @@ def cmd_single(args, config, device):
             print("\n[跳过 per_channel] CC-iGPT 含 coarse 子分支，per-channel 切分仅对 fine 有意义，待实现。")
         else:
             print("\n计算 per-channel bits/dim...")
-            use_ycbcr = mcfg.get("use_ycbcr", True)
+            color_transform = getattr(model, "color_transform", "bt601")
             use_subpixel_ar = mcfg.get("use_subpixel_ar", False)
             channel_bpds, (total_bpd, total_std) = evaluate_per_channel(
                 model, test_loader, device, amp_dtype=amp_dtype,
-                use_ycbcr=use_ycbcr, use_subpixel_ar=use_subpixel_ar
+                color_transform=color_transform, use_subpixel_ar=use_subpixel_ar
             )
             for ch_name, (ch_bpd, ch_std) in channel_bpds.items():
                 print(f"  {ch_name}: {ch_bpd:.4f} ± {ch_std:.4f}")
@@ -635,14 +628,14 @@ def cmd_single(args, config, device):
             print("\n[跳过 heatmap] CC-iGPT 含 coarse 子分支，per-position 热力图待实现。")
         else:
             print("\n生成 per-position BPP 热力图 (bits/pixel)...")
-            use_ycbcr = mcfg.get("use_ycbcr", True)
+            color_transform = getattr(model, "color_transform", "bt601")
             use_subpixel_ar = mcfg.get("use_subpixel_ar", False)
             image_size = mcfg.get("image_size", 32)
             in_channels = mcfg.get("in_channels", 3)
             heatmap, channel_heatmaps = evaluate_position_bpp(
                 model, test_loader, device, amp_dtype=amp_dtype,
                 image_size=image_size, in_channels=in_channels,
-                use_ycbcr=use_ycbcr, use_subpixel_ar=use_subpixel_ar
+                color_transform=color_transform, use_subpixel_ar=use_subpixel_ar
             )
             # 保存到 checkpoint 同目录
             ckpt_dir = os.path.dirname(args.checkpoint) or "."

@@ -3,7 +3,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .igpt import IGPT, rgb_to_ycbcr_int
+from .igpt import (
+    IGPT,
+    rgb_to_ycbcr_int,
+    rgb_to_ycocg_r_int,
+    ycocg_r_int_to_rgb,
+    _resolve_color_transform,
+)
 
 
 class CCIGPT(nn.Module):
@@ -32,7 +38,8 @@ class CCIGPT(nn.Module):
         # coarse 模型（小且浅）
         coarse_d_model=256, coarse_N=6, coarse_h=4, coarse_d_ff=688,
         dropout=0.1,
-        use_ycbcr: bool = True,
+        color_transform: str = None,
+        use_ycbcr: bool = None,         # deprecated，保留向后兼容
         activation_checkpointing: bool = False,
     ):
         super().__init__()
@@ -44,10 +51,11 @@ class CCIGPT(nn.Module):
         self.in_channels = in_channels
         self.pool_factor = pool_factor
         self.coarse_size = image_size // pool_factor
+        self.color_transform = _resolve_color_transform(color_transform, use_ycbcr)
 
         shared = dict(
             in_channels=in_channels, vocab_size=vocab_size, dropout=dropout,
-            use_ycbcr=use_ycbcr,
+            color_transform=self.color_transform,
             activation_checkpointing=activation_checkpointing,
             use_subpixel_ar=False,  # CC-iGPT 强制 channel-first 对齐 ctx
         )
@@ -68,7 +76,8 @@ class CCIGPT(nn.Module):
         self.d_model = fine_d_model
         self.N_layers = fine_N
         self.vocab_size = vocab_size
-        self.use_ycbcr = use_ycbcr
+        # 兼容旧调用：True 当且仅当 BT.601 路径
+        self.use_ycbcr = (self.color_transform == "bt601")
 
     def _compute_coarse_ctx(self, coarse_tokens: torch.Tensor) -> torch.Tensor:
         """coarse 量化 token (B, N_c) → fine 用 additive coarse context (B, T_fine-1, d_model)。
@@ -77,10 +86,15 @@ class CCIGPT(nn.Module):
         独立从 token 重建出与 encoder 相同的 fine 条件分布。因此本路径输入是
         **量化后的 coarse token**（不是 float），整个管线 encoder/decoder 共用。
 
-        管线：
-          token (YCbCr or RGB int 0-255) → 反量化 float → 若是 YCbCr 则 BT.601 inverse
-          → bilinear UP 到 fine 分辨率 → clamp → 再 tokenize (与 fine encoder 同规则)
-          → fine.token_embed
+        管线（按 color_transform 分支）：
+          1. token (B, N_c) → reshape (B, C, S, S)
+          2. 反量化到 RGB float [0,1]:
+             - bt601:   YCbCr-int / 255 → BT.601⁻¹ → clamp
+             - ycocg_r: ycocg_r_int_to_rgb（lifting 逆变换，bit-exact）
+             - none:    int / 255（已经在 RGB 域）
+          3. bilinear UP 到 fine 分辨率
+          4. 用 fine encoder 的 tokenize 规则重新 tokenize
+          5. fine.token_embed 查表 → 丢掉最后一个 token 做 AR shift
 
         强制 autocast(enabled=False)：encoder/decoder 必须在完全相同的 dtype 下
         跑此函数才能 bit-exact。bilinear interp + round + token_embed 在 bf16/fp16
@@ -97,23 +111,31 @@ class CCIGPT(nn.Module):
         with torch.amp.autocast(device_type='cuda', enabled=False):
             B = coarse_tokens.size(0)
             S, C = self.coarse_size, self.in_channels
-            rec = coarse_tokens.view(B, C, S, S).float() / 255.0
+            ct = self.color_transform
 
-            if self.use_ycbcr:
+            if ct == "ycocg_r":
+                # YCoCg-R: 整数 lifting 逆变换直接得到 RGB float
+                yc = coarse_tokens.view(B, C, S, S)
+                rec = ycocg_r_int_to_rgb(yc)                # (B, 3, S, S) float [0,1]
+            elif ct == "bt601":
+                rec = coarse_tokens.view(B, C, S, S).float() / 255.0
                 # ITU-R BT.601 inverse: YCbCr [0,1] → RGB [0,1]
                 y, cb, cr = rec[:, 0], rec[:, 1], rec[:, 2]
                 r = y + 1.402 * (cr - 0.5)
                 g = y - 0.344136 * (cb - 0.5) - 0.714136 * (cr - 0.5)
                 b = y + 1.772 * (cb - 0.5)
-                rec = torch.stack([r, g, b], dim=1)
-            rec = rec.clamp(0.0, 1.0)
+                rec = torch.stack([r, g, b], dim=1).clamp(0.0, 1.0)
+            else:  # "none"
+                rec = coarse_tokens.view(B, C, S, S).float() / 255.0
 
             x_up = F.interpolate(
                 rec, size=(self.image_size, self.image_size),
                 mode='bilinear', align_corners=False,
             )
-            if self.use_ycbcr:
+            if ct == "bt601":
                 x_up_tok = rgb_to_ycbcr_int(x_up)
+            elif ct == "ycocg_r":
+                x_up_tok = rgb_to_ycocg_r_int(x_up)
             else:
                 x_up_tok = (x_up.clamp(0, 1) * 255).round().long()
             x_up_tok = x_up_tok.reshape(B, -1)                       # (B, H*W*C)

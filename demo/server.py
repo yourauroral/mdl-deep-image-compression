@@ -219,25 +219,14 @@ def _make_heatmap_b64(model, x, logits):
     """
     import torch
     import torch.nn.functional as F
-    try:
-        from src.mdlic.models.igpt import rgb_to_ycbcr_int
-    except ImportError:
-        return None
 
     H = W = model.image_size
     C = model.in_channels
-    use_ycbcr = getattr(model, "use_ycbcr", True)
     use_subpixel_ar = getattr(model, "use_subpixel_ar", False)
 
     logits = logits.float()
-    int_tokens = (rgb_to_ycbcr_int(x.clamp(0, 1)) if use_ycbcr
-                  else (x.clamp(0, 1) * 255).round().long())
-    # token 排布必须与 IGPT._tokenize 一致：subpixel AR 是 pixel-first
-    # [Y0,Cb0,Cr0, Y1,Cb1,Cr1, ...]，否则是 channel-first [Y_all|Cb_all|Cr_all]。
-    if use_subpixel_ar:
-        tokens = int_tokens.permute(0, 2, 3, 1).reshape(1, -1)
-    else:
-        tokens = int_tokens.reshape(1, -1)
+    # 复用模型自身的 tokenize 路径，自动适配 BT.601 / YCoCg-R / none
+    tokens = model._tokenize(x.clamp(0, 1))
     target = tokens[:, 1:]
 
     per_token_ce = F.cross_entropy(
