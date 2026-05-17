@@ -88,10 +88,13 @@ def dmol_log_prob(params: torch.Tensor, target_pixels_int: torch.Tensor,
     target = target_pixels_int.float() / 127.5 - 1.0                  # (B, T, 3)
 
     # 通道间均值耦合（关键的"自带通道去相关"机制）
+    # 注意：mean + coeffs·R 可能跑出 [-1, 1] (mean 已 bound 但叠加耦合后量级 ~2)，
+    # 配合 inv_s = exp(-log_scale_min) ≈ 148 让 sigmoid 饱和致梯度爆炸。
+    # 解决：耦合后再过 tanh 把 mean_eff 重新 bound 到 [-1, 1]。
     R, G, _B = target[..., 0:1], target[..., 1:2], target[..., 2:3]    # (B, T, 1) each
     mean_R = means[..., 0, :]                                          # (B, T, n_mix)
-    mean_G = means[..., 1, :] + coeffs[..., 0, :] * R
-    mean_B = means[..., 2, :] + coeffs[..., 1, :] * R + coeffs[..., 2, :] * G
+    mean_G = torch.tanh(means[..., 1, :] + coeffs[..., 0, :] * R)
+    mean_B = torch.tanh(means[..., 2, :] + coeffs[..., 1, :] * R + coeffs[..., 2, :] * G)
 
     log_s_R = log_scales[..., 0, :]
     log_s_G = log_scales[..., 1, :]
