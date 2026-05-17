@@ -82,7 +82,10 @@ def _validate_config(config: dict):
     assert tcfg.get('grad_accum_steps', 1) >= 1, f"train.grad_accum_steps 必须 >= 1"
 
     amp_dtype = tcfg.get('amp_dtype', 'fp16')
-    assert amp_dtype in ('fp16', 'bf16'), f"train.amp_dtype 必须是 'fp16' 或 'bf16'，got '{amp_dtype}'"
+    # None / "none" / "fp32" 均表示禁用 AMP 走 fp32 训练（DMoL 等数值敏感路径需要）。
+    assert amp_dtype in ('fp16', 'bf16', None, 'none', 'fp32'), (
+        f"train.amp_dtype 必须是 'fp16' / 'bf16' / null / 'none' / 'fp32'，got '{amp_dtype}'"
+    )
 
     lr_schedule = tcfg.get('lr_schedule', 'cosine')
     assert lr_schedule in ('cosine', 'wsd', 'multistep'), (
@@ -588,8 +591,14 @@ def main():
     else:
         scheduler = None
 
-    # Mixed precision
-    amp_dtype = torch.bfloat16 if config["train"].get("amp_dtype", "fp16") == "bf16" else torch.float16
+    # Mixed precision: None/"none"/"fp32" → 禁用 AMP 走 fp32（DMoL 等数值敏感路径）
+    amp_cfg = config["train"].get("amp_dtype", "fp16")
+    if amp_cfg in (None, "none", "fp32"):
+        amp_dtype = None
+    elif amp_cfg == "bf16":
+        amp_dtype = torch.bfloat16
+    else:
+        amp_dtype = torch.float16
     scaler = GradScaler() if amp_dtype == torch.float16 else None
     grad_accum_steps = config["train"].get("grad_accum_steps", 1)
 
