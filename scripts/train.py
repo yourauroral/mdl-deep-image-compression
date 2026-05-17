@@ -147,6 +147,8 @@ def _build_model_from_config(mcfg: dict, device) -> IGPT:
         image_size=mcfg["image_size"],
         d_model=mcfg["d_model"], N=mcfg["N"], h=mcfg["h"], d_ff=mcfg["d_ff"],
         use_subpixel_ar=mcfg.get("use_subpixel_ar", False),
+        output_head=mcfg.get("output_head", "softmax"),
+        n_mixtures=mcfg.get("n_mixtures", 10),
         **_shared_igpt_kwargs(mcfg),
     ).to(device)
 
@@ -242,7 +244,11 @@ def train_one_epoch(model, loader, optimizer, scaler, device,
                 if "bpd" in out and out["bpd"] is not None:
                     bpd = out["bpd"]
                 else:
-                    bpd = compute_bpd(ce_loss)
+                    bpd = compute_bpd(
+                        ce_loss,
+                        unit=out.get("loss_unit", "per_subpixel_nat"),
+                        in_channels=C,
+                    )
             loss_scaled = loss / grad_accum_steps
             if scaler is not None:
                 scaler.scale(loss_scaled).backward()
@@ -341,7 +347,11 @@ def validate(model, loader, device, amp_dtype=None):
         if "bpd" in out and out["bpd"] is not None:
             bpd = out["bpd"]
         else:
-            bpd = compute_bpd(ce_loss)
+            bpd = compute_bpd(
+                ce_loss,
+                unit=out.get("loss_unit", "per_subpixel_nat"),
+                in_channels=C,
+            )
         bpd_val = bpd.item()
         loss_val = loss.item()
         total_bpd_weighted += bpd_val * B

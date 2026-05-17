@@ -76,11 +76,20 @@ def clean_state_dict(sd: dict) -> dict:
     return filter_legacy_buffers(strip_module_prefix(sd))
 
 
-def compute_bpd(ce_loss: torch.Tensor) -> torch.Tensor:
+def compute_bpd(ce_loss: torch.Tensor, unit: str = "per_subpixel_nat",
+                in_channels: int = 3) -> torch.Tensor:
     """
-    从交叉熵损失计算 bits/dim (bpd, bits per sub-pixel)。
+    从损失计算 bits/dim (bpd, bits per sub-pixel)。
 
-    bits/dim = CE_loss / ln(2)
+    bits/dim = CE_loss / ln(2)（per-subpixel）
+             = NLL_per_pixel / ln(2) / C（per-pixel，需要按通道数摊到 sub-pixel）
+
+    参数:
+      ce_loss:     标量损失张量
+      unit:        损失单位，影响是否需要再除以通道数：
+                     "per_subpixel_nat" — 每 sub-pixel 平均 nat（softmax 路径默认）
+                     "per_pixel_nat"    — 每 pixel 平均 nat（DMoL 路径），bpd 还要 ÷ C
+      in_channels: 仅 unit="per_pixel_nat" 时使用
 
     注：术语区分——bpd（bits per dimension/sub-pixel）是生成模型无损压缩
     文献的标准度量；bpp（bits per pixel）= bpd × C（彩色图 C=3）。
@@ -92,4 +101,8 @@ def compute_bpd(ce_loss: torch.Tensor) -> torch.Tensor:
           最优编码长度 = -log₂ p(x) = -ln p(x) / ln(2)
       [2] PixelCNN++ (Salimans 2017) — CIFAR-10: 2.92 bits/dim
     """
+    if unit == "per_pixel_nat":
+        return ce_loss / math.log(2) / in_channels
+    if unit != "per_subpixel_nat":
+        raise ValueError(f"compute_bpd: unknown unit '{unit}'")
     return ce_loss / math.log(2)
