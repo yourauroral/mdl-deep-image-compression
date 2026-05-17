@@ -120,3 +120,45 @@ def test_dmol_loss_backward(device):
     assert hidden.grad.abs().sum().item() > 0
     assert head.proj.weight.grad is not None
     assert head.proj.weight.grad.abs().sum().item() > 0
+
+
+def test_dmol_random_init_loss_reasonable(device):
+    """关键回归测试：random init 下 loss 应接近三通道 uniform prior (~16.6 nat/pixel)。
+
+    数学先验：每个 bin 概率 ≈ 1/256，log(1/256) = -5.54 nat；三通道相加 ≈ 16.6 nat。
+    未训练状态下 loss 应略高于此值（mixture/scale 未优化），但绝不能飞到 30+。
+
+    修复前 (means 未 tanh bound)：mean ∈ [-5, 5] 让 sigmoid 完全饱和，单 token
+    log-prob 飞至 -10000+ nat。这条测试守护此回归不复发。
+    """
+    torch.manual_seed(0)
+    B, T, d_model, n_mix = 4, 1024, 256, 10
+    head = DMoLHead(d_model, n_mixtures=n_mix).to(device)
+    hidden = torch.randn(B, T, d_model, device=device)
+    params = head(hidden)
+    target = torch.randint(0, 256, (B, T, 3), device=device)
+    loss = dmol_loss(params, target, n_mixtures=n_mix)
+    val = loss.item()
+    assert torch.isfinite(loss).item(), f"random init loss 非有限: {val}"
+    # uniform prior 是 16.6 nat/pixel；未训练状态合理范围 [15, 22]
+    # > 30 说明 means 未 bound（mean 偏离 target 域）或其他数值崩溃
+    assert val < 25.0, (
+        f"random init loss = {val:.4f} nat/pixel 严重偏高（期望 < 25）。"
+        f"可能 means tanh bound 失效，复发了 ep1 loss 单调上升 bug"
+    )
+
+
+def test_dmol_means_bounded(device):
+    """means 在 _split_mixture_params 输出后必须 abs ≤ 1（tanh bound 后）。"""
+    from src.mdlic.models.dmol import _split_mixture_params
+    torch.manual_seed(0)
+    n_mix = 10
+    # 故意给非常大的 raw params，验证 tanh 把它们压到 [-1, 1]
+    params = torch.randn(2, 32, n_mix * 10, device=device) * 10.0
+    _, means, _, coeffs = _split_mixture_params(params, n_mix)
+    assert means.abs().max().item() <= 1.0 + 1e-6, (
+        f"means 未 tanh bound: max abs = {means.abs().max().item():.4f}"
+    )
+    assert coeffs.abs().max().item() <= 1.0 + 1e-6, (
+        f"coeffs 未 tanh bound: max abs = {coeffs.abs().max().item():.4f}"
+    )

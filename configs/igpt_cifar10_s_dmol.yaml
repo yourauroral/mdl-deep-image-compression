@@ -39,10 +39,14 @@ data:
   num_workers: 8
 
 train:
-  amp_dtype: "bf16"
-  # seq 缩短 3× → 显存富裕，batch 可放大；effective batch = 128 * 2 = 256
-  batch_size: 128
-  grad_accum_steps: 1
+  # DMoL 文献全部 fp32（PixelCNN++ / PixelSNAIL / Sparse Transformer），
+  # bf16 下 DMoL CDF 差分易触发数值溢出导致 ep1 loss 飘升。amp_dtype=null
+  # 保持 fp32 训练；显存代价用 batch/2 + grad_accum×2 补回。
+  amp_dtype: null
+  # seq 缩短 3× 后理论上可放大 batch，但 fp32 显存翻倍，所以回到 64；
+  # effective batch = 64 * 2 (DDP) * 2 (grad_accum) = 256
+  batch_size: 64
+  grad_accum_steps: 2
   lr: 3e-4
   eps: 1e-8
   epochs: 200

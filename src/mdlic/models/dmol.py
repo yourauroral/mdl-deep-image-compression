@@ -25,7 +25,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-_LOG_SCALE_MIN = -7.0
+_LOG_SCALE_MIN = -5.0
 
 
 def _split_mixture_params(params: torch.Tensor, n_mix: int):
@@ -33,15 +33,21 @@ def _split_mixture_params(params: torch.Tensor, n_mix: int):
 
     返回:
       logit_w:  (B, T, n_mix)
-      means:    (B, T, 3, n_mix)        # [R, G, B] × mixture
+      means:    (B, T, 3, n_mix)        # [R, G, B] × mixture, tanh bound 到 [-1, 1]
       log_scales: (B, T, 3, n_mix)      # clamp 到 >= _LOG_SCALE_MIN
       coeffs:   (B, T, 3, n_mix)        # [αGR, βBR, βBG] × mixture, tanh 压到 (-1,1)
+
+    means 必须 tanh bound 到 target 归一化范围 [-1, 1]，否则 random init 时
+    mean 量级在 [-5, 5]，配合 inv_s = exp(-log_s_min) 让 sigmoid 完全饱和，
+    CDF 差分变 0 后触发 log_pdf fallback，单 token log-prob 飞至 -10000+ nat
+    导致 batch 平均 loss 爆炸。PixelCNN++ 原版关键细节，遗漏会致 ep1 train_bpd
+    单调上升。
     """
     B, T, D = params.shape
     assert D == n_mix * 10, f"DMoL 参数维度应为 n_mix*10={n_mix*10}, got {D}"
     params = params.view(B, T, n_mix, 10)
     logit_w = params[..., 0]                                # (B, T, n_mix)
-    means = params[..., 1:4].permute(0, 1, 3, 2).contiguous()      # (B, T, 3, n_mix)
+    means = torch.tanh(params[..., 1:4]).permute(0, 1, 3, 2).contiguous()      # (B, T, 3, n_mix)
     log_scales = params[..., 4:7].clamp(min=_LOG_SCALE_MIN).permute(0, 1, 3, 2).contiguous()
     coeffs = torch.tanh(params[..., 7:10]).permute(0, 1, 3, 2).contiguous()
     return logit_w, means, log_scales, coeffs
@@ -121,7 +127,9 @@ def dmol_log_prob(params: torch.Tensor, target_pixels_int: torch.Tensor,
         out = torch.where(is_low_edge, log_prob_low,
                           torch.where(is_high_edge, log_prob_high, log_prob_mid))
         # 当 cdf_plus - cdf_minus 数值过小（远离 mean 的尾部），退回 log_pdf 近似
-        too_small = (cdf_plus - cdf_minus) < 1e-5
+        # 阈值 1e-12 仅捕真正的数值溢出，避免未训练初期大量 token 命中 fallback
+        # 引入大噪声（这是 ep1 loss 单调上升的次要诱因之一）
+        too_small = (cdf_plus - cdf_minus) < 1e-12
         out = torch.where(too_small & ~is_low_edge & ~is_high_edge, log_pdf, out)
         return out
 
