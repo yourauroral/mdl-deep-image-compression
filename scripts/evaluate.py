@@ -125,11 +125,7 @@ def evaluate_model(model, loader, device, amp_dtype=None):
         if "bpd" in out and out["bpd"] is not None:
             bpd = out["bpd"]
         else:
-            bpd = compute_bpd(
-                out["ce_loss"],
-                unit=out.get("loss_unit", "per_subpixel_nat"),
-                in_channels=C,
-            )
+            bpd = compute_bpd(out["ce_loss"])
         bpd_val = bpd.item()
         bpd_per_batch.append(bpd_val)
         bpd_weighted_sum += bpd_val * B
@@ -206,12 +202,6 @@ def evaluate_per_channel(model, loader, device, amp_dtype=None,
             out = model(x)
 
         if out["logits"] is None:
-            if getattr(model, "output_head", "softmax") == "dmol":
-                raise RuntimeError(
-                    "evaluate_per_channel 不支持 DMoL 输出头：DMoL 的 mixture 参数"
-                    "无法按 token 通道独立切片。请去掉 --per_channel，或在 softmax "
-                    "ckpt 上跑此项。"
-                )
             raise RuntimeError(
                 "evaluate_per_channel: model returned logits=None even after disabling "
                 "fused linear CE. Please check igpt.py forward path."
@@ -336,12 +326,6 @@ def evaluate_position_bpp(model, loader, device, amp_dtype=None,
 
         logits = out["logits"]
         if logits is None:
-            if getattr(model, "output_head", "softmax") == "dmol":
-                raise RuntimeError(
-                    "evaluate_position_bpp 当前实现依赖 softmax logits；DMoL 路径"
-                    "下需要走 dmol_log_prob 重写热力图（per-pixel NLL）。请去掉 "
-                    "--heatmap，或后续补 DMoL 分支。"
-                )
             raise RuntimeError(
                 "evaluate_position_bpp: model returned logits=None. "
                 "Please check igpt.py forward path."

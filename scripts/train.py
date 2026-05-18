@@ -82,10 +82,7 @@ def _validate_config(config: dict):
     assert tcfg.get('grad_accum_steps', 1) >= 1, f"train.grad_accum_steps 必须 >= 1"
 
     amp_dtype = tcfg.get('amp_dtype', 'fp16')
-    # None / "none" / "fp32" 均表示禁用 AMP 走 fp32 训练（DMoL 等数值敏感路径需要）。
-    assert amp_dtype in ('fp16', 'bf16', None, 'none', 'fp32'), (
-        f"train.amp_dtype 必须是 'fp16' / 'bf16' / null / 'none' / 'fp32'，got '{amp_dtype}'"
-    )
+    assert amp_dtype in ('fp16', 'bf16'), f"train.amp_dtype 必须是 'fp16' 或 'bf16'，got '{amp_dtype}'"
 
     lr_schedule = tcfg.get('lr_schedule', 'cosine')
     assert lr_schedule in ('cosine', 'wsd', 'multistep'), (
@@ -150,8 +147,6 @@ def _build_model_from_config(mcfg: dict, device) -> IGPT:
         image_size=mcfg["image_size"],
         d_model=mcfg["d_model"], N=mcfg["N"], h=mcfg["h"], d_ff=mcfg["d_ff"],
         use_subpixel_ar=mcfg.get("use_subpixel_ar", False),
-        output_head=mcfg.get("output_head", "softmax"),
-        n_mixtures=mcfg.get("n_mixtures", 10),
         **_shared_igpt_kwargs(mcfg),
     ).to(device)
 
@@ -247,11 +242,7 @@ def train_one_epoch(model, loader, optimizer, scaler, device,
                 if "bpd" in out and out["bpd"] is not None:
                     bpd = out["bpd"]
                 else:
-                    bpd = compute_bpd(
-                        ce_loss,
-                        unit=out.get("loss_unit", "per_subpixel_nat"),
-                        in_channels=C,
-                    )
+                    bpd = compute_bpd(ce_loss)
             loss_scaled = loss / grad_accum_steps
             if scaler is not None:
                 scaler.scale(loss_scaled).backward()
@@ -350,11 +341,7 @@ def validate(model, loader, device, amp_dtype=None):
         if "bpd" in out and out["bpd"] is not None:
             bpd = out["bpd"]
         else:
-            bpd = compute_bpd(
-                ce_loss,
-                unit=out.get("loss_unit", "per_subpixel_nat"),
-                in_channels=C,
-            )
+            bpd = compute_bpd(ce_loss)
         bpd_val = bpd.item()
         loss_val = loss.item()
         total_bpd_weighted += bpd_val * B
@@ -591,14 +578,8 @@ def main():
     else:
         scheduler = None
 
-    # Mixed precision: None/"none"/"fp32" → 禁用 AMP 走 fp32（DMoL 等数值敏感路径）
-    amp_cfg = config["train"].get("amp_dtype", "fp16")
-    if amp_cfg in (None, "none", "fp32"):
-        amp_dtype = None
-    elif amp_cfg == "bf16":
-        amp_dtype = torch.bfloat16
-    else:
-        amp_dtype = torch.float16
+    # Mixed precision
+    amp_dtype = torch.bfloat16 if config["train"].get("amp_dtype", "fp16") == "bf16" else torch.float16
     scaler = GradScaler() if amp_dtype == torch.float16 else None
     grad_accum_steps = config["train"].get("grad_accum_steps", 1)
 

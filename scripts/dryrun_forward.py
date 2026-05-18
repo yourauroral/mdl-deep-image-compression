@@ -29,26 +29,16 @@ from scripts.train import _build_model_from_config, _build_ccigpt_from_config
 from src.mdlic.models.layers import get_fused_kernel_status
 
 
-def _check_finite(out: dict, tag: str, in_channels: int = 3):
-    """检查 loss 和 ce_loss 是否有限（非 NaN/Inf）。
-
-    按 loss_unit 分发 bpd 计算：
-      per_subpixel_nat — bpd = ce / ln2（softmax 路径）
-      per_pixel_nat    — bpd = ce / ln2 / C（DMoL 路径）
-    """
+def _check_finite(out: dict, tag: str):
+    """检查 loss 和 ce_loss 是否有限（非 NaN/Inf）。"""
     loss_val = out['loss'].item()
     ce_val = out['ce_loss'].item()
     assert math.isfinite(loss_val), f"[{tag}] loss is {loss_val} (NaN/Inf!)"
     assert math.isfinite(ce_val), f"[{tag}] ce_loss is {ce_val} (NaN/Inf!)"
-    unit = out.get("loss_unit", "per_subpixel_nat")
-    if unit == "per_pixel_nat":
-        bpd = ce_val / math.log(2) / in_channels
-    else:
-        bpd = ce_val / math.log(2)
+    bpd = ce_val / math.log(2)
     assert 0.0 < bpd < 50.0, f"[{tag}] bits/dim={bpd:.2f} 超出合理范围 (0, 50)"
     logits_info = out['logits'].shape if out['logits'] is not None else "None"
-    print(f"  [{tag}] loss={loss_val:.4f}  ce_loss={ce_val:.4f}  bits/dim={bpd:.2f}  "
-          f"unit={unit}  logits={logits_info}")
+    print(f"  [{tag}] loss={loss_val:.4f}  ce_loss={ce_val:.4f}  bits/dim={bpd:.2f}  logits={logits_info}")
 
 
 def main():
@@ -81,18 +71,11 @@ def main():
     out = model(x)
     _check_finite(out, f"default ({model_type})")
 
-    # Weight tying 验证（仅 softmax 路径有；DMoL head 与 token_embed 不共享）
+    # Weight tying 验证
     if model_type == "ccigpt":
         assert model.fine.head.weight is model.fine.token_embed.weight, "Weight tying failed on fine!"
         assert model.coarse.head.weight is model.coarse.token_embed.weight, "Weight tying failed on coarse!"
         print("  [weight tying] OK — fine.head & coarse.head 都共享 embed")
-    elif getattr(model, "output_head", "softmax") == "dmol":
-        assert isinstance(model.token_embed, torch.nn.ModuleList), (
-            "DMoL 路径 token_embed 应为 ModuleList (三通道分别 embed)"
-        )
-        assert len(model.token_embed) == 3
-        assert hasattr(model.head, "proj"), "DMoLHead 应有 .proj Linear"
-        print("  [DMoL head] OK — 三通道独立 embed + DMoLHead 投影 (无 weight tying)")
     else:
         assert model.head.weight is model.token_embed.weight, "Weight tying failed!"
         print("  [weight tying] OK — head.weight is token_embed.weight")

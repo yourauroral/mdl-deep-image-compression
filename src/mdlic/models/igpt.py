@@ -4,7 +4,6 @@ import torch.nn.functional as F
 import math
 
 from .layers import GPTBlock, RMSNorm
-from .dmol import DMoLHead, dmol_loss, dmol_log_prob
 
 # Fused CE + z-loss Triton kernel（可选）：
 # 将 softmax、cross-entropy、z-loss 合并为一次 kernel launch，
@@ -17,9 +16,6 @@ try:
 except ImportError:
     _fused_ce_zloss = None
     _USE_FUSED_CE = False
-
-
-_VALID_OUTPUT_HEADS = ("softmax", "dmol")
 
 
 def rgb_to_ycbcr_int(x: torch.Tensor) -> torch.Tensor:
@@ -162,46 +158,15 @@ class IGPT(nn.Module):
     #   p(Cb_i | Y_i, context)  和  p(Cr_i | Y_i, Cb_i, context)
     # Ref: Salimans et al., "PixelCNN++," ICLR 2017 — 通道间条件依赖
     use_subpixel_ar: bool = False,
-    # 输出头：
-    #   "softmax" — 默认，per-subpixel 256 类 + weight tying + fused CE+z-loss
-    #   "dmol"    — 离散化 logistic 混合 (PixelCNN++ §2.2)，pixel-AR (seq=H·W),
-    #               输出端不与 token_embed 共享，自带通道间均值耦合
-    output_head: str = "softmax",
-    n_mixtures: int = 10,
   ):
     super().__init__()
-    assert output_head in _VALID_OUTPUT_HEADS, (
-      f"output_head 必须是 {_VALID_OUTPUT_HEADS} 之一，got '{output_head}'"
-    )
-    self.output_head = output_head
-    self.n_mixtures = n_mixtures
-
-    if output_head == "dmol":
-      assert in_channels == 3, "DMoL 输出头硬绑 RGB 三通道"
-      # DMoL 路径强制：自带通道去相关，无需色彩前端；用 pixel-AR (每位置一个 pixel)
-      resolved_ct = _resolve_color_transform(color_transform, use_ycbcr)
-      assert resolved_ct == "none", (
-        f"DMoL 输出头要求 color_transform='none'（DMoL 自带通道去相关），"
-        f"got '{resolved_ct}'。"
+    self.color_transform = _resolve_color_transform(color_transform, use_ycbcr)
+    if self.color_transform == "ycocg_r":
+      assert vocab_size >= 512, (
+        f"color_transform='ycocg_r' 需要 vocab_size >= 512（Co/Cg 偏移后 token id "
+        f"上界 511），got vocab_size={vocab_size}"
       )
-      assert not use_subpixel_ar, (
-        "DMoL 输出头自身就是 pixel-AR；use_subpixel_ar 必须为 False。"
-      )
-      self.color_transform = "none"
-    else:
-      self.color_transform = _resolve_color_transform(color_transform, use_ycbcr)
-      if self.color_transform == "ycocg_r":
-        assert vocab_size >= 512, (
-          f"color_transform='ycocg_r' 需要 vocab_size >= 512（Co/Cg 偏移后 token id "
-          f"上界 511），got vocab_size={vocab_size}"
-        )
-    # seq_len 取决于 AR 顺序：
-    #   softmax + sub-pixel AR / channel-first → H·W·C
-    #   dmol     → pixel-AR → H·W（每个序列位置对应一个完整 pixel）
-    if output_head == "dmol":
-      self.seq_len = image_size * image_size
-    else:
-      self.seq_len = image_size * image_size * in_channels
+    self.seq_len = image_size * image_size * in_channels
     self.in_channels = in_channels
     self.image_size = image_size
     self.vocab_size = vocab_size
@@ -210,16 +175,7 @@ class IGPT(nn.Module):
     # 保留 use_ycbcr 属性供 demo / evaluate 等旧调用读取（True 当且仅当 BT.601）
     self.use_ycbcr = (self.color_transform == "bt601")
     self.use_subpixel_ar = use_subpixel_ar
-
-    # Token embedding：
-    #   softmax 路径：单一 nn.Embedding(vocab_size, d_model)（与 head weight tying）
-    #   dmol    路径：三通道分别 embed 后求和（PixelCNN++ 同款），不与 head 共享
-    if output_head == "dmol":
-      self.token_embed = nn.ModuleList([
-        nn.Embedding(256, d_model) for _ in range(in_channels)
-      ])
-    else:
-      self.token_embed = nn.Embedding(vocab_size, d_model)
+    self.token_embed = nn.Embedding(vocab_size, d_model)
 
     # Channel embedding: 子像素自回归模式下，为每个通道位置（0=Y/R, 1=Cb/G, 2=Cr/B）
     # 添加可学习的通道嵌入，帮助模型区分同一像素内的不同通道 token。
@@ -233,14 +189,11 @@ class IGPT(nn.Module):
       for _ in range(N)
     ])
 
-    # Output head:
-    #   softmax — Linear + weight tying (Press & Wolf 2017)
-    #   dmol    — DMoLHead，参数化 n_mixtures × (logit_w, μRGB, log_sRGB, αGR/βBR/βBG)
-    if output_head == "dmol":
-      self.head = DMoLHead(d_model, n_mixtures=n_mixtures)
-    else:
-      self.head = nn.Linear(d_model, vocab_size, bias=False)
-      self.head.weight = self.token_embed.weight
+    # Output head + Weight Tying
+    # embedding 和 output head 共享权重矩阵，减少参数量。
+    # Ref: Press & Wolf, "Using the Output Embedding to Improve Language Models," EACL 2017.
+    self.head = nn.Linear(d_model, vocab_size, bias=False)
+    self.head.weight = self.token_embed.weight
 
     self._init_weights()
 
@@ -255,9 +208,8 @@ class IGPT(nn.Module):
     N = self.N_layers
     for name, module in self.named_modules():
       if isinstance(module, nn.Linear):
-        # softmax 路径下 head.weight is token_embed.weight，跳过避免重复初始化
-        # （DMoL head 内部走 DMoLHead.__init__ 自己的初始化，已通过 named_modules 处理）
-        if self.output_head == "softmax" and name.endswith('head'):
+        # Weight tying: head.weight is token_embed.weight，跳过避免重复初始化
+        if name.endswith('head'):
           continue
         if any(name.endswith(s) for s in ('w_o', 'w2')):
           std = 0.02 / math.sqrt(2 * N)
@@ -269,26 +221,10 @@ class IGPT(nn.Module):
       elif isinstance(module, nn.Embedding):
         nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-  def _tokenize(self, x: torch.Tensor):
-    """RGB float [0,1] → 整数 token 序列。
-
-    返回值因 output_head 不同：
-      softmax: (B, T) long，T = H·W·C，按 channel-first 或 pixel-first 平铺
-      dmol:    (input_ids: (B, T, 3) long, target_pixels: (B, T, 3) long)
-               T = H·W；input_ids 与 target_pixels 都是同一份 RGB int (每 pixel 3 通道)，
-               forward / encode 内部自己做 AR shift。返回 tuple 让调用方明确知道
-               需要解包，避免与 softmax 路径混用。
-    """
+  def _tokenize(self, x: torch.Tensor) -> torch.Tensor:
+    """RGB float [0,1] → 整数 token 序列 (B, T)。"""
     B = x.size(0)
     x = x.clamp(0, 1)
-
-    if self.output_head == "dmol":
-      # color_transform 已强制 "none"，直接量化到 RGB int
-      x_int = (x * 255).round().long()                          # (B, 3, H, W)
-      # pixel-AR: 每个序列位置一个 pixel，每个 pixel 携带 3 个通道值
-      pixels = x_int.permute(0, 2, 3, 1).reshape(B, -1, self.in_channels)  # (B, H·W, 3)
-      return pixels, pixels                                     # input 与 target 同源
-
     if self.color_transform == "bt601":
       x = rgb_to_ycbcr_int(x)
     elif self.color_transform == "ycocg_r":
@@ -302,24 +238,16 @@ class IGPT(nn.Module):
       x = x.reshape(B, -1)
     return x
 
-  def _embed_inputs(self, input_tokens, coarse_ctx: torch.Tensor = None):
+  def _embed_inputs(self, input_tokens: torch.Tensor,
+                    coarse_ctx: torch.Tensor = None):
     """Token → hidden 的统一入口（forward / encode 共用）。
 
-    输入维度依 output_head 不同：
-      softmax: input_tokens (B, T) long
-      dmol:    input_tokens (B, T, 3) long  — 每位置一个 pixel 的 RGB int
-
     返回 (hidden, position_ids)。处理:
-      - token_embed (softmax: 单 embedding；dmol: 三通道分别 embed 后求和)
+      - token_embed
       - 可选 coarse_ctx additive 注入 (CC-iGPT)
-      - 子像素 AR 的 channel_embed 与像素级 position_ids（仅 softmax 路径）
+      - 子像素 AR 的 channel_embed 与像素级 position_ids
     """
-    if self.output_head == "dmol":
-      hidden = self.token_embed[0](input_tokens[..., 0])
-      for c in range(1, self.in_channels):
-        hidden = hidden + self.token_embed[c](input_tokens[..., c])
-    else:
-      hidden = self.token_embed(input_tokens)
+    hidden = self.token_embed(input_tokens)
 
     if coarse_ctx is not None:
         assert coarse_ctx.shape == hidden.shape, (
@@ -327,13 +255,13 @@ class IGPT(nn.Module):
         )
         hidden = hidden + coarse_ctx
 
-    T = hidden.shape[1]
+    T = input_tokens.shape[1]
     position_ids = None
     if self.use_subpixel_ar:
         C = self.in_channels
-        channel_indices = torch.arange(T, device=hidden.device) % C
+        channel_indices = torch.arange(T, device=input_tokens.device) % C
         hidden = hidden + self.channel_embed(channel_indices).unsqueeze(0)
-        position_ids = torch.arange(T, device=hidden.device) // C
+        position_ids = torch.arange(T, device=input_tokens.device) // C
 
     return hidden, position_ids
 
@@ -343,39 +271,13 @@ class IGPT(nn.Module):
       x:             (B, C, H, W) float [0,1]
       z_loss_weight: z-loss 权重，默认 1e-4
                      Ref: PaLM arXiv:2204.02311; OLMo 2 arXiv:2501.00656
-                     注意：DMoL 路径不计算 z-loss（mixture 参数无 logit 量级问题）
       coarse_ctx:    可选 (B, T-1, d_model) tensor，作为 additive 全局上下文
                      注入到 token embedding 之上。用于 CC-iGPT 的 fine 模型，
                      由 coarse 分支 down→up→quantize 后的 token 经 fine.token_embed
                      得到。形状必须与 token embedding 后的 hidden 一致。
-
-    返回 dict:
-      softmax: {loss, ce_loss, logits, loss_unit="per_subpixel_nat"}
-      dmol:    {loss, ce_loss, dmol_params, logits=None, loss_unit="per_pixel_nat"}
     """
     z_w = float(z_loss_weight)
 
-    if self.output_head == "dmol":
-      pixels, _ = self._tokenize(x)                  # (B, T, 3) long
-      # AR shift: input 用 pixel[0..T-1]，target 是 pixel[1..T]
-      input_pixels = pixels[:, :-1]                  # (B, T-1, 3)
-      target_pixels = pixels[:, 1:]                  # (B, T-1, 3)
-
-      hidden, position_ids = self._embed_inputs(input_pixels, coarse_ctx=coarse_ctx)
-      for block in self.blocks:
-        hidden = block(hidden, position_ids=position_ids)
-      dmol_params = self.head(hidden).float()        # (B, T-1, n_mix*10)
-
-      loss = dmol_loss(dmol_params, target_pixels, n_mixtures=self.n_mixtures)
-      return {
-        "loss": loss,
-        "ce_loss": loss,            # 兼容下游字段；DMoL 下 ce_loss == nll/pixel
-        "dmol_params": dmol_params,
-        "logits": None,
-        "loss_unit": "per_pixel_nat",
-      }
-
-    # --- softmax 路径（原有逻辑） ---
     tokens = self._tokenize(x)
     # NTP：输入 x[0..T-1]，预测 x[1..T]
     input_tokens  = tokens[:, :-1]
@@ -415,8 +317,7 @@ class IGPT(nn.Module):
     return {
       "loss": loss,
       "ce_loss": ce_loss,
-      "logits": logits,
-      "loss_unit": "per_subpixel_nat",
+      "logits": logits
     }
 
   @torch.no_grad()
@@ -431,12 +332,8 @@ class IGPT(nn.Module):
     返回:
       list[Tensor]，长度为 max_layer+1。
     """
-    if self.output_head == "dmol":
-      pixels, _ = self._tokenize(x)
-      input_tokens = pixels[:, :-1]
-    else:
-      tokens = self._tokenize(x)
-      input_tokens = tokens[:, :-1]
+    tokens = self._tokenize(x)
+    input_tokens = tokens[:, :-1]
     hidden, position_ids = self._embed_inputs(input_tokens, coarse_ctx=coarse_ctx)
 
     if max_layer is None:
