@@ -40,7 +40,6 @@ train:
   z_loss_weight: 1e-4
   lr_schedule: "cosine"
   warmup_epochs: 6              # 5% epochs
-  compile: false
   swa:
     enabled: true
     start_epoch: 108            # 90% epochs

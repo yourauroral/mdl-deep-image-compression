@@ -1,10 +1,13 @@
 exp_name: "ccigpt_cifar10_s_rgb"
 
-# CC-iGPT RGB-domain ablation（"裸 RGB"基线，对照组）
+# CC-iGPT RGB-domain ablation（"裸 RGB"基线，RGB-bit-exact 对照组）
 # 与 ccigpt_cifar10_s.yaml 唯一差异：use_ycbcr=false（即 color_transform="none"）
 # 目的：量化 BT.601 + round 量化前端相对裸 RGB 建模的 bits/dim 收益。
-# 注意：对应主路径已有 ccigpt_cifar10_s_ycocg.yaml（YCoCg-R, RGB-bit-exact 且去相关），
-# 本配置作为"无任何色彩去相关"的下界对照保留。
+# 实测 50ep + SWA = 3.2540 bpd，YCbCr credit = 0.4493 bpd。
+#
+# 同域参考：ccigpt_cifar10_s_ycocg.yaml（YCoCg-R 整数 lifting 路径，已尝试失败 3.2630，
+# 详见 future.md §3.5）。两条 RGB-bit-exact 路径在 50ep 预算下表现接近，
+# 共同支撑"CC-iGPT 在 RGB 域结构性受限"的论文叙事。
 
 model:
   type: ccigpt
@@ -45,7 +48,6 @@ train:
   z_loss_weight: 1e-4
   lr_schedule: "cosine"
   warmup_epochs: 3              # 6% epochs
-  compile: false
   swa:
     enabled: true
     start_epoch: 45             # 最后 5 epoch 启动 SWA（90% epochs）

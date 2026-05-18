@@ -108,7 +108,13 @@ class CCIGPT(nn.Module):
             "_compute_coarse_ctx 依赖 channel-first token 布局；"
             "self.coarse.use_subpixel_ar 必须为 False"
         )
-        with torch.amp.autocast(device_type='cuda', enabled=False):
+        # 强制 autocast 关闭：encoder/decoder 必须在完全相同 dtype 下跑此函数才能
+        # bit-exact。bilinear interp + round + token_embed 在 bf16/fp16 下结果会
+        # 跟 fp32 差 ±1 token，导致 bitstream 不可解。device_type 按输入 tensor
+        # 实际所在设备分发，CPU smoke test 也能正常走（PyTorch 2.4+ 严格校验
+        # device_type='cuda' 在 CPU tensor 上报错）。
+        device_type = "cuda" if coarse_tokens.is_cuda else "cpu"
+        with torch.amp.autocast(device_type=device_type, enabled=False):
             B = coarse_tokens.size(0)
             S, C = self.coarse_size, self.in_channels
             ct = self.color_transform

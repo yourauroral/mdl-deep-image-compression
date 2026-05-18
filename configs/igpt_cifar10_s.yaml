@@ -39,7 +39,6 @@ train:
   z_loss_weight: 1e-4
   lr_schedule: "cosine"
   warmup_epochs: 10
-  compile: false
   swa:
     enabled: true
     start_epoch: 180        # 最后 20 epoch 启动 SWA

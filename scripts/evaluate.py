@@ -368,16 +368,18 @@ def evaluate_position_bpp(model, loader, device, amp_dtype=None,
         position_bpd_chw = position_bpd_full.reshape(C, H, W)
 
     # 总 BPP 热力图: 对 C 通道求和 → (H, W)
-    # 注意: heatmap 单位是 bits/pixel（每像素 C=3 个 token bpd 之和），
-    # 与主流程 evaluate_model 返回的 bits/dim (bpd) 单位差 C 倍。
-    heatmap = position_bpd_chw.sum(axis=0)
+    # 单位变化：position_bpd_chw 是 bits/sub-pixel (bpd per token)，
+    # 沿 C 维 sum 得到 bits/pixel（每像素 3 个 sub-pixel bpd 之和）。
+    # 与主流程 evaluate_model 返回的 bits/dim (bpd) 单位差 C=3 倍。
+    # 命名为 bpp_heatmap 以避免与 bpd_chw 单位混淆。
+    bpp_heatmap = position_bpd_chw.sum(axis=0)
 
-    # 每通道热力图（单位仍是 bpd）
+    # 每通道热力图（单位仍是 bpd / bits per sub-pixel）
     channel_heatmaps = {}
     for i, ch_name in enumerate(channel_names):
         channel_heatmaps[ch_name] = position_bpd_chw[i]
 
-    return heatmap, channel_heatmaps
+    return bpp_heatmap, channel_heatmaps
 
 
 def save_heatmap(heatmap, output_path, title="BPP Heatmap", vmin=None, vmax=None):

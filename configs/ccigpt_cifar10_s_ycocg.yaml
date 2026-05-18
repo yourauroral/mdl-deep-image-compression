@@ -1,15 +1,19 @@
 exp_name: "ccigpt_cifar10_s_ycocg"
 
-# CC-iGPT + YCoCg-R 主路径（RGB-bit-exact 域）
+# CC-iGPT + YCoCg-R RGB-bit-exact 路径（已尝试失败，保留作论文素材）
+#
+# ⚠️ 状态 (2026-05): 已实测 50ep + SWA = 3.2630 bpd，相对裸 RGB ablation 3.2540
+# 改进 ≈ 0；ep25 后过拟合反弹，主动停训。详见 future.md §3.5 失败归因分析。
+# 论文 §5.x "两域语义代价分析"用作 RGB-bit-exact 域三档对照之一，不进主表。
 #
 # 与 ccigpt_cifar10_s.yaml 的差异：
 #   - color_transform: ycocg_r（替代 BT.601 + round 的有损前端）
 #   - vocab_size: 512（YCoCg-R 后 Co/Cg 偏移需要 512 词表）
 #   - min_lr_ratio: 0.1（cosine 末段保留 10% 峰值 LR，让 SWA 有效）
 #
-# 目标：在严格 RGB-bit-exact 语义下达到 bpd ≤ 2.85。
-# 论据：YCoCg-R 是整数 lifting 可逆变换，去相关效率 ≈ BT.601，但解码端可逐位
-#       重算 ⌊·/2⌋，无 round() 损失（H.264/HEVC 无损模式与 JPEG-XR 都用此变换）。
+# 原始目标：在严格 RGB-bit-exact 语义下达到 bpd ≤ 2.85。
+# 失败归因：vocab 翻倍 (256→512) capacity tax + Co/Cg 双峰分布在 6 层 coarse iGPT
+# 上容量不足 + softmax-per-subpixel 输出头无通道耦合。详见 future.md §3.5。
 
 model:
   type: ccigpt
@@ -53,7 +57,6 @@ train:
   lr_schedule: "cosine"
   warmup_epochs: 6              # 5% epochs
   min_lr_ratio: 0.1             # cosine 末段保 10% 峰值 LR（避免 SWA "假平均"）
-  compile: false
   swa:
     enabled: true
     start_epoch: 108            # 最后 12 epoch 启动 SWA（90% epochs）

@@ -82,7 +82,12 @@ def _validate_config(config: dict):
     assert tcfg.get('grad_accum_steps', 1) >= 1, f"train.grad_accum_steps 必须 >= 1"
 
     amp_dtype = tcfg.get('amp_dtype', 'fp16')
-    assert amp_dtype in ('fp16', 'bf16'), f"train.amp_dtype 必须是 'fp16' 或 'bf16'，got '{amp_dtype}'"
+    # None / "none" / "fp32" 走 fp32 训练（数值敏感场景兜底用，主路径 forward
+    # 已支持 amp_dtype is None 时跳过 autocast）
+    assert amp_dtype in ('fp16', 'bf16', None, 'none', 'fp32'), (
+        f"train.amp_dtype 必须是 'fp16' / 'bf16' / null / 'none' / 'fp32'，"
+        f"got '{amp_dtype}'"
+    )
 
     lr_schedule = tcfg.get('lr_schedule', 'cosine')
     assert lr_schedule in ('cosine', 'wsd', 'multistep'), (
@@ -495,13 +500,6 @@ def main():
         for name, avail in kernel_status.items():
             print(f"  {name}: {'ON' if avail else 'OFF (fallback to PyTorch)'}")
 
-    # torch.compile（Phase 2.3）— 在 DDP 包装前编译
-    # Ref: PyTorch 2.0+ torch.compile 文档
-    if config["train"].get("compile", False):
-        model = torch.compile(model, fullgraph=True)
-        if rank == 0:
-            print("torch.compile enabled (fullgraph=True)")
-
     if distributed:
         model = torch.nn.parallel.DistributedDataParallel(
             model, device_ids=[local_rank], output_device=local_rank
@@ -578,8 +576,14 @@ def main():
     else:
         scheduler = None
 
-    # Mixed precision
-    amp_dtype = torch.bfloat16 if config["train"].get("amp_dtype", "fp16") == "bf16" else torch.float16
+    # Mixed precision: None/"none"/"fp32" → 禁用 AMP 走 fp32（数值敏感场景兜底）
+    amp_cfg = config["train"].get("amp_dtype", "fp16")
+    if amp_cfg in (None, "none", "fp32"):
+        amp_dtype = None
+    elif amp_cfg == "bf16":
+        amp_dtype = torch.bfloat16
+    else:
+        amp_dtype = torch.float16
     scaler = GradScaler() if amp_dtype == torch.float16 else None
     grad_accum_steps = config["train"].get("grad_accum_steps", 1)
 
