@@ -120,9 +120,6 @@ def _validate_config(config: dict):
         assert mcfg['coarse_d_model'] % mcfg['coarse_h'] == 0, (
             f"coarse_d_model ({mcfg['coarse_d_model']}) 必须能被 coarse_h ({mcfg['coarse_h']}) 整除"
         )
-        # use_subpixel_ar 由 coarse / fine 共享。开启后 _compute_coarse_ctx 在
-        # 入口（pixel-first tokens → (B,C,S,S) 反量化）和出口（x_up_tok → fine
-        # 平铺顺序）两处分支对齐。详见 cc_igpt.py 内注释。
 
 
 def _shared_igpt_kwargs(mcfg: dict) -> dict:

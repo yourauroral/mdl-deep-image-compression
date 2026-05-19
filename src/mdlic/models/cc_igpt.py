@@ -21,6 +21,11 @@ class CCIGPT(nn.Module):
 
     bpd_total = (CE_coarse · N_coarse + CE_fine · N_fine) / ln2 / N_fine
 
+    `use_subpixel_ar` 控制 coarse/fine 共享平铺方式：channel-first（默认）
+    适合 YCbCr-int 域；pixel-first 让 fine 在注意力层学到 token-level 通道间
+    条件 p(G|R), p(B|R,G)，适合 RGB-bit-exact 域（避免 channel-first 下相隔
+    1024 token 找同位置 R/G/B 的注意力信噪比问题）。
+
     Refs:
       Burt & Adelson, "The Laplacian Pyramid as a Compact Image Code," 1983
       van den Oord et al., "Conditional PixelCNN," NeurIPS 2016 (additive 条件)
@@ -41,12 +46,7 @@ class CCIGPT(nn.Module):
         color_transform: str = None,
         use_ycbcr: bool = None,         # deprecated，保留向后兼容
         activation_checkpointing: bool = False,
-        # coarse 与 fine 共享开关：True 时 pixel-first 平铺，让 fine（以及 coarse）
-        # 学到 token-level 的 p(G|R), p(B|R,G) 通道间条件，相当于在注意力层里做
-        # 通道去相关。_compute_coarse_ctx 在入口/出口两处按此开关分支：
-        #   - 入口：pixel-first tokens → permute 回 (B,C,S,S) 再走反量化
-        #   - 出口：x_up_tok (B,C,H,W) → 按 fine 平铺方式 reshape 后查 token_embed
-        # 详见 _compute_coarse_ctx 内注释。
+        # coarse/fine 共享平铺开关；类 docstring + _compute_coarse_ctx 详述
         use_subpixel_ar: bool = False,
     ):
         super().__init__()
@@ -95,7 +95,7 @@ class CCIGPT(nn.Module):
         **量化后的 coarse token**（不是 float），整个管线 encoder/decoder 共用。
 
         管线（按 color_transform 分支）：
-          1. token (B, N_c) → reshape (B, C, S, S)
+          1. token (B, N_c) → reshape (B, C, S, S) — 入口取决于 self.coarse.use_subpixel_ar
              - channel-first: 直接 view(B,C,S,S)
              - pixel-first  : view(B,S,S,C) → permute(0,3,1,2) 转回 (B,C,S,S)
           2. 反量化到 RGB float [0,1]:
@@ -104,7 +104,7 @@ class CCIGPT(nn.Module):
              - none:    int / 255（已经在 RGB 域）
           3. bilinear UP 到 fine 分辨率
           4. 用 fine encoder 的 tokenize 规则重新 tokenize → (B, C, H, W)
-          5. 按 fine 平铺方式排成 (B, T) 后 fine.token_embed 查表
+          5. 按 fine 平铺方式排成 (B, T) 后 fine.token_embed 查表 — 出口取决于 self.fine.use_subpixel_ar
              - channel-first: reshape(B, -1)
              - pixel-first  : permute(0,2,3,1).reshape(B, -1)
           6. 丢掉最后一个 token 做 AR shift
@@ -131,8 +131,9 @@ class CCIGPT(nn.Module):
             ct = self.color_transform
 
             # 入口：把 (B, N_c) 还原成 (B, C, S, S) 给反量化路径
-            # channel-first: view(B,C,S,S)
-            # pixel-first  : view(B,S,S,C) → permute 回 channel-first 才能做 RGB 反变换
+            # channel-first: view(B,C,S,S)（coarse_tokens 本身 contiguous，view 后仍是）
+            # pixel-first  : view(B,S,S,C) → permute 回 channel-first；permute 后必须
+            #                .contiguous() 让下游 .float()/255.0 走标准 stride
             if self.coarse.use_subpixel_ar:
                 coarse_chw = coarse_tokens.view(B, S, S, C).permute(0, 3, 1, 2).contiguous()
             else:

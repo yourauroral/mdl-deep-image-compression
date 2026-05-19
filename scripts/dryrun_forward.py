@@ -80,7 +80,7 @@ def main():
         assert model.head.weight is model.token_embed.weight, "Weight tying failed!"
         print("  [weight tying] OK — head.weight is token_embed.weight")
 
-    # ── 2. 子像素自回归 (仅 iGPT；CC-iGPT 强制 channel-first，不适用) ──
+    # ── 2. 子像素自回归 (硬编码 mini iGPT；CC-iGPT 子像素 smoke 见 Test 3 + tests/test_ccigpt_smoke.py) ──
     if model_type != "ccigpt":
         print("\n=== Test 2: Sub-pixel Autoregression ===")
         model4 = IGPT(
