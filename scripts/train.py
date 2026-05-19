@@ -120,14 +120,9 @@ def _validate_config(config: dict):
         assert mcfg['coarse_d_model'] % mcfg['coarse_h'] == 0, (
             f"coarse_d_model ({mcfg['coarse_d_model']}) 必须能被 coarse_h ({mcfg['coarse_h']}) 整除"
         )
-        # CC-iGPT 强制 channel-first 对齐 coarse_ctx 的 (B,C,S,S) reshape，
-        # 不允许 use_subpixel_ar=true（cc_igpt.py 内部硬编码 False，否则会与
-        # _compute_coarse_ctx 的 view 假设不一致）。在此 fail fast，避免配置被静默忽略。
-        assert not mcfg.get('use_subpixel_ar', False), (
-            "CC-iGPT 不支持 use_subpixel_ar=true（cc_igpt 强制 channel-first 布局，"
-            "否则 _compute_coarse_ctx 的 view(B,C,S,S) 会与 token 排列错位）。"
-            "请从 ccigpt config 删除 use_subpixel_ar 字段或设为 false。"
-        )
+        # use_subpixel_ar 由 coarse / fine 共享。开启后 _compute_coarse_ctx 在
+        # 入口（pixel-first tokens → (B,C,S,S) 反量化）和出口（x_up_tok → fine
+        # 平铺顺序）两处分支对齐。详见 cc_igpt.py 内注释。
 
 
 def _shared_igpt_kwargs(mcfg: dict) -> dict:
@@ -143,6 +138,7 @@ def _shared_igpt_kwargs(mcfg: dict) -> dict:
         color_transform=mcfg.get("color_transform"),
         use_ycbcr=mcfg.get("use_ycbcr"),
         activation_checkpointing=mcfg.get("activation_checkpointing", False),
+        use_subpixel_ar=mcfg.get("use_subpixel_ar", False),
     )
 
 
@@ -151,7 +147,6 @@ def _build_model_from_config(mcfg: dict, device) -> IGPT:
     return IGPT(
         image_size=mcfg["image_size"],
         d_model=mcfg["d_model"], N=mcfg["N"], h=mcfg["h"], d_ff=mcfg["d_ff"],
-        use_subpixel_ar=mcfg.get("use_subpixel_ar", False),
         **_shared_igpt_kwargs(mcfg),
     ).to(device)
 

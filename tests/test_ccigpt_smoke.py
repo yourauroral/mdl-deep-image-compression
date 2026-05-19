@@ -356,3 +356,132 @@ def test_use_ycbcr_backward_compat(device):
         use_ycbcr=False,
     ).to(device).eval()
     assert m_old_false.color_transform == "none"
+
+
+# ===================== sub-pixel AR + RGB 真无损测试 =====================
+
+def test_ccigpt_subpixel_rgb_forward_finite(device):
+    """CC-iGPT (use_subpixel_ar=True, RGB) forward 必须给出有限的 loss/bpd，
+    且 coarse 与 fine 子模型都进入 pixel-first 平铺模式。"""
+    torch.manual_seed(5)
+    m = CCIGPT(
+        image_size=32, in_channels=3, vocab_size=256, pool_factor=4,
+        fine_d_model=64, fine_N=2, fine_h=2, fine_d_ff=128,
+        coarse_d_model=64, coarse_N=2, coarse_h=2, coarse_d_ff=64,
+        dropout=0.0, use_ycbcr=False, use_subpixel_ar=True,
+    ).to(device).eval()
+    x = torch.rand(2, 3, 32, 32, device=device)
+    out = m(x)
+    assert torch.isfinite(out["loss"]).item()
+    assert torch.isfinite(out["bpd"]).item()
+    assert 0.0 < out["bpd"].item() < 50.0
+    # coarse 与 fine 同步切到 pixel-first
+    assert m.coarse.use_subpixel_ar is True
+    assert m.fine.use_subpixel_ar is True
+
+
+def test_ccigpt_subpixel_rgb_ctx_consistency(device):
+    """sub-pixel AR + RGB 路径下，encoder forward 实际用的 ctx 必须等于
+    decoder 仅凭 coarse bitstream tokens 重建的 ctx (bit-exact 不变量)。
+
+    本测试是阶段 2 改造的核心安全网：_compute_coarse_ctx 在入口/出口两处都
+    新增了 if self.use_subpixel_ar 分支，任何一处错位都会让 forward 仍能
+    跑但 bitstream 不可解。
+    """
+    torch.manual_seed(6)
+    m = CCIGPT(
+        image_size=32, in_channels=3, vocab_size=256, pool_factor=4,
+        fine_d_model=64, fine_N=2, fine_h=2, fine_d_ff=128,
+        coarse_d_model=64, coarse_N=2, coarse_h=2, coarse_d_ff=64,
+        dropout=0.0, use_ycbcr=False, use_subpixel_ar=True,
+    ).to(device).eval()
+    x = torch.rand(2, 3, 32, 32, device=device)
+
+    captured = {}
+    orig = m._compute_coarse_ctx
+    def spy(tokens):
+        out = orig(tokens)
+        captured["tokens"] = tokens.detach().clone()
+        captured["ctx"] = out.detach().clone()
+        return out
+    m._compute_coarse_ctx = spy
+    try:
+        with torch.no_grad():
+            m(x)
+    finally:
+        m._compute_coarse_ctx = orig
+
+    ctx_dec = m._compute_coarse_ctx(captured["tokens"])
+    max_diff = (captured["ctx"] - ctx_dec).abs().max().item()
+    assert max_diff < 1e-6, (
+        f"sub-pixel + RGB 路径 ctx 不一致 (max diff={max_diff:.6e})"
+    )
+
+    # forward 用的 token 必须可独立从 coarse._tokenize(x_c_float) 复现
+    x_c_float = F.adaptive_avg_pool2d(x.clamp(0, 1), m.coarse_size)
+    expected_tokens = m.coarse._tokenize(x_c_float)
+    assert (captured["tokens"] == expected_tokens).all()
+
+
+def test_ccigpt_subpixel_ctx_pixel_first_layout(device):
+    """关键单测：use_subpixel_ar=True 时，_compute_coarse_ctx 的入口/出口都必须
+    走 pixel-first 分支。手算两端的平铺顺序与 _compute_coarse_ctx 实际输出对比。
+
+    错位会让 forward 仍能跑但 ctx 语义乱套（fine.token_embed 索引顺序与 fine
+    自身的 _tokenize 输出顺序不一致，loss 仍降但 bitstream 不可解）。
+    """
+    torch.manual_seed(7)
+    m = CCIGPT(
+        image_size=32, in_channels=3, vocab_size=256, pool_factor=4,
+        fine_d_model=64, fine_N=2, fine_h=2, fine_d_ff=128,
+        coarse_d_model=64, coarse_N=2, coarse_h=2, coarse_d_ff=64,
+        dropout=0.0, use_ycbcr=False, use_subpixel_ar=True,
+    ).to(device).eval()
+
+    x = torch.rand(1, 3, 32, 32, device=device)
+    x_c_float = F.adaptive_avg_pool2d(x.clamp(0, 1), 8)
+    coarse_tokens = m.coarse._tokenize(x_c_float)            # (1, 192) pixel-first
+
+    # 手算 _compute_coarse_ctx (RGB 分支)：
+    # 入口：(1, 192) pixel-first → (1, 8, 8, 3) → permute → (1, 3, 8, 8)
+    B, S, C = 1, 8, 3
+    coarse_chw = coarse_tokens.view(B, S, S, C).permute(0, 3, 1, 2).contiguous()
+    rec = coarse_chw.float() / 255.0
+    x_up = F.interpolate(rec, size=(32, 32), mode='bilinear', align_corners=False)
+    x_up_tok = (x_up.clamp(0, 1) * 255).round().long()       # (1, 3, 32, 32)
+    # 出口：pixel-first 平铺
+    expected_pixel_first = x_up_tok.permute(0, 2, 3, 1).reshape(1, -1)
+    expected_ctx = m.fine.token_embed(expected_pixel_first)[:, :-1]
+
+    actual_ctx = m._compute_coarse_ctx(coarse_tokens)
+    diff = (actual_ctx - expected_ctx).abs().max().item()
+    assert diff < 1e-6, (
+        f"_compute_coarse_ctx 在 use_subpixel_ar=True 时未走 pixel-first 双端分支"
+        f" (max diff={diff:.6e})"
+    )
+
+
+def test_ccigpt_subpixel_backward(device):
+    """sub-pixel AR 路径下 coarse / fine / ctx_alpha 三处都必须有非零梯度。"""
+    torch.manual_seed(8)
+    m = CCIGPT(
+        image_size=32, in_channels=3, vocab_size=256, pool_factor=4,
+        fine_d_model=64, fine_N=2, fine_h=2, fine_d_ff=128,
+        coarse_d_model=64, coarse_N=2, coarse_h=2, coarse_d_ff=64,
+        dropout=0.0, use_ycbcr=False, use_subpixel_ar=True,
+    ).to(device).train()
+    x = torch.rand(2, 3, 32, 32, device=device)
+    out = m(x)
+    out["loss"].backward()
+    assert m.ctx_alpha.grad is not None
+    assert m.ctx_alpha.grad.abs().sum().item() > 0
+    coarse_grad_sum = sum(
+        p.grad.abs().sum().item() for p in m.coarse.parameters()
+        if p.grad is not None
+    )
+    fine_grad_sum = sum(
+        p.grad.abs().sum().item() for p in m.fine.parameters()
+        if p.grad is not None
+    )
+    assert coarse_grad_sum > 0
+    assert fine_grad_sum > 0

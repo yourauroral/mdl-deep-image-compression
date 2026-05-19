@@ -41,6 +41,13 @@ class CCIGPT(nn.Module):
         color_transform: str = None,
         use_ycbcr: bool = None,         # deprecated，保留向后兼容
         activation_checkpointing: bool = False,
+        # coarse 与 fine 共享开关：True 时 pixel-first 平铺，让 fine（以及 coarse）
+        # 学到 token-level 的 p(G|R), p(B|R,G) 通道间条件，相当于在注意力层里做
+        # 通道去相关。_compute_coarse_ctx 在入口/出口两处按此开关分支：
+        #   - 入口：pixel-first tokens → permute 回 (B,C,S,S) 再走反量化
+        #   - 出口：x_up_tok (B,C,H,W) → 按 fine 平铺方式 reshape 后查 token_embed
+        # 详见 _compute_coarse_ctx 内注释。
+        use_subpixel_ar: bool = False,
     ):
         super().__init__()
         assert image_size % pool_factor == 0, (
@@ -52,12 +59,13 @@ class CCIGPT(nn.Module):
         self.pool_factor = pool_factor
         self.coarse_size = image_size // pool_factor
         self.color_transform = _resolve_color_transform(color_transform, use_ycbcr)
+        self.use_subpixel_ar = use_subpixel_ar
 
         shared = dict(
             in_channels=in_channels, vocab_size=vocab_size, dropout=dropout,
             color_transform=self.color_transform,
             activation_checkpointing=activation_checkpointing,
-            use_subpixel_ar=False,  # CC-iGPT 强制 channel-first 对齐 ctx
+            use_subpixel_ar=use_subpixel_ar,
         )
 
         self.coarse = IGPT(image_size=self.coarse_size,
@@ -88,25 +96,28 @@ class CCIGPT(nn.Module):
 
         管线（按 color_transform 分支）：
           1. token (B, N_c) → reshape (B, C, S, S)
+             - channel-first: 直接 view(B,C,S,S)
+             - pixel-first  : view(B,S,S,C) → permute(0,3,1,2) 转回 (B,C,S,S)
           2. 反量化到 RGB float [0,1]:
              - bt601:   YCbCr-int / 255 → BT.601⁻¹ → clamp
              - ycocg_r: ycocg_r_int_to_rgb（lifting 逆变换，bit-exact）
              - none:    int / 255（已经在 RGB 域）
           3. bilinear UP 到 fine 分辨率
-          4. 用 fine encoder 的 tokenize 规则重新 tokenize
-          5. fine.token_embed 查表 → 丢掉最后一个 token 做 AR shift
+          4. 用 fine encoder 的 tokenize 规则重新 tokenize → (B, C, H, W)
+          5. 按 fine 平铺方式排成 (B, T) 后 fine.token_embed 查表
+             - channel-first: reshape(B, -1)
+             - pixel-first  : permute(0,2,3,1).reshape(B, -1)
+          6. 丢掉最后一个 token 做 AR shift
 
         强制 autocast(enabled=False)：encoder/decoder 必须在完全相同的 dtype 下
         跑此函数才能 bit-exact。bilinear interp + round + token_embed 在 bf16/fp16
         下结果会跟 fp32 差 ±1 token，导致 bitstream 不可解。
         """
-        # 该 reshape 依赖 channel-first 平铺 (IGPT._tokenize 的 use_subpixel_ar=False
-        # 行为)。__init__ 已强制 coarse channel-first；此处再加运行时断言，防止
-        # 有人替换 self.coarse 或将 _tokenize 改成 pixel-first 后 view(B,C,S,S)
-        # 静默错位（loss 仍下降但 ctx 完全乱套）。
-        assert not self.coarse.use_subpixel_ar, (
-            "_compute_coarse_ctx 依赖 channel-first token 布局；"
-            "self.coarse.use_subpixel_ar 必须为 False"
+        # coarse 与 fine 共享 use_subpixel_ar 开关，运行时断言保持一致防止有人
+        # 单独替换某一支后静默错位（loss 仍下降但 ctx 完全乱套）。
+        assert self.coarse.use_subpixel_ar == self.fine.use_subpixel_ar, (
+            "_compute_coarse_ctx 要求 coarse/fine 共享相同 use_subpixel_ar 开关，"
+            f"got coarse={self.coarse.use_subpixel_ar} vs fine={self.fine.use_subpixel_ar}"
         )
         # 强制 autocast 关闭：encoder/decoder 必须在完全相同 dtype 下跑此函数才能
         # bit-exact。bilinear interp + round + token_embed 在 bf16/fp16 下结果会
@@ -119,12 +130,19 @@ class CCIGPT(nn.Module):
             S, C = self.coarse_size, self.in_channels
             ct = self.color_transform
 
+            # 入口：把 (B, N_c) 还原成 (B, C, S, S) 给反量化路径
+            # channel-first: view(B,C,S,S)
+            # pixel-first  : view(B,S,S,C) → permute 回 channel-first 才能做 RGB 反变换
+            if self.coarse.use_subpixel_ar:
+                coarse_chw = coarse_tokens.view(B, S, S, C).permute(0, 3, 1, 2).contiguous()
+            else:
+                coarse_chw = coarse_tokens.view(B, C, S, S)
+
             if ct == "ycocg_r":
                 # YCoCg-R: 整数 lifting 逆变换直接得到 RGB float
-                yc = coarse_tokens.view(B, C, S, S)
-                rec = ycocg_r_int_to_rgb(yc)                # (B, 3, S, S) float [0,1]
+                rec = ycocg_r_int_to_rgb(coarse_chw)            # (B, 3, S, S) float [0,1]
             elif ct == "bt601":
-                rec = coarse_tokens.view(B, C, S, S).float() / 255.0
+                rec = coarse_chw.float() / 255.0
                 # ITU-R BT.601 inverse: YCbCr [0,1] → RGB [0,1]
                 y, cb, cr = rec[:, 0], rec[:, 1], rec[:, 2]
                 r = y + 1.402 * (cr - 0.5)
@@ -132,7 +150,7 @@ class CCIGPT(nn.Module):
                 b = y + 1.772 * (cb - 0.5)
                 rec = torch.stack([r, g, b], dim=1).clamp(0.0, 1.0)
             else:  # "none"
-                rec = coarse_tokens.view(B, C, S, S).float() / 255.0
+                rec = coarse_chw.float() / 255.0
 
             x_up = F.interpolate(
                 rec, size=(self.image_size, self.image_size),
@@ -144,7 +162,14 @@ class CCIGPT(nn.Module):
                 x_up_tok = rgb_to_ycocg_r_int(x_up)
             else:
                 x_up_tok = (x_up.clamp(0, 1) * 255).round().long()
-            x_up_tok = x_up_tok.reshape(B, -1)                       # (B, H*W*C)
+            # 出口：按 fine 平铺方式排序 ctx token，与 fine._tokenize 输出顺序一致
+            # 才能让 fine.token_embed 索引、AR shift 正确对齐。
+            if self.fine.use_subpixel_ar:
+                # pixel-first: [Y0,Cb0,Cr0, Y1,Cb1,Cr1, ...]
+                x_up_tok = x_up_tok.permute(0, 2, 3, 1).reshape(B, -1)
+            else:
+                # channel-first: [ch0_all, ch1_all, ch2_all]
+                x_up_tok = x_up_tok.reshape(B, -1)
             coarse_ctx = self.fine.token_embed(x_up_tok)             # (B, T, d_model)
             return coarse_ctx[:, :-1]                                 # AR shift
 
