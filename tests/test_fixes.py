@@ -182,22 +182,24 @@ def test_grad_accum_divisible_case_unchanged():
 
 
 # ──────────────────────────────────────────────────────────────
-# Fix #4: CIFAR-10 / CIFAR-100 配置一致性
+# Fix #4: configs 目录所有 yaml 都能加载且过 _validate_config
 # ──────────────────────────────────────────────────────────────
+import glob
+
 CONFIG_DIR = os.path.join(os.path.dirname(__file__), '..', 'configs')
+ALL_CONFIGS = sorted(os.path.basename(p) for p in glob.glob(os.path.join(CONFIG_DIR, '*.yaml')))
 
 
-@pytest.mark.parametrize("name", ["igpt_cifar10_s.yaml", "igpt_cifar100_s.yaml"])
-def test_s_config_loads(name):
-    """两份 S 级别 config 都能被 yaml 解析，且关键字段齐全。"""
+@pytest.mark.parametrize("name", ALL_CONFIGS)
+def test_config_validates(name):
+    """每个 yaml 必填字段齐全且通过 _validate_config，新增 yaml 自动覆盖。"""
+    from scripts.train import _validate_config
     path = os.path.join(CONFIG_DIR, name)
     with open(path) as f:
         cfg = yaml.safe_load(f)
     for key in ['exp_name', 'model', 'data', 'train', 'eval', 'checkpoint']:
         assert key in cfg, f"{name} 缺少字段 {key}"
-    assert cfg['model']['N'] == 24
-    assert cfg['model']['d_model'] == 512
-    assert cfg['train']['amp_dtype'] == 'bf16'
+    _validate_config(cfg)
 
 
 def test_cifar10_vs_cifar100_only_differ_in_dataset_and_expname():

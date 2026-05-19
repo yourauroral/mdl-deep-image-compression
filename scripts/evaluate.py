@@ -597,7 +597,7 @@ def cmd_single(args, config, device):
     channel_bpds = None
     if args.per_channel:
         if model_type == "ccigpt":
-            print("\n[跳过 per_channel] CC-iGPT 含 coarse 子分支，per-channel 切分仅对 fine 有意义，待实现。")
+            print("\n[跳过 per_channel] CC-iGPT 含 coarse 子分支，per-channel 切分仅对 fine 有意义；目前未实现，bpd_total 已含三通道联合压缩率。")
         else:
             print("\n计算 per-channel bits/dim...")
             color_transform = getattr(model, "color_transform", "bt601")
@@ -631,11 +631,11 @@ def cmd_single(args, config, device):
                          traditional_results, channel_bpds,
                          model_label=f"{model_type.upper()} (Ours)")
 
-    # Per-position BPP 热力图（可选，仅 iGPT — CC-iGPT 含 coarse 分支待实现；
+    # Per-position BPP 热力图（可选，仅 iGPT — CC-iGPT 含 coarse 分支未实现；
     # 注意热力图单位是 bits/pixel = bpd × C，与表格里的 bits/dim 主指标差 C 倍）
     if args.heatmap:
         if model_type == "ccigpt":
-            print("\n[跳过 heatmap] CC-iGPT 含 coarse 子分支，per-position 热力图待实现。")
+            print("\n[跳过 heatmap] CC-iGPT 含 coarse 子分支，per-position 热力图未实现。")
         else:
             print("\n生成 per-position BPP 热力图 (bits/pixel)...")
             color_transform = getattr(model, "color_transform", "bt601")

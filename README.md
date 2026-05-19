@@ -32,7 +32,7 @@
 >
 > 该值同时反映 BT.601 通道解相关 + `round()` 量化两部分共同贡献的"可被压缩的信息"。据作者所知，文献中此前未见对该差额的系统测量 —— 学界基线（PixelCNN++ / PixelSNAIL / Sparse Transformer）一律在 RGB-bit-exact 上评估，工业编解码器（JPEG/H.26x/VVC）一律在 YCbCr 上操作，本工作首次给出两域同骨干的实测桥。
 >
-> RGB ablation 行 3.2540 vs Sparse Transformer 2.80 的差距，归因于：(a) 50 epoch vs 文献基线 200+ epoch 训练预算差；(b) 24 层 dense attention vs Sparse Transformer 128 层 strided sparse attention；(c) 未实现 PixelCNN++ 系 mixture-of-logistics 或 RCT 等 RGB-domain 通道相关化技术。
+> RGB ablation 行 3.2540 vs Sparse Transformer 2.80 的差距，归因于：(a) 50 epoch vs 文献基线 200+ epoch 训练预算差；(b) 24 层 dense attention vs Sparse Transformer 128 层 strided sparse attention；(c) PixelCNN++ 系 mixture-of-logistics (DMoL) 已尝试 2026-05 失败 git revert（本仓库 AdamW + DDP + bf16 训练栈与 PixelCNN++ 原版 Adamax + WN + fp32 结构性不兼容，详见 [`future.md`](future.md) §3.5 / §7 F1）；RCT 等 RGB-domain 通道相关化方向未尝试。
 
 ### ImageNet 32×32 训练动力学验证（早期 checkpoint）
 
@@ -55,7 +55,7 @@ CC-iGPT 在 24 层 / ~81M 的参数预算下，沿三个维度构建差异化：
 2. **工程 — 8 个手写 Triton kernel + 1 个 roofline 证伪的反面案例**：7 个进入训练栈，1 个 `fused_linear_ce` 在 V=256 下经 roofline 分析判定为负收益（compute-bound + 三重循环失去 cuBLAS GEMM 利用率），保留在 `ops/` 作工程严谨性的反向证据，详见 [`experiments/kernel_negative_finding.md`](experiments/kernel_negative_finding.md)。
 3. **分析 — 域口径诚实标注 + 多视角评估**：明确区分 **YCbCr-int 域无损**（主路径，相对原始 RGB 近无损）与 **RGB-bit-exact 无损**（ablation 路径，相对原始 RGB 严格无损）两档语义；同时报告两域 bpd（RGB ablation 给 YCbCr credit），Linear Probe 逐层表征曲线，Roofline forward 与 fwd+bwd 双视角。
 
-与 Sparse Transformer 的差距（RGB ablation 实测 3.2540 vs 2.80）来自参数预算（81M vs 59M）/ 深度（24 vs 128 层）/ 训练 epoch（50 vs 200+）/ 未实现 strided sparse attention 与 RGB-domain 通道相关化（mixture-of-logistics、RCT 等），而非方法路线缺陷。
+与 Sparse Transformer 的差距（RGB ablation 实测 3.2540 vs 2.80）来自参数预算（81M vs 59M）/ 深度（24 vs 128 层）/ 训练 epoch（50 vs 200+）/ DMoL 输出头已尝试失败 git revert（详见 [`future.md`](future.md) §3.5 / §7 F1）/ 未实现 strided sparse attention 与 RCT 等 RGB-domain 通道相关化，而非方法路线缺陷。
 
 ## 快速开始
 
@@ -182,9 +182,9 @@ scp -P <port> root@<autodl-host>:/root/autodl-tmp/mdl-deep-image-compression/exp
           +-------------------+-------------------+
                               |
             +-----------------+-----------------+
-            |  channel-first                     |  pixel-first (子像素自回归, 当前默认)
+            |  channel-first                     |  pixel-first (子像素自回归)
             |  [Y_all | Cb_all | Cr_all]         |  [Y₀,Cb₀,Cr₀, Y₁,Cb₁,Cr₁, ...]
-            |  (CC-iGPT 强制使用)                 |  (iGPT-S 配置默认开启)
+            |  (YCbCr-int 主路径默认)             |  (RGB-bit-exact 路径 + iGPT-S 默认)
             +-----------------+-----------------+
                               |
                     +---------v-----------+
@@ -274,10 +274,8 @@ pixel-first:    [Y₀ Cb₀ Cr₀ | Y₁ Cb₁ Cr₁ | ... | Y₁₀₂₃ Cb₁
 
 | 技术 | 说明 | 参考 |
 |------|------|------|
-| WSD Schedule | Warmup-Stable-Decay 三阶段学习率调度，比 cosine 更适合长训练 | MiniCPM (Hu et al. 2024) |
+| Cosine + Warmup LR | 线性 warmup → cosine 衰减；可选 `min_lr_ratio` 末段 LR 下限避免 SWA "假平均" | OLMo 2 (2025) |
 | SWA | Stochastic Weight Averaging，训练后期对权重做指数移动平均，获得更平坦的 loss landscape | Izmailov et al. 2018 |
-| muP | Maximal Update Parameterization，按宽度比例缩放初始化和学习率，小模型调参可迁移到大模型 | Yang et al. 2022 |
-| Muon Optimizer | Newton-Schulz 正交化 SGD，对 2D 权重用正交化更新方向，其余用 AdamW | Jordan 2024 |
 | DDP + no_sync | 多 GPU 分布式训练，梯度累积中间步跳过 AllReduce 通信 | PyTorch DDP |
 | Selective Checkpointing | 只对 Attention 层做 activation checkpointing，平衡显存和速度 | Chen et al. 2016 |
 | Mixed Precision | bf16/fp16 自动混合精度训练 | PyTorch AMP |
@@ -335,13 +333,14 @@ GPTBlock, MultiHeadAttentionBlock (RoPE + QK-Norm + Flash Attention + attn_mask)
 ```
 src/mdlic/
 ├── models/    igpt.py, cc_igpt.py, layers.py
-├── ops/       7 个 Triton kernels (flash_attn, fused_rms_norm, ...)
-├── optim/     muon.py (Muon optimizer)
+├── ops/       7 个 Triton kernels (flash_attn, fused_rms_norm, ...) + 1 反面案例 (fused_linear_ce)
 ├── data/      imagenet32_npy.py (mmap-backed Dataset)
-└── utils/     seed, bpd
+└── utils/     seed, bpd, clean_state_dict
 scripts/       train.py, evaluate.py, linear_probe.py, dryrun_forward.py, profile_kernels.py, prepare_imagenet32.py
-configs/       igpt_cifar10_s, igpt_cifar100_s, igpt_imagenet32_s, ccigpt_cifar10_s, ccigpt_imagenet32_s
-tests/         7 个 kernel 单元测试
+configs/       igpt_cifar10_s, igpt_cifar10_s_rgb, igpt_cifar100_s, igpt_imagenet32_s,
+               ccigpt_cifar10_s, ccigpt_cifar10_s_rgb, ccigpt_cifar10_s_rgb_subpixel,
+               ccigpt_cifar10_s_ycocg, ccigpt_imagenet32_s
+tests/         8 个 kernel/模型 单元测试 (含 test_ccigpt_smoke 16 项)
 demo/
 ├── server.py          FastAPI 后端 (predict / metrics / probe / kernels / scales)
 ├── static/            HTML + JS (Chart.js) + CSS 前端，5 个面板：上传预测、bits/dim 对比、
@@ -359,6 +358,6 @@ demo/
 
 **Triton**: FlashAttention v1/v2 (Dao 2022/2023), Online Softmax (Milakov 2018), Liger Kernel (Hsu 2024)
 
-**训练**: WSD (MiniCPM 2024), SWA (Izmailov 2018), muP (Yang 2022), Muon (Jordan 2024)
+**训练**: SWA (Izmailov 2018), Cosine + Warmup (OLMo 2 2025)
 
 **理论**: Shannon (1948), MDL (Rissanen 1978), Language Modeling Is Compression (Delétang 2024)

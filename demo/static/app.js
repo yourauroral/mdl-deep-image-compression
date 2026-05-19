@@ -69,7 +69,7 @@ Chart.defaults.borderColor = "#2a2d3a";
         hmImg.hidden = true;
         hmPlaceholder.hidden = false;
         hmPlaceholder.textContent = data.model_type === "ccigpt"
-          ? "CC-iGPT 模型暂不支持热力图" : "热力图不可用";
+          ? "CC-iGPT 含 coarse 子分支，per-position 热力图未实现" : "热力图不可用";
       }
     } catch (e) {
       bpdEl.textContent = "离线";
