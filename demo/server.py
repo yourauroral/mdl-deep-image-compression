@@ -169,7 +169,9 @@ def _get_cached_model(device):
     import yaml
     import torch
 
-    # 扫描 configs 目录寻找可用 checkpoint
+    # 按优先级尝试主路径 ckpt：CC-iGPT 优于 iGPT-S baseline。
+    # 故意不扫整个 configs/ 目录 —— RGB ablation / YCoCg-R 等是论文对照档，
+    # 不应作为 demo 默认模型；如需展示对照档，应手动改这里的列表。
     configs_dir = ROOT / "configs"
     experiments_dir = ROOT / "experiments"
 

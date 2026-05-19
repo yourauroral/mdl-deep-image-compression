@@ -44,7 +44,6 @@ Usage:
 import os
 import sys
 import io
-import re
 import argparse
 import yaml
 import math
@@ -52,14 +51,11 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 from contextlib import nullcontext
-from collections import OrderedDict
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from torch.amp import autocast
 from torch.utils.data import DataLoader
-from src.mdlic.models.igpt import IGPT, rgb_to_ycbcr_int
-from src.mdlic.models.cc_igpt import CCIGPT
 from src.mdlic.utils import compute_bpd, clean_state_dict
 from scripts.train import _build_model_from_config, _build_ccigpt_from_config
 
@@ -548,9 +544,21 @@ def _load_checkpoint(model, ckpt_path, device):
 
 
 def _get_amp_dtype(config):
-    """从 config 获取 AMP dtype"""
-    amp_dtype_str = config["train"].get("amp_dtype", "bf16")
-    return torch.bfloat16 if amp_dtype_str == "bf16" else torch.float16, amp_dtype_str
+    """从 config 获取 AMP dtype，与 train.py 保持同口径。
+
+    支持 fp16 / bf16 / null / "none" / "fp32" 五档；后三档表示走 fp32（amp_dtype=None）。
+    口径漂移会让 evaluate 与训练时精度不一致，导致 bpd 数值不可比。
+    """
+    amp_cfg = config["train"].get("amp_dtype", "bf16")
+    if amp_cfg in (None, "none", "fp32"):
+        return None, str(amp_cfg)
+    if amp_cfg == "bf16":
+        return torch.bfloat16, "bf16"
+    if amp_cfg == "fp16":
+        return torch.float16, "fp16"
+    raise ValueError(
+        f"未知 train.amp_dtype: '{amp_cfg}'，支持 fp16/bf16/null/none/fp32"
+    )
 
 
 def cmd_single(args, config, device):
