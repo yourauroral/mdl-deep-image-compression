@@ -485,3 +485,138 @@ def test_ccigpt_subpixel_backward(device):
     )
     assert coarse_grad_sum > 0
     assert fine_grad_sum > 0
+
+
+# ──────────────────────────────────────────────────────────────
+# R-only coarse 灰度先验 (coarse_in_channels=1)
+# ──────────────────────────────────────────────────────────────
+
+def _build_ronly_ccigpt(device):
+    """coarse_in_channels=1 + RGB + sub-pixel AR 的最小 CCIGPT。"""
+    return CCIGPT(
+        image_size=32, in_channels=3, vocab_size=256, pool_factor=4,
+        fine_d_model=64, fine_N=2, fine_h=2, fine_d_ff=128,
+        coarse_d_model=64, coarse_N=2, coarse_h=2, coarse_d_ff=64,
+        dropout=0.0, use_ycbcr=False, use_subpixel_ar=True,
+        coarse_in_channels=1,
+    ).to(device)
+
+
+def test_ccigpt_ronly_forward_finite(device):
+    """R-only coarse forward + backward 通过；coarse_seq=64, fine_seq=3072。"""
+    torch.manual_seed(20)
+    m = _build_ronly_ccigpt(device).train()
+    assert m.coarse.in_channels == 1
+    assert m.coarse.seq_len == 8 * 8 * 1            # 64
+    assert m.fine.seq_len == 32 * 32 * 3            # 3072
+
+    x = torch.rand(2, 3, 32, 32, device=device)
+    out = m(x)
+    for k in ["loss", "ce_loss_coarse", "ce_loss_fine", "bpd"]:
+        assert torch.isfinite(out[k]).item()
+    assert 0.0 < out["bpd"].item() < 50.0
+
+    # bpd 公式手算对照
+    N_c, N_f = m.coarse.seq_len, m.fine.seq_len
+    expected = (
+        out["ce_loss_coarse"].item() * N_c +
+        out["ce_loss_fine"].item()   * N_f
+    ) / math.log(2.0) / N_f
+    assert abs(out["bpd"].item() - expected) < 1e-5
+
+    out["loss"].backward()
+    coarse_grad = sum(p.grad.abs().sum().item() for p in m.coarse.parameters()
+                      if p.grad is not None)
+    fine_grad = sum(p.grad.abs().sum().item() for p in m.fine.parameters()
+                    if p.grad is not None)
+    assert coarse_grad > 0 and fine_grad > 0
+    assert m.ctx_alpha.grad is not None and m.ctx_alpha.grad.abs().sum().item() > 0
+
+
+def test_ccigpt_ronly_ctx_consistency(device):
+    """encoder 实际 ctx 必须等于 decoder 仅凭 coarse_tokens 重建的 ctx
+    （bit-exact 不变量，R-only 路径下尤其关键：expand contiguous + 部分通道
+    截取 都是新出错点）。"""
+    torch.manual_seed(21)
+    m = _build_ronly_ccigpt(device).eval()
+    x = torch.rand(2, 3, 32, 32, device=device)
+
+    captured = {}
+    orig = m._compute_coarse_ctx
+    def spy(tokens):
+        out = orig(tokens)
+        captured["tokens"] = tokens.detach().clone()
+        captured["ctx"] = out.detach().clone()
+        return out
+    m._compute_coarse_ctx = spy
+    try:
+        with torch.no_grad():
+            m(x)
+    finally:
+        m._compute_coarse_ctx = orig
+
+    # forward 用的 token 必须可独立从 (R-only 截通道后的) _tokenize 复现
+    x_c_full = F.adaptive_avg_pool2d(x.clamp(0, 1), m.coarse_size)
+    x_c_r = x_c_full[:, :1]
+    expected_tokens = m.coarse._tokenize(x_c_r)
+    assert (captured["tokens"] == expected_tokens).all()
+    assert captured["tokens"].shape == (2, 64)       # B, S*S*C_coarse
+
+    # decoder 重建 ctx 必须 bit-exact 等于 encoder 实际 ctx
+    ctx_dec = m._compute_coarse_ctx(captured["tokens"])
+    max_diff = (captured["ctx"] - ctx_dec).abs().max().item()
+    assert max_diff < 1e-6, (
+        f"R-only 路径 encoder/decoder ctx 不一致 (max diff={max_diff:.6e})"
+    )
+
+
+def test_ccigpt_ronly_expand_layout(device):
+    """R-only 灰度先验：fine 看到的 ctx 在每个像素位置上，R/G/B 三个通道槽
+    必须接收到同一个 R coarse 值（expand 复制三份后 token 应相同）。
+    错位（比如 expand 后忘 .contiguous、或顺序反了）会让 G/B 槽看到错误的
+    像素值，loss 仍能降但 ctx 语义乱套。
+    """
+    torch.manual_seed(22)
+    m = _build_ronly_ccigpt(device).eval()
+
+    x = torch.rand(1, 3, 32, 32, device=device)
+    x_c_full = F.adaptive_avg_pool2d(x.clamp(0, 1), 8)
+    x_c_r = x_c_full[:, :1]                          # (1, 1, 8, 8)
+    coarse_tokens = m.coarse._tokenize(x_c_r)        # (1, 64) pixel-first 单通道
+
+    # 手算：(1,64) → view(1,8,8,1) → permute → (1,1,8,8) → /255
+    coarse_chw = coarse_tokens.view(1, 8, 8, 1).permute(0, 3, 1, 2).contiguous()
+    rec = coarse_chw.float() / 255.0
+    x_up_partial = F.interpolate(rec, size=(32, 32), mode='bilinear', align_corners=False)
+    # R 复制三份的灰度先验
+    x_up = x_up_partial.expand(-1, 3, -1, -1).contiguous()
+    # 三通道值必须严格相同（灰度先验的定义）
+    assert torch.equal(x_up[:, 0], x_up[:, 1]) and torch.equal(x_up[:, 1], x_up[:, 2])
+
+    x_up_tok = (x_up.clamp(0, 1) * 255).round().long()
+    expected_pixel_first = x_up_tok.permute(0, 2, 3, 1).reshape(1, -1)
+    # pixel-first 出口下，每个像素位置 (R_slot, G_slot, B_slot) 三个 token id 相同
+    reshaped = expected_pixel_first.view(1, 32 * 32, 3)
+    assert torch.equal(reshaped[..., 0], reshaped[..., 1])
+    assert torch.equal(reshaped[..., 1], reshaped[..., 2])
+
+    expected_ctx = m.fine.token_embed(expected_pixel_first)[:, :-1]
+    actual_ctx = m._compute_coarse_ctx(coarse_tokens)
+    diff = (actual_ctx - expected_ctx).abs().max().item()
+    assert diff < 1e-6, (
+        f"R-only expand 灰度先验布局不一致 (max diff={diff:.6e})"
+    )
+
+
+def test_ccigpt_ronly_color_transform_fail_fast():
+    """coarse_in_channels < in_channels 必须 fail-fast 拒绝 BT.601 / YCoCg-R
+    （单通道 coarse 在两条色彩变换下没有合法逆变换）。"""
+    with pytest.raises(AssertionError, match="color_transform='none'"):
+        CCIGPT(
+            image_size=32, in_channels=3, vocab_size=256, pool_factor=4,
+            fine_d_model=64, fine_N=2, fine_h=2, fine_d_ff=128,
+            coarse_d_model=64, coarse_N=2, coarse_h=2, coarse_d_ff=64,
+            dropout=0.0,
+            color_transform="bt601",          # 非法组合
+            coarse_in_channels=1,
+        )

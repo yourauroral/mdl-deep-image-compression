@@ -121,6 +121,27 @@ def _validate_config(config: dict):
             f"coarse_d_model ({mcfg['coarse_d_model']}) 必须能被 coarse_h ({mcfg['coarse_h']}) 整除"
         )
 
+        # coarse_in_channels：R-only 灰度先验仅在裸 RGB 域有意义
+        coarse_ic = mcfg.get('coarse_in_channels')
+        if coarse_ic is not None:
+            assert 1 <= coarse_ic <= mcfg['in_channels'], (
+                f"model.coarse_in_channels ({coarse_ic}) 必须 ∈ "
+                f"[1, in_channels={mcfg['in_channels']}]"
+            )
+            if coarse_ic < mcfg['in_channels']:
+                ct = mcfg.get('color_transform')
+                uy = mcfg.get('use_ycbcr')
+                # 与 _resolve_color_transform 同一优先级：显式 color_transform > use_ycbcr
+                # > 默认 'bt601'。任何非 'none' 路径下单通道 coarse 都没有合法逆变换。
+                resolved = ct if ct is not None else (
+                    'none' if uy is False else ('bt601' if uy is True else 'bt601')
+                )
+                assert resolved == 'none', (
+                    f"model.coarse_in_channels ({coarse_ic}) < in_channels 仅支持 "
+                    f"color_transform='none' / use_ycbcr=false（裸 RGB 域），"
+                    f"got color_transform='{resolved}'"
+                )
+
 
 def _shared_igpt_kwargs(mcfg: dict) -> dict:
     """提取 iGPT / CC-iGPT 共用字段。
@@ -162,6 +183,7 @@ def _build_ccigpt_from_config(mcfg: dict, device) -> CCIGPT:
         fine_h=mcfg["h"], fine_d_ff=mcfg["d_ff"],
         coarse_d_model=mcfg["coarse_d_model"], coarse_N=mcfg["coarse_N"],
         coarse_h=mcfg["coarse_h"], coarse_d_ff=mcfg["coarse_d_ff"],
+        coarse_in_channels=mcfg.get("coarse_in_channels"),
         **_shared_igpt_kwargs(mcfg),
     ).to(device)
 

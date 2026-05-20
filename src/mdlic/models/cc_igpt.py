@@ -26,6 +26,11 @@ class CCIGPT(nn.Module):
     条件 p(G|R), p(B|R,G)，适合 RGB-bit-exact 域（避免 channel-first 下相隔
     1024 token 找同位置 R/G/B 的注意力信噪比问题）。
 
+    `coarse_in_channels` 允许 coarse 只压部分通道（R-only 灰度先验）：默认
+    None → 与 in_channels 一致；传 1 → coarse 仅看 R 8×8（64 tokens, ~2%
+    overhead），fine 通过 sub-pixel AR 自行学 G/B 相对 R 的偏色修正。仅在
+    `color_transform='none'` 下有意义（单通道无 YCbCr / YCoCg-R 语义）。
+
     Refs:
       Burt & Adelson, "The Laplacian Pyramid as a Compact Image Code," 1983
       van den Oord et al., "Conditional PixelCNN," NeurIPS 2016 (additive 条件)
@@ -48,6 +53,8 @@ class CCIGPT(nn.Module):
         activation_checkpointing: bool = False,
         # coarse/fine 共享平铺开关；类 docstring + _compute_coarse_ctx 详述
         use_subpixel_ar: bool = False,
+        # coarse 通道数；None → 与 in_channels 一致。R-only 灰度先验传 1。
+        coarse_in_channels: int = None,
     ):
         super().__init__()
         assert image_size % pool_factor == 0, (
@@ -61,17 +68,31 @@ class CCIGPT(nn.Module):
         self.color_transform = _resolve_color_transform(color_transform, use_ycbcr)
         self.use_subpixel_ar = use_subpixel_ar
 
+        coarse_in_channels = coarse_in_channels or in_channels
+        assert 1 <= coarse_in_channels <= in_channels, (
+            f"coarse_in_channels ({coarse_in_channels}) 必须 ∈ [1, in_channels={in_channels}]"
+        )
+        # R-only / 部分通道 coarse 仅在裸 RGB 域有意义。BT.601 / YCoCg-R 需要
+        # 完整 3 通道才能定义逆变换；单通道 coarse 走这两条会得到非法值。
+        if coarse_in_channels < in_channels:
+            assert self.color_transform == "none", (
+                f"coarse_in_channels < in_channels 仅支持 color_transform='none'，"
+                f"got '{self.color_transform}'"
+            )
+
         shared = dict(
-            in_channels=in_channels, vocab_size=vocab_size, dropout=dropout,
+            vocab_size=vocab_size, dropout=dropout,
             color_transform=self.color_transform,
             activation_checkpointing=activation_checkpointing,
             use_subpixel_ar=use_subpixel_ar,
         )
 
         self.coarse = IGPT(image_size=self.coarse_size,
+                           in_channels=coarse_in_channels,
                            d_model=coarse_d_model, N=coarse_N,
                            h=coarse_h, d_ff=coarse_d_ff, **shared)
         self.fine = IGPT(image_size=image_size,
+                         in_channels=in_channels,
                          d_model=fine_d_model, N=fine_N,
                          h=fine_h, d_ff=fine_d_ff, **shared)
 
@@ -127,36 +148,46 @@ class CCIGPT(nn.Module):
         device_type = "cuda" if coarse_tokens.is_cuda else "cpu"
         with torch.amp.autocast(device_type=device_type, enabled=False):
             B = coarse_tokens.size(0)
-            S, C = self.coarse_size, self.in_channels
+            S = self.coarse_size
+            C_coarse = self.coarse.in_channels
+            C_fine = self.in_channels
             ct = self.color_transform
 
-            # 入口：把 (B, N_c) 还原成 (B, C, S, S) 给反量化路径
+            # 入口：把 (B, N_c) 还原成 (B, C_coarse, S, S) 给反量化路径
             # channel-first: view(B,C,S,S)（coarse_tokens 本身 contiguous，view 后仍是）
             # pixel-first  : view(B,S,S,C) → permute 回 channel-first；permute 后必须
             #                .contiguous() 让下游 .float()/255.0 走标准 stride
             if self.coarse.use_subpixel_ar:
-                coarse_chw = coarse_tokens.view(B, S, S, C).permute(0, 3, 1, 2).contiguous()
+                coarse_chw = coarse_tokens.view(B, S, S, C_coarse).permute(0, 3, 1, 2).contiguous()
             else:
-                coarse_chw = coarse_tokens.view(B, C, S, S)
+                coarse_chw = coarse_tokens.view(B, C_coarse, S, S)
 
             if ct == "ycocg_r":
-                # YCoCg-R: 整数 lifting 逆变换直接得到 RGB float
+                # YCoCg-R: 整数 lifting 逆变换直接得到 RGB float（要求 C_coarse==3）
                 rec = ycocg_r_int_to_rgb(coarse_chw)            # (B, 3, S, S) float [0,1]
             elif ct == "bt601":
                 rec = coarse_chw.float() / 255.0
-                # ITU-R BT.601 inverse: YCbCr [0,1] → RGB [0,1]
+                # ITU-R BT.601 inverse: YCbCr [0,1] → RGB [0,1]（要求 C_coarse==3）
                 y, cb, cr = rec[:, 0], rec[:, 1], rec[:, 2]
                 r = y + 1.402 * (cr - 0.5)
                 g = y - 0.344136 * (cb - 0.5) - 0.714136 * (cr - 0.5)
                 b = y + 1.772 * (cb - 0.5)
                 rec = torch.stack([r, g, b], dim=1).clamp(0.0, 1.0)
             else:  # "none"
-                rec = coarse_chw.float() / 255.0
+                rec = coarse_chw.float() / 255.0                # (B, C_coarse, S, S)
 
             x_up = F.interpolate(
                 rec, size=(self.image_size, self.image_size),
                 mode='bilinear', align_corners=False,
             )
+            # R-only / 部分通道 coarse 的"灰度先验"：把 C_coarse 通道复制扩展
+            # 到 fine 的 C_fine 通道。每个像素 R/G/B 三个位置看到同一个 coarse
+            # 值；fine 通过 sub-pixel AR 自学 G/B 相对 R 的偏色。expand 后必须
+            # .contiguous() 因为下游 .clamp/.round/.permute/reshape 期望标准
+            # stride，expand 共享 stride=0 会让 reshape 报错。
+            if C_coarse < C_fine:
+                x_up = x_up.expand(-1, C_fine, -1, -1).contiguous()
+
             if ct == "bt601":
                 x_up_tok = rgb_to_ycbcr_int(x_up)
             elif ct == "ycocg_r":
@@ -184,7 +215,12 @@ class CCIGPT(nn.Module):
           ctx_alpha (detached) / logits (fused path 下为 None)
         """
         x = x.clamp(0, 1).to(torch.float32)              # encoder/decoder 一致性
-        x_c_float = F.adaptive_avg_pool2d(x, self.coarse_size)
+        x_c_full = F.adaptive_avg_pool2d(x, self.coarse_size)
+        # R-only / 部分通道 coarse：截前 C_coarse 个通道（通常是 R）
+        if self.coarse.in_channels < self.in_channels:
+            x_c_float = x_c_full[:, :self.coarse.in_channels]
+        else:
+            x_c_float = x_c_full
 
         out_c = self.coarse(x_c_float, z_loss_weight=z_loss_weight)
         # bit-exact: ctx 走 coarse 量化 token 重建路径（decoder 同款）
@@ -219,7 +255,11 @@ class CCIGPT(nn.Module):
         x = x.clamp(0, 1).to(torch.float32)
         coarse_ctx = None
         if use_coarse_ctx:
-            x_c_float = F.adaptive_avg_pool2d(x, self.coarse_size)
+            x_c_full = F.adaptive_avg_pool2d(x, self.coarse_size)
+            if self.coarse.in_channels < self.in_channels:
+                x_c_float = x_c_full[:, :self.coarse.in_channels]
+            else:
+                x_c_float = x_c_full
             coarse_tokens = self.coarse._tokenize(x_c_float)
             coarse_ctx = self.ctx_alpha * self._compute_coarse_ctx(coarse_tokens)
         return self.fine.encode(x, max_layer=max_layer, pool=pool,

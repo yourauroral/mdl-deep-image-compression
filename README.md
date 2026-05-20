@@ -22,7 +22,8 @@
 | **iGPT-S (Ours, best)** | **76.05M** | **2.9792** | YCbCr-int | d_model=512, N=24, 200 epochs |
 | **iGPT-S (Ours, SWA)** | **76.05M** | **2.9739** | YCbCr-int | SWA averaged over 21 checkpoints |
 | **CC-iGPT (Ours)** | **~81M** | **2.8047 ± 0.0747** | YCbCr-int | 双尺度条件 AR (fine 76M + coarse 4.8M, pool=4×); early-stop @ epoch 20（CIFAR-10 容量过剩，详见 §实验讨论） |
-| **CC-iGPT (Ours, RGB ablation)** | ~81M | **3.2540** | RGB-bit-exact | `use_ycbcr=false`，SWA (50 epochs)，与上方 RGB-bit-exact 基线同域可比 |
+| **CC-iGPT (Ours, RGB ablation)** | ~81M | **3.2540** | RGB-bit-exact | `use_ycbcr=false`，SWA (50 epochs)，channel-first 序列 |
+| **CC-iGPT (Ours, RGB sub-pixel AR)** | ~81M | **3.1625** | RGB-bit-exact | `use_ycbcr=false` + `use_subpixel_ar=true`，SWA (50 epochs)，序列布局 `[R₀G₀B₀ R₁G₁B₁ ...]` 把通道相关吃进 AR 结构，相对 channel-first 改进 −0.092 bpd |
 | PNG | — | ~5.87 | RGB-bit-exact | 传统方法 |
 | WebP (lossless mode) | — | ~5.02 | RGB-bit-exact | 传统方法 |
 
@@ -53,9 +54,9 @@ CC-iGPT 在 24 层 / ~81M 的参数预算下，沿三个维度构建差异化：
 
 1. **方法 — 零新参数的双尺度条件注入**：coarse iGPT 量化 token 经 bit-exact 反量化/上采样/重 tokenize 后，复用 `fine.token_embed` 得到 `coarse_ctx`，再以可学习标量 α 做 additive 注入。整个 ctx 通路只引入 1 个标量参数；encoder/decoder 共用同一函数，bitstream 真实可解码。回避了多尺度联合 AR (MSPA) 的 loss 平衡难题。
 2. **工程 — 8 个手写 Triton kernel + 1 个 roofline 证伪的反面案例**：7 个进入训练栈，1 个 `fused_linear_ce` 在 V=256 下经 roofline 分析判定为负收益（compute-bound + 三重循环失去 cuBLAS GEMM 利用率），保留在 `ops/` 作工程严谨性的反向证据，详见 [`experiments/kernel_negative_finding.md`](experiments/kernel_negative_finding.md)。
-3. **分析 — 域口径诚实标注 + 多视角评估**：明确区分 **YCbCr-int 域无损**（主路径，相对原始 RGB 近无损）与 **RGB-bit-exact 无损**（ablation 路径，相对原始 RGB 严格无损）两档语义；同时报告两域 bpd（RGB ablation 给 YCbCr credit），Linear Probe 逐层表征曲线，Roofline forward 与 fwd+bwd 双视角。
+3. **分析 — 域口径诚实标注 + 多视角评估 + 三档 RGB-bit-exact 实测对照**：明确区分 **YCbCr-int 域无损**（主路径，相对原始 RGB 近无损）与 **RGB-bit-exact 无损**（ablation 路径，相对原始 RGB 严格无损）两档语义；同时报告两域 bpd（RGB ablation 给 YCbCr credit），Linear Probe 逐层表征曲线，Roofline forward 与 fwd+bwd 双视角。RGB-bit-exact 域内进一步给出三档实测对照（channel-first 3.2540 / YCoCg-R lifting 3.2630 / **sub-pixel AR 3.1625**），证实"通道相关靠 AR 序列布局吃比靠 coarse_ctx 注入更有效"，sub-pixel 是三档里唯一真正下降的方案（-0.092 bpd）。
 
-与 Sparse Transformer 的差距（RGB ablation 实测 3.2540 vs 2.80）来自参数预算（81M vs 59M）/ 深度（24 vs 128 层）/ 训练 epoch（50 vs 200+）/ DMoL 输出头已尝试失败 git revert（详见 [`future.md`](future.md) §3.5 / §7 F1）/ 未实现 strided sparse attention 与 RCT 等 RGB-domain 通道相关化，而非方法路线缺陷。
+与 Sparse Transformer 的差距（RGB sub-pixel 实测 3.1625 vs 2.80）来自参数预算（81M vs 59M）/ 深度（24 vs 128 层）/ 训练 epoch（50 vs 200+）/ DMoL 输出头已尝试失败 git revert（详见 [`future.md`](future.md) §3.5 / §7 F1）/ 未实现 strided sparse attention 与 RCT 等 RGB-domain 通道相关化，而非方法路线缺陷。
 
 ## 快速开始
 
