@@ -128,14 +128,25 @@ python scripts/dryrun_forward.py
 pytest tests/ -v
 
 # ========== AutoDL: 训练 ==========
-torchrun --nproc_per_node=2 scripts/train.py --config configs/igpt_cifar10_s.yaml
-torchrun --nproc_per_node=2 scripts/train.py --config configs/ccigpt_cifar10_s.yaml
+# ⚠️ AutoDL 多卡 DDP 必须设置 NCCL_P2P_DISABLE=1 NCCL_IB_DISABLE=1，
+#    否则 NCCL init 会卡死或报 "unhandled cuda error"（共享 GPU 实例无 P2P/IB）。
+NCCL_P2P_DISABLE=1 NCCL_IB_DISABLE=1 \
+    torchrun --nproc_per_node=2 scripts/train.py --config configs/igpt_cifar10_s.yaml
+NCCL_P2P_DISABLE=1 NCCL_IB_DISABLE=1 \
+    torchrun --nproc_per_node=2 scripts/train.py --config configs/ccigpt_cifar10_s.yaml
 
-# 后台挂起 (断开 SSH 不中断)
+# 后台挂起 (断开 SSH 不中断) — 推荐写法，NCCL flag 必带
+NCCL_P2P_DISABLE=1 NCCL_IB_DISABLE=1 \
 nohup torchrun --nproc_per_node=2 scripts/train.py \
     --config configs/ccigpt_cifar10_s.yaml \
     > train_ccigpt.log 2>&1 &
 tail -f train_ccigpt.log
+
+# CC-iGPT RGB-bit-exact R-only coarse 改造 (sub-pixel AR + R-only 灰度先验)
+NCCL_P2P_DISABLE=1 NCCL_IB_DISABLE=1 \
+nohup torchrun --nproc_per_node=2 scripts/train.py \
+    --config configs/ccigpt_cifar10_s_rgb_ronly.yaml --export_csv \
+  > experiments/ccigpt_cifar10_s_rgb_ronly_train.log 2>&1 &
 
 # 监控 GPU
 watch -n 1 nvidia-smi
