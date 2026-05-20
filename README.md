@@ -3,17 +3,17 @@
 基于 **Minimum Description Length (MDL)** 原则的深度图像压缩系统设计与实现。核心命题：**压缩即预测** — CE loss 直接对应 Shannon 最优编码长度 (Shannon 1948, Delétang et al. 2024)。
 
 > **关于"无损"口径**：本系统提供两档配置 ——
-> (a) `use_ycbcr=true`（默认，对齐工业链路 JPEG/H.26x/VVC）：**YCbCr-int 域无损**。RGB 经 BT.601 + `round()` 进入 YCbCr-int 后，建模/编码/解码链严格无损；但 `round()` 是多对一映射，相对原始 RGB 是**近无损**。
-> (b) `use_ycbcr=false`（RGB-domain ablation）：**RGB-bit-exact 无损**。直接在 RGB uint8 上建模，与 PixelCNN++ / Sparse Transformer 等基线同域可比。
+> (a) `color_transform=bt601`（iGPT-S baseline 默认，对齐工业链路 JPEG/H.26x/VVC）：**YCbCr-int 域无损**。RGB 经 BT.601 + `round()` 进入 YCbCr-int 后，建模/编码/解码链严格无损；但 `round()` 是多对一映射，相对原始 RGB 是**近无损**。
+> (b) `color_transform=none`（CC-iGPT 主表）：**RGB-bit-exact 无损**。直接在 RGB uint8 上建模，与 PixelCNN++ / Sparse Transformer 等基线同域可比。CC-iGPT 主表（R-only 灰度先验 + sub-pixel AR）走此档；YCbCr-int 域 CC-iGPT 在 B1 切片 fix 后不再追，仅作脚注保留旧切片语义数字。
 
 - **Phase A (完成)**: iGPT token-level 自回归压缩 + 8 个手写 Triton Kernel（7 个进入训练栈，1 个 `fused_linear_ce` 在 V=256 下经 roofline 分析证伪、保留作反面案例，~2,400 行），iGPT-S CIFAR-10 SWA **2.9739 bits/dim**
-- **Phase B (代码完成，数字待重训)**: CC-iGPT（Coarse-Conditioned iGPT）双尺度条件自回归 — 浅层 coarse iGPT (8×8, 192 token) 独立编码进 bitstream，UP + 量化后通过 additive embedding（可学习标量 α）注入 fine iGPT (32×32, 3072 token)。⚠️ 2026-05-20 修复 `_compute_coarse_ctx` 的 AR 切片对齐（`[:, :-1] → [:, 1:]`，ctx 与被预测位置同位对齐 PixelCNN++ conditional 标准语义），下方所有 CC-iGPT bpd 数字（YCbCr-int 2.8047 / RGB channel-first 3.2540 / RGB sub-pixel 3.1625 / ImageNet32 3.0951）均为旧切片语义结果，在新语义下需重训覆盖；R-only 灰度先验配置作为新语义第一验证点优先训练。
+- **Phase B (代码完成，主表 RGB-bit-exact 域，重训中)**: CC-iGPT（Coarse-Conditioned iGPT）双尺度条件自回归 — 浅层 coarse iGPT (8×8, 192 token) 独立编码进 bitstream，UP + 量化后通过 additive embedding（可学习标量 α）注入 fine iGPT (32×32, 3072 token)。⚠️ 2026-05-20 修复 `_compute_coarse_ctx` 的 AR 切片对齐（`[:, :-1] → [:, 1:]`，ctx 与被预测位置同位对齐 PixelCNN++ conditional 标准语义）后，**主表收敛到 RGB-bit-exact 两档**（R-only 灰度先验 + sub-pixel AR），不再追 YCbCr-int 域 CC-iGPT 主表与 RGB channel-first 序列实验（旧切片语义结果作脚注保留，不重训覆盖）。
 - **Phase C (完成)**: Demo 前端可视化系统 (FastAPI + Chart.js, 5 个展示面板)
-- **补充实验 (RGB-domain ablation, 待 B1 重训)**: `configs/ccigpt_cifar10_s_rgb.yaml`（`color_transform=none`）在 **RGB-bit-exact 无损**配置下训练 50 epoch + SWA，旧切片语义实测 **3.2540 bits/dim**；据此首次量化 YCbCr credit = `bpd_RGB − bpd_YCbCr = 0.4493 bits/dim`，对齐 PixelCNN++ / Sparse Transformer 等 RGB-bit-exact 基线。新切片语义下数字预期变化 < 0.01 bpd，结论方向不受影响。
+- **YCbCr credit 测量 (旧切片语义脚注)**: `configs/ccigpt_cifar10_s_rgb.yaml`（`color_transform=none`, channel-first）在旧切片语义下训练 50 epoch + SWA 实测 **3.2540 bits/dim**，配合 YCbCr-int 主路径 2.8047 给出 YCbCr credit = `0.4493 bits/dim`。该数字作为论文"两域同骨干实测桥"的支撑保留为脚注，但因 channel-first 已被 sub-pixel AR 实测超越（−0.092 bpd）、且 YCbCr-int 主表不再做 B1 切片重训，两个数字仅作旧切片语义对照，不进入主结果。
 
 ## Baseline 对比
 
-> ⚠️ **B1 切片对齐 fix (2026-05-20)**：`_compute_coarse_ctx` 末尾 `[:, :-1] → [:, 1:]`，ctx 与被预测位置同位对齐（PixelCNN++ conditional / VAR multi-scale 标准语义）。下表所有 CC-iGPT 行（YCbCr-int 2.8047 / RGB channel-first 3.2540 / RGB sub-pixel 3.1625）的数字均来自旧切片语义训练，需在新切片下重训覆盖；预期差异 < 0.01 bpd（相邻位置 bilinear UP 值高度相关），方法路线与结论方向不变。重训顺序与决策树见 [`future.md`](future.md) §3.
+> ⚠️ **B1 切片对齐 fix (2026-05-20) 与主表范围收敛**：`_compute_coarse_ctx` 末尾 `[:, :-1] → [:, 1:]`，ctx 与被预测位置同位对齐（PixelCNN++ conditional / VAR multi-scale 标准语义）。同时主表收敛到 **RGB-bit-exact 两档**（R-only 灰度先验 + sub-pixel AR），不再做 YCbCr-int 域 CC-iGPT 与 RGB channel-first 重训。下表中 YCbCr-int CC-iGPT 2.8047 与 RGB channel-first 3.2540 是旧切片语义结果，作为对照与"为什么需要 sub-pixel AR"的失败信号脚注保留，**不进入新切片语义下的主结果**。R-only 与 sub-pixel 行将在 B1 切片下重训后回填新数字。重训顺序与决策见 [`future.md`](future.md) §3。
 
 | 方法 | Params | CIFAR-10 bits/dim ↓ | 域 | 来源 |
 |------|--------|---------------------|----|------|
@@ -23,27 +23,27 @@
 | Sparse Transformer | 59M | 2.80 | RGB-bit-exact | Child et al., 2019 (128 层 strided sparse attention) |
 | **iGPT-S (Ours, best)** | **76.05M** | **2.9792** | YCbCr-int | d_model=512, N=24, 200 epochs |
 | **iGPT-S (Ours, SWA)** | **76.05M** | **2.9739** | YCbCr-int | SWA averaged over 21 checkpoints |
-| **CC-iGPT (Ours)** | **~81M** | **2.8047 ± 0.0747** ⚠️ 待 B1 重训 | YCbCr-int | 双尺度条件 AR (fine 76M + coarse 4.8M, pool=4×); early-stop @ epoch 20（旧切片语义） |
-| **CC-iGPT (Ours, RGB ablation)** | ~81M | **3.2540** ⚠️ 待 B1 重训 | RGB-bit-exact | `color_transform=none`，SWA (50 epochs)，channel-first 序列（旧切片语义） |
-| **CC-iGPT (Ours, RGB sub-pixel AR)** | ~81M | **3.1625** ⚠️ 待 B1 重训 | RGB-bit-exact | `color_transform=none` + `use_subpixel_ar=true`，SWA (50 epochs)，序列布局 `[R₀G₀B₀ R₁G₁B₁ ...]` 把通道相关吃进 AR 结构，相对 channel-first −0.092 bpd（旧切片语义） |
+| **CC-iGPT (Ours, RGB R-only)** | ~81M | **待 B1 重训** | RGB-bit-exact | `color_transform=none` + `coarse_in_channels=1`，coarse 仅压 R 8×8（64 token, ~2% overhead），fine 通过 sub-pixel AR 自学 G/B 偏色（B1 切片下首个完整训练，进行中） |
+| **CC-iGPT (Ours, RGB sub-pixel AR)** | ~81M | **待 B1 重训** | RGB-bit-exact | `color_transform=none` + `use_subpixel_ar=true`，序列布局 `[R₀G₀B₀ R₁G₁B₁ ...]` 把通道相关吃进 AR 结构（主表关键数字，B1 切片下重训） |
+| ~~CC-iGPT (YCbCr, 旧切片语义)~~ | ~81M | 2.8047 ± 0.0747 (脚注) | YCbCr-int | early-stop @ ep20，旧切片语义；B1 切片下不再重训，作 YCbCr credit 测量配套数字保留 |
+| ~~CC-iGPT (RGB channel-first, 旧切片语义)~~ | ~81M | 3.2540 (脚注) | RGB-bit-exact | `color_transform=none`，SWA (50 ep)，旧切片语义；channel-first vs sub-pixel −0.092 bpd 已显示效果不佳，不重训 |
 | PNG | — | ~5.87 | RGB-bit-exact | 传统方法 |
 | WebP (lossless mode) | — | ~5.02 | RGB-bit-exact | 传统方法 |
 
-> **域口径说明**：上表「YCbCr-int」行 (`color_transform=bt601`) 报告的是 **YCbCr-int 域无损** bits/dim — RGB 输入先经 BT.601 + `round()` 量化进 YCbCr uint8，AR 模型在该域上严格无损建模/编解码。`round()` 是多对一映射（多个 RGB 三元组可映射到同一 YCbCr 三元组），因此该数值与 PixelCNN++ / Sparse Transformer 等 **RGB-bit-exact** 基线**不直接可比**；二者间差额即 "YCbCr credit"，由补充实验 [`configs/ccigpt_cifar10_s_rgb.yaml`](configs/ccigpt_cifar10_s_rgb.yaml) 实测（旧切片语义，待 B1 重训覆盖）：
+> **域口径与脚注数字说明**：上表 iGPT-S 仍以 YCbCr-int 域报告（Phase A 主路径，未涉及 coarse_ctx，B1 不影响）。CC-iGPT **主表两行（R-only / sub-pixel）只走 RGB-bit-exact 域**，与 PixelCNN++ / Sparse Transformer 同域可比。两行划线脚注：YCbCr-int 2.8047 与 RGB channel-first 3.2540 是 B1 切片 fix 之前的旧切片语义结果，仅作以下两个用途保留：
 >
-> $$\text{YCbCr credit} = \text{bpd}_{\text{RGB}} - \text{bpd}_{\text{YCbCr}} = 3.2540 - 2.8047 = 0.4493\ \text{bits/dim}$$
+> 1. **YCbCr credit 测量**：bpd_RGB − bpd_YCbCr = 3.2540 − 2.8047 = 0.4493 bits/dim，反映 BT.601 通道解相关 + `round()` 量化共同贡献的"可被压缩信息"。据作者所知，文献中此前未见对该差额的系统测量 —— 学界基线（PixelCNN++ / PixelSNAIL / Sparse Transformer）一律在 RGB-bit-exact 上评估，工业编解码器（JPEG/H.26x/VVC）一律在 YCbCr 上操作，本工作以**旧切片语义实测**首次给出两域同骨干的桥（B1 切片下两个数字预期同向变化，credit 差额方向不变）。
+> 2. **RGB channel-first vs sub-pixel 对照**：3.2540 − 3.1625 = 0.092 bits/dim，证实"通道相关靠 AR 序列布局吃比靠 coarse_ctx 注入更有效"，sub-pixel 是三档 RGB 配置里唯一真正下降的方案，作为论文 §3.x"为什么需要 sub-pixel AR"的失败信号。
 >
-> 该值同时反映 BT.601 通道解相关 + `round()` 量化两部分共同贡献的"可被压缩的信息"。据作者所知，文献中此前未见对该差额的系统测量 —— 学界基线（PixelCNN++ / PixelSNAIL / Sparse Transformer）一律在 RGB-bit-exact 上评估，工业编解码器（JPEG/H.26x/VVC）一律在 YCbCr 上操作，本工作首次给出两域同骨干的实测桥。
->
-> RGB ablation 行 3.2540 vs Sparse Transformer 2.80 的差距，归因于：(a) 50 epoch vs 文献基线 200+ epoch 训练预算差；(b) 24 层 dense attention vs Sparse Transformer 128 层 strided sparse attention；(c) PixelCNN++ 系 mixture-of-logistics (DMoL) 已尝试 2026-05 失败 git revert（本仓库 AdamW + DDP + bf16 训练栈与 PixelCNN++ 原版 Adamax + WN + fp32 结构性不兼容，详见 [`future.md`](future.md) §3.5 / §7 F1）；RCT 等 RGB-domain 通道相关化方向未尝试。
+> CC-iGPT 主表（B1 切片下 RGB sub-pixel）vs Sparse Transformer 2.80 的差距，归因于：(a) 50 epoch vs 文献基线 200+ epoch 训练预算差；(b) 24 层 dense attention vs Sparse Transformer 128 层 strided sparse attention；(c) PixelCNN++ 系 mixture-of-logistics (DMoL) 已尝试 2026-05 失败 git revert（本仓库 AdamW + DDP + bf16 训练栈与 PixelCNN++ 原版 Adamax + WN + fp32 结构性不兼容，详见 [`future.md`](future.md) §3.5 / §7 F1）；RCT 等 RGB-domain 通道相关化方向未尝试。
 
-### ImageNet 32×32 训练动力学验证（早期 checkpoint）
+### ImageNet 32×32 训练动力学验证（早期 checkpoint，旧切片语义脚注）
 
-受时间预算限制 ImageNet32 完整训练未完成，但有一个 epoch 7 的 best 中间 checkpoint，作为**训练动力学外推证据**报告（不进上方 CIFAR-10 主表，避免与文献基线被误读为同一基准）：
+受时间预算限制 ImageNet32 完整训练未完成，且 B1 切片 fix 后主表收敛到 CIFAR-10 RGB-bit-exact 两档，ImageNet32 不在 B1 切片下重训。下表为旧切片语义下 epoch 7 best 中间 checkpoint 实测数字，作为**训练动力学外推证据**保留（不进 CIFAR-10 主表，避免与文献基线被误读为同一基准；定性结论"CC-iGPT 在更大数据集上训练动力学保持正常"不依赖切片选择）：
 
 | 方法 | epoch | bits/dim (YCbCr-int) | CE_coarse | CE_fine | α | coarse bit share | 参考 |
 |------|-------|----|----|----|---|---|------|
-| **CC-iGPT (Ours, ImageNet32, training)** | 7 / 120 | **3.0951 ± 0.0967** ⚠️ 待 B1 重训 | 2.8300 | 1.9685 | 0.476 | 8.2% | 本文（旧切片语义） |
+| **CC-iGPT (Ours, ImageNet32, training, 旧切片)** | 7 / 120 | **3.0951 ± 0.0967** (脚注) | 2.8300 | 1.9685 | 0.476 | 8.2% | 本文（旧切片语义，不在 B1 下重训） |
 | Sparse Transformer | 充分收敛 | 3.44 | — | — | — | — | Child et al. 2019 (RGB-bit-exact) |
 
 CC-iGPT 7 epoch 的 CE_coarse 已**低于**其 CIFAR-10 ep20 收敛值（2.8300 < 2.9329），说明 ImageNet32 ~1.28M 训练样本使 coarse 模型获得更广分布；CE_fine 仍高于 CIFAR-10（1.9685 > 1.7591），符合 fine 76M 在 7 epoch 远未收敛的预期。α 与 coarse bit share 落在设计预期范围内，验证 CC-iGPT 双尺度条件式注入在更大数据集上**训练动力学保持正常**。完整收敛实验留作后续工作。
@@ -56,9 +56,9 @@ CC-iGPT 在 24 层 / ~81M 的参数预算下，沿三个维度构建差异化：
 
 1. **方法 — 零新参数的双尺度条件注入**：coarse iGPT 量化 token 经 bit-exact 反量化/上采样/重 tokenize 后，复用 `fine.token_embed` 得到 `coarse_ctx`，再以可学习标量 α 做 additive 注入。整个 ctx 通路只引入 1 个标量参数；encoder/decoder 共用同一函数，bitstream 真实可解码。回避了多尺度联合 AR (MSPA) 的 loss 平衡难题。
 2. **工程 — 8 个手写 Triton kernel + 1 个 roofline 证伪的反面案例**：7 个进入训练栈，1 个 `fused_linear_ce` 在 V=256 下经 roofline 分析判定为负收益（compute-bound + 三重循环失去 cuBLAS GEMM 利用率），保留在 `ops/` 作工程严谨性的反向证据，详见 [`experiments/kernel_negative_finding.md`](experiments/kernel_negative_finding.md)。
-3. **分析 — 域口径诚实标注 + 多视角评估 + 三档 RGB-bit-exact 实测对照**：明确区分 **YCbCr-int 域无损**（主路径，相对原始 RGB 近无损）与 **RGB-bit-exact 无损**（ablation 路径，相对原始 RGB 严格无损）两档语义；同时报告两域 bpd（RGB ablation 给 YCbCr credit），Linear Probe 逐层表征曲线，Roofline forward 与 fwd+bwd 双视角。RGB-bit-exact 域内进一步给出三档实测对照（channel-first 3.2540 / YCoCg-R lifting 3.2630 / **sub-pixel AR 3.1625**），证实"通道相关靠 AR 序列布局吃比靠 coarse_ctx 注入更有效"，sub-pixel 是三档里唯一真正下降的方案（-0.092 bpd）。
+3. **分析 — 域口径诚实标注 + 多视角评估 + RGB-bit-exact 三档实测对照**：明确区分 **YCbCr-int 域无损**（iGPT-S baseline 主路径，相对原始 RGB 近无损）与 **RGB-bit-exact 无损**（CC-iGPT 主表路径，相对原始 RGB 严格无损）两档语义；同时报告两域 bpd（YCbCr credit 测量作为旧切片语义脚注），Linear Probe 逐层表征曲线，Roofline forward 与 fwd+bwd 双视角。RGB-bit-exact 域内进一步给出三档实测对照（channel-first 3.2540 / YCoCg-R lifting 3.2630 / **sub-pixel AR 3.1625**，均旧切片语义），证实"通道相关靠 AR 序列布局吃比靠 coarse_ctx 注入更有效"，sub-pixel 是三档里唯一真正下降的方案（−0.092 bpd）；B1 切片 fix 后主表只重训 R-only + sub-pixel 两档（YCbCr-int CC-iGPT 主表与 channel-first 不再追，作脚注）。
 
-与 Sparse Transformer 的差距（RGB sub-pixel 实测 3.1625 vs 2.80）来自参数预算（81M vs 59M）/ 深度（24 vs 128 层）/ 训练 epoch（50 vs 200+）/ DMoL 输出头已尝试失败 git revert（详见 [`future.md`](future.md) §3.5 / §7 F1）/ 未实现 strided sparse attention 与 RCT 等 RGB-domain 通道相关化，而非方法路线缺陷。
+与 Sparse Transformer 的差距（B1 重训后 RGB sub-pixel vs 2.80）来自参数预算（81M vs 59M）/ 深度（24 vs 128 层）/ 训练 epoch（50 vs 200+）/ DMoL 输出头已尝试失败 git revert（详见 [`future.md`](future.md) §3.5 / §7 F1）/ 未实现 strided sparse attention 与 RCT 等 RGB-domain 通道相关化，而非方法路线缺陷。
 
 ## 快速开始
 
