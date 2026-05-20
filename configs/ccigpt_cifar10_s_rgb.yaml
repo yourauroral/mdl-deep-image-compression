@@ -1,7 +1,7 @@
 exp_name: "ccigpt_cifar10_s_rgb"
 
 # CC-iGPT RGB-domain ablation（"裸 RGB"基线，RGB-bit-exact 对照组）
-# 与 ccigpt_cifar10_s.yaml 唯一差异：use_ycbcr=false（即 color_transform="none"）
+# 与 ccigpt_cifar10_s.yaml 唯一差异：color_transform="none"（关掉 BT.601 + round 前端）
 # 目的：量化 BT.601 + round 量化前端相对裸 RGB 建模的 bits/dim 收益。
 # 实测 50ep + SWA = 3.2540 bpd，YCbCr credit = 0.4493 bpd。
 #
@@ -27,7 +27,7 @@ model:
   coarse_h: 4
   coarse_d_ff: 688
 
-  use_ycbcr: false              # ablation 主开关：关掉 BT.601 + round 量化
+  color_transform: "none"        # ablation 主开关：关掉 BT.601 + round 量化（RGB-bit-exact）
   activation_checkpointing: true
 
 data:

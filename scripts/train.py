@@ -15,6 +15,7 @@ import argparse
 import yaml
 import math
 import torch
+import torch.nn as nn
 import torch.optim as optim
 from contextlib import nullcontext
 from torch.utils.data import DataLoader
@@ -189,10 +190,20 @@ def _build_ccigpt_from_config(mcfg: dict, device) -> CCIGPT:
 
 
 def _get_param_groups(model, weight_decay=0.1):
-    """构建 AdamW 参数组：embedding/norm/bias/ctx_alpha 不做 weight decay。"""
+    """构建 AdamW 参数组：embedding / norm / bias / ctx_alpha 不做 weight decay。
+
+    用 isinstance(module, …) 识别 norm/embedding 层，避免子串 'norm' 误匹配（例如
+    未来若把模块命名成 `normalizer` / `ln1` 都会静默改变 wd 行为）。
+    """
+    from src.mdlic.models.layers import RMSNorm
+    no_decay_modules = (nn.Embedding, RMSNorm, nn.LayerNorm)
     no_decay = set()
+    for module_name, module in model.named_modules():
+        if isinstance(module, no_decay_modules):
+            for pname, _ in module.named_parameters(recurse=False):
+                no_decay.add(f"{module_name}.{pname}" if module_name else pname)
     for name, _ in model.named_parameters():
-        if any(nd in name for nd in ['token_embed', 'channel_embed', 'norm', 'bias', 'ctx_alpha']):
+        if name.endswith('bias') or name.endswith('ctx_alpha'):
             no_decay.add(name)
     return [
         {"params": [p for n, p in model.named_parameters() if n not in no_decay], "weight_decay": weight_decay},
@@ -687,10 +698,14 @@ def main():
             for pg in optimizer.param_groups:
                 pg['initial_lr'] = base_lr
                 pg['lr'] = base_lr
-            # Scheduler base_lrs 同步（cosine/wsd 的 lr_lambda 乘以 base_lr）
+            # Scheduler base_lrs 同步（cosine/wsd 的 lr_lambda 乘以 base_lr）。
+            # last_epoch=start_epoch-2 后 step() 一次推进到 start_epoch-1，并触发
+            # lr_lambda 把 pg['lr'] 同步成正确的衰减值。否则 LambdaLR.__init__ 后
+            # 主循环 epoch 末才 step()，resume 后第一个 epoch 会跑全峰值 lr。
             if scheduler is not None:
                 scheduler.base_lrs = [pg['initial_lr'] for pg in optimizer.param_groups]
-                scheduler.last_epoch = start_epoch - 1
+                scheduler.last_epoch = start_epoch - 2
+                scheduler.step()
 
             if rank == 0:
                 print(f"Resumed from checkpoint '{args.resume}' (epoch {ckpt.get('epoch', '?')}, best_bpd={best_bpd:.4f})")
@@ -752,9 +767,10 @@ def main():
             # 一次性 batched NaN 检查，避免逐参数 .item() 多次同步
             has_nan = torch.stack([torch.isnan(p.data).any() for p in raw_model.parameters()]).any().item()
             if has_nan:
+                # 跳过本 tick，保留 swa_state（无论 None 或已累积），下一 tick 自动回到正确分支
                 print(f"  WARNING: skipping SWA update at epoch {epoch} — model contains NaN weights")
             elif swa_state is None:
-                # 首次以 fp32 拷贝
+                # 首次以 fp32 拷贝（含"NaN 跳过若干 tick 后才首次成功累积"的情况）
                 swa_state = {name: param.data.detach().float().clone()
                              for name, param in raw_model.named_parameters()}
                 swa_n = 1

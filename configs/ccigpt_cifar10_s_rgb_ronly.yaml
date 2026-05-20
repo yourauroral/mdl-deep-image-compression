@@ -46,7 +46,7 @@ model:
   coarse_h: 4
   coarse_d_ff: 688
 
-  use_ycbcr: false              # RGB-bit-exact 前端（真无损）
+  color_transform: "none"       # RGB-bit-exact 前端（真无损）
   use_subpixel_ar: true         # pixel-first AR (coarse + fine 同步开启)
   coarse_in_channels: 1         # ★ R-only coarse；fine 仍 RGB 三通道
   activation_checkpointing: true   # fine N=24 必须开

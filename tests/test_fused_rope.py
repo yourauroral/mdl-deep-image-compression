@@ -22,6 +22,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from src.mdlic.ops.fused_rope import fused_apply_rotary_emb
 from src.mdlic.models.layers import RotaryEmbedding, apply_rotary_emb
 
+pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton kernel requires CUDA")
+
 
 # ── 测试参数 ────────────────────────────────────────────────────
 # (B, h, T, d_k): batch, heads, seq_len, head_dim

@@ -11,6 +11,11 @@ exp_name: "ccigpt_cifar10_s_ycocg"
 #   - vocab_size: 512（YCoCg-R 后 Co/Cg 偏移需要 512 词表）
 #   - min_lr_ratio: 0.1（cosine 末段保留 10% 峰值 LR，让 SWA 有效）
 #
+# ⚠️ 与其他 RGB-bit-exact 档（_rgb / _rgb_subpixel / _rgb_ronly）不严格可比：
+#   仅本档配置 min_lr_ratio=0.1，其它档默认 0.0（衰到 0）。论文表注明
+#   该档"训练失败"用作负结果，不参与同栈 ablation 比较，因此 LR 末段差异
+#   不影响结论。后续若复活该方案需把 min_lr_ratio 也对齐其它档。
+#
 # 原始目标：在严格 RGB-bit-exact 语义下达到 bpd ≤ 2.85。
 # 失败归因：vocab 翻倍 (256→512) capacity tax + Co/Cg 双峰分布在 6 层 coarse iGPT
 # 上容量不足 + softmax-per-subpixel 输出头无通道耦合。详见 future.md §3.5。

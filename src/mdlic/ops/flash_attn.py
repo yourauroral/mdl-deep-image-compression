@@ -252,7 +252,9 @@ def _attn_fwd(
 
     # m_i: the running maximum. We have one for each query
     m_i = tl.zeros([BLOCK_SIZE_Q], dtype=tl.float32) - float("inf")
-    # l_i: the running sum. We have one for each query (as we sum the attention scores by rows)
+    # l_i: the running sum. We have one for each query (as we sum the attention scores by rows).
+    # 初值 +1.0 是数值稳定保险：若某查询块全部 KV 被 causal mask 屏蔽，l_i 不会保持
+    # 严格 0 触发末尾除零；正常路径首个有效块后 alpha=exp(-inf)=0 会把这 1.0 乘掉。
     l_i = tl.zeros([BLOCK_SIZE_Q], dtype=tl.float32) + 1.0
     # acc: the accumulator for the output, which is a group of rows of the O matrix
     O_block = tl.zeros([BLOCK_SIZE_Q, HEAD_DIM], dtype=tl.float32)

@@ -15,7 +15,7 @@ model:
   h: 8
   d_ff: 1376
   dropout: 0.0
-  use_ycbcr: true
+  color_transform: "bt601"
   use_subpixel_ar: true
   activation_checkpointing: true
 

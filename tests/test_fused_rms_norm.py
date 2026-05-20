@@ -18,6 +18,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from src.mdlic.ops.fused_rms_norm import fused_rms_norm
 
+pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton kernel requires CUDA")
+
 
 # ── PyTorch 参考实现 ────────────────────────────────────────────
 def rms_norm_ref(x: torch.Tensor, weight: torch.Tensor, eps: float = 1e-10):

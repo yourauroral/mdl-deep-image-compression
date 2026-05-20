@@ -11,6 +11,8 @@ import triton
 import triton.language as tl
 from src.mdlic.ops.flash_attn import TritonAttention, _test_op
 
+pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton kernel requires CUDA")
+
 @pytest.mark.parametrize(
     "batch, heads, seq_len, head_dim, causal",
     [

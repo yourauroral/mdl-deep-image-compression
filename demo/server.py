@@ -21,6 +21,7 @@ import sys
 import io
 import math
 import base64
+import threading
 
 import numpy as np
 from pathlib import Path
@@ -28,6 +29,13 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+
+# 提前固定 matplotlib backend 到 Agg：必须在 import pyplot 前，且只能在主线程
+# 完成一次；放在请求 handler 内会与并发请求争用全局 figure manager。
+import matplotlib
+matplotlib.use("Agg")
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 
 # 项目根目录
 ROOT = Path(__file__).resolve().parent.parent
@@ -90,11 +98,14 @@ async def get_scales():
 
 
 @app.post("/api/predict")
-async def predict(file: UploadFile = File(...)):
+def predict(file: UploadFile = File(...)):
     """
     上传一张图片，返回:
       - bpd: 整体 bits/dim（CC-iGPT 为 bpd_total，iGPT 由 CE 推算）
       - heatmap: base64 编码的 BPP 热力图 PNG（仅 iGPT；单位 bits/pixel = bpd × C）
+
+    注：sync def 形式让 FastAPI 自动放进 threadpool，避免 GPU forward 阻塞
+    event loop（async def 里直接调 model(x) 会卡住其它并发请求）。
     """
     try:
         import torch
@@ -103,11 +114,9 @@ async def predict(file: UploadFile = File(...)):
     except ImportError:
         raise HTTPException(status_code=500, detail="torch/torchvision not installed")
 
-    # 输入校验：MIME 类型 + 大小上限。content_type 可被客户端伪造，所以后面还会
-    # 让 PIL.Image.open 二次验证；这里只是廉价的早期拒绝。
     if file.content_type and file.content_type not in ALLOWED_CONTENT_TYPES:
         raise HTTPException(status_code=415, detail=f"Unsupported media type: {file.content_type}")
-    contents = await file.read(MAX_UPLOAD_BYTES + 1)
+    contents = file.file.read(MAX_UPLOAD_BYTES + 1)
     if len(contents) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail=f"File too large (>{MAX_UPLOAD_BYTES // 1024 // 1024} MB)")
     try:
@@ -115,7 +124,7 @@ async def predict(file: UploadFile = File(...)):
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid image file")
 
-    img = img.resize((32, 32), Image.BILINEAR)
+    img = img.resize((32, 32), Image.Resampling.BILINEAR)
     x = transforms.ToTensor()(img).unsqueeze(0)  # (1, 3, 32, 32)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -160,57 +169,64 @@ async def predict(file: UploadFile = File(...)):
 
 
 _MODEL_CACHE = {"model": None, "type": None}
+_MODEL_CACHE_LOCK = threading.Lock()
 
 
 def _get_cached_model(device):
+    """线程安全的延迟加载：double-checked locking 防止并发首请求重复 torch.load
+    同一份 ckpt 造成显存峰值翻倍。"""
     if _MODEL_CACHE["model"] is not None:
         return _MODEL_CACHE["model"], _MODEL_CACHE["type"]
 
-    import yaml
-    import torch
+    with _MODEL_CACHE_LOCK:
+        if _MODEL_CACHE["model"] is not None:
+            return _MODEL_CACHE["model"], _MODEL_CACHE["type"]
 
-    # 按优先级尝试主路径 ckpt：CC-iGPT 优于 iGPT-S baseline。
-    # 故意不扫整个 configs/ 目录 —— RGB ablation / YCoCg-R 等是论文对照档，
-    # 不应作为 demo 默认模型；如需展示对照档，应手动改这里的列表。
-    configs_dir = ROOT / "configs"
-    experiments_dir = ROOT / "experiments"
+        import yaml
+        import torch
 
-    for cfg_name in ["ccigpt_cifar10_s.yaml", "igpt_cifar10_s.yaml"]:
-        cfg_path = configs_dir / cfg_name
-        if not cfg_path.exists():
-            continue
-        with open(cfg_path) as f:
-            config = yaml.safe_load(f)
-        exp_name = config.get("exp_name", "")
-        ckpt_path = experiments_dir / exp_name / "checkpoints" / "best.pth"
-        if not ckpt_path.exists():
-            continue
+        # 按优先级尝试主路径 ckpt：CC-iGPT 优于 iGPT-S baseline。
+        # 故意不扫整个 configs/ 目录 —— RGB ablation / YCoCg-R 等是论文对照档，
+        # 不应作为 demo 默认模型；如需展示对照档，应手动改这里的列表。
+        configs_dir = ROOT / "configs"
+        experiments_dir = ROOT / "experiments"
 
-        mcfg = config["model"]
-        model_type = mcfg.get("type", "igpt")
+        for cfg_name in ["ccigpt_cifar10_s.yaml", "igpt_cifar10_s.yaml"]:
+            cfg_path = configs_dir / cfg_name
+            if not cfg_path.exists():
+                continue
+            with open(cfg_path) as f:
+                config = yaml.safe_load(f)
+            exp_name = config.get("exp_name", "")
+            ckpt_path = experiments_dir / exp_name / "checkpoints" / "best.pth"
+            if not ckpt_path.exists():
+                continue
 
-        from scripts.train import _build_model_from_config, _build_ccigpt_from_config
-        if model_type == "ccigpt":
-            model = _build_ccigpt_from_config(mcfg, device)
-        else:
-            model = _build_model_from_config(mcfg, device)
+            mcfg = config["model"]
+            model_type = mcfg.get("type", "igpt")
 
-        # weights_only=False 仅在 demo 加载本地受信 checkpoint 时使用（含 epoch/optimizer
-        # 等非 tensor 字段，weights_only=True 会失败）。若部署到公网或允许第三方上传
-        # checkpoint，必须切换到 weights_only=True 并改造为只接收 state_dict。
-        ckpt = torch.load(str(ckpt_path), map_location=device, weights_only=False)
-        from src.mdlic.utils import clean_state_dict
-        if "model_state_dict" in ckpt:
-            model.load_state_dict(clean_state_dict(ckpt["model_state_dict"]))
-        else:
-            model.load_state_dict(clean_state_dict(ckpt))
-        model.eval()
+            from scripts.train import _build_model_from_config, _build_ccigpt_from_config
+            if model_type == "ccigpt":
+                model = _build_ccigpt_from_config(mcfg, device)
+            else:
+                model = _build_model_from_config(mcfg, device)
 
-        _MODEL_CACHE["model"] = model
-        _MODEL_CACHE["type"] = model_type
-        return model, model_type
+            # weights_only=False 仅在 demo 加载本地受信 checkpoint 时使用（含 epoch/optimizer
+            # 等非 tensor 字段，weights_only=True 会失败）。若部署到公网或允许第三方上传
+            # checkpoint，必须切换到 weights_only=True 并改造为只接收 state_dict。
+            ckpt = torch.load(str(ckpt_path), map_location=device, weights_only=False)
+            from src.mdlic.utils import clean_state_dict
+            if "model_state_dict" in ckpt:
+                model.load_state_dict(clean_state_dict(ckpt["model_state_dict"]))
+            else:
+                model.load_state_dict(clean_state_dict(ckpt))
+            model.eval()
 
-    return None, None
+            _MODEL_CACHE["model"] = model
+            _MODEL_CACHE["type"] = model_type
+            return model, model_type
+
+        return None, None
 
 
 def _make_heatmap_b64(model, x, logits):
@@ -247,19 +263,15 @@ def _make_heatmap_b64(model, x, logits):
     else:
         heatmap = full.reshape(C, H, W).sum(axis=0)
 
-    try:
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-    except ImportError:
-        return None
-
-    fig, ax = plt.subplots(figsize=(4, 4))
+    # 用 Figure + FigureCanvasAgg 绕开 pyplot 全局 figure manager；
+    # threadpool 并发请求下 plt.subplots/plt.close 共享 figure 池会互相干扰。
+    fig = Figure(figsize=(4, 4))
+    canvas = FigureCanvasAgg(fig)
+    ax = fig.add_subplot(111)
     ax.imshow(heatmap, cmap="hot", interpolation="nearest")
     ax.set_axis_off()
     fig.tight_layout(pad=0)
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=100, bbox_inches="tight", pad_inches=0)
-    plt.close(fig)
+    canvas.print_png(buf)
     buf.seek(0)
     return base64.b64encode(buf.read()).decode("ascii")

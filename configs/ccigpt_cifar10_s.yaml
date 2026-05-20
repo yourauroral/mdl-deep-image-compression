@@ -3,7 +3,7 @@ exp_name: "ccigpt_cifar10_s"
 # Coarse-Conditioned iGPT (CC-iGPT)
 # 双路结构: small coarse iGPT (8x8) + main fine iGPT (32x32, iGPT-S 配置)。
 # coarse 单独编码进 bitstream，UP+量化后通过 additive embedding 注入 fine。
-# 目标 bpd_total < 2.97 (击败 iGPT-S SWA 2.9739)。
+# 目标 bpd_total < 2.97 (击败 iGPT-S SWA 2.9739)。实测 early-stop @ ep20 = 2.8047（YCbCr-int 域无损）。
 
 model:
   type: ccigpt
@@ -26,7 +26,7 @@ model:
   coarse_d_ff: 688
 
   # 共享开关（coarse 与 fine 共用）
-  use_ycbcr: true
+  color_transform: "bt601"
   activation_checkpointing: true   # fine N=24 必须开
 
 data:

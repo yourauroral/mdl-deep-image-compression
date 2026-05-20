@@ -138,7 +138,6 @@ def _fused_linear_ce_bwd_kernel(
     WEIGHT_ptr,     # (V, D) — output head weights
     TARGETS_ptr,    # (M,)   — target indices
     D_HIDDEN_ptr,   # (M, D) — 输出: d_loss/d_hidden
-    DW_PARTIAL_ptr, # (M, V) 的部分和（或原子累加到 (V, D)）
     stride_hidden,
     stride_weight,
     stride_dhidden,
@@ -326,7 +325,6 @@ class FusedLinearCrossEntropyFunction(torch.autograd.Function):
                 hidden.contiguous(), weight.contiguous(),
                 targets.contiguous(),
                 d_hidden,
-                None,
                 stride_hidden=hidden.stride(0),
                 stride_weight=weight.stride(0),
                 stride_dhidden=d_hidden.stride(0),

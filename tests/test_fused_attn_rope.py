@@ -23,6 +23,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from src.mdlic.ops.fused_attn_rope import fused_attn_rope
 from src.mdlic.models.layers import RotaryEmbedding, apply_rotary_emb
 
+pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton kernel requires CUDA")
+
 
 # ── 测试参数 ────────────────────────────────────────────────────
 # d_k//2 必须是 2 的幂（fused_rope Triton 限制）

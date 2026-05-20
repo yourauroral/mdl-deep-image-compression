@@ -23,6 +23,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from src.mdlic.ops.fused_linear_ce import fused_linear_cross_entropy
 
+# fused_linear_ce 在 V=256 下被 roofline 证伪（compute-bound + 三重循环失去
+# cuBLAS GEMM 利用率），保留作反面案例不进训练栈；测试整体 skip 避免误导
+# 维护成本。详见 experiments/kernel_negative_finding.md。
+pytestmark = [
+    pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton kernel requires CUDA"),
+    pytest.mark.skip(reason="fused_linear_ce 是 roofline 证伪的反面案例 kernel，不进训练栈"),
+]
+
 
 # ── PyTorch 参考实现 ────────────────────────────────────────────
 def linear_ce_ref(hidden, weight, targets, z_loss_weight=1e-4):

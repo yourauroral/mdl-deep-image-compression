@@ -92,13 +92,14 @@ def evaluate_model(model, loader, device, amp_dtype=None):
 
     返回:
       bpd_mean: float — 平均 bpd
-      bpd_std:  float — bpd 标准差（per-batch）
-      bpd_list: list[float] — 每个 batch 的 bpd
+      bpd_std:  float — bpd 标准差（batch-level 加权，与 train.py:validate() 同口径）
+      bpd_list: list[float] — 每个 batch 的 bpd（保留供 caller 自定义聚合）
       extras:   dict — 可选的额外字段（CC-iGPT 时含 ce_coarse / ce_fine / ctx_alpha）
     """
     model.eval()
     bpd_per_batch = []
     bpd_weighted_sum = 0.0
+    bpd_sq_weighted_sum = 0.0
     n_total = 0
     use_amp = amp_dtype is not None and device.type == 'cuda'
 
@@ -125,6 +126,7 @@ def evaluate_model(model, loader, device, amp_dtype=None):
         bpd_val = bpd.item()
         bpd_per_batch.append(bpd_val)
         bpd_weighted_sum += bpd_val * B
+        bpd_sq_weighted_sum += (bpd_val ** 2) * B
         n_total += B
 
         if "ce_loss_coarse" in out and out["ce_loss_coarse"] is not None:
@@ -135,7 +137,10 @@ def evaluate_model(model, loader, device, amp_dtype=None):
                 alpha_sum += out["ctx_alpha"].item() * B
 
     bpd_mean = bpd_weighted_sum / n_total
-    bpd_std = float(np.std(bpd_per_batch))
+    # batch-level 加权 std，与 train.py:validate() 同公式：avoid np.std(batch_means)
+    # 在末尾不足 batch 时给小 batch 过高权重。
+    bpd_var = max(bpd_sq_weighted_sum / n_total - bpd_mean ** 2, 0.0)
+    bpd_std = float(math.sqrt(bpd_var))
 
     extras = {}
     if is_ccigpt:
@@ -182,8 +187,9 @@ def evaluate_per_channel(model, loader, device, amp_dtype=None,
     else:
         channel_names = ["R", "G", "B"]
 
-    # 每个通道的 CE loss 列表
-    channel_ce = {ch: [] for ch in channel_names}
+    # 每个通道按 token 数加权累积 (sum, sum_sq, n)，避免末尾 batch 偏小时
+    # `np.mean(batch_means)` 给小 batch 过高权重，造成与 evaluate_model 的口径漂移。
+    channel_stats = {ch: {"ce_sum": 0.0, "ce_sq_sum": 0.0, "n": 0} for ch in channel_names}
 
     for batch in loader:
         if isinstance(batch, (list, tuple)):
@@ -231,30 +237,39 @@ def evaluate_per_channel(model, loader, device, amp_dtype=None,
                 ch_logits = logits[:, ch_start:ch_end]    # (B, ch_len, vocab)
                 ch_targets = target_tokens[:, ch_start:ch_end]  # (B, ch_len)
 
-            ch_ce = F.cross_entropy(
+            ce_per_token = F.cross_entropy(
                 ch_logits.reshape(-1, ch_logits.shape[-1]),
                 ch_targets.reshape(-1),
-                reduction="mean"
+                reduction="none",
             )
-            channel_ce[ch_name].append(ch_ce.item())
+            ce_sum = ce_per_token.sum().item()
+            ce_sq_sum = (ce_per_token ** 2).sum().item()
+            n_tokens = ce_per_token.numel()
+            channel_stats[ch_name]["ce_sum"] += ce_sum
+            channel_stats[ch_name]["ce_sq_sum"] += ce_sq_sum
+            channel_stats[ch_name]["n"] += n_tokens
 
-    # 汇总
+    # 汇总：token-level mean / std（per-token 的标准差，与论文表的 bpd ± std 口径一致）
     channel_bpds = {}
     for ch_name in channel_names:
-        if channel_ce[ch_name]:
-            ce_mean = float(np.mean(channel_ce[ch_name]))
-            ce_std = float(np.std(channel_ce[ch_name]))
-            # bpd = CE / ln(2)  (单通道，不乘 C)
-            bpd_mean = ce_mean / math.log(2)
-            bpd_std = ce_std / math.log(2)
-            channel_bpds[ch_name] = (bpd_mean, bpd_std)
+        stat = channel_stats[ch_name]
+        if stat["n"] > 0:
+            n = stat["n"]
+            ce_mean = stat["ce_sum"] / n
+            ce_var = max(stat["ce_sq_sum"] / n - ce_mean ** 2, 0.0)
+            ce_std = math.sqrt(ce_var)
+            channel_bpds[ch_name] = (ce_mean / math.log(2), ce_std / math.log(2))
 
-    # 总 bpd = 三通道 bpd 的平均（保持 bits/dim 单位与主流程一致）。
-    # 三通道 token 数相等，sum/C 就是 token-level mean 的恢复。
-    n_channels = len(channel_bpds)
-    if n_channels > 0:
-        total_mean = sum(v[0] for v in channel_bpds.values()) / n_channels
-        total_std = math.sqrt(sum(v[1]**2 for v in channel_bpds.values())) / n_channels
+    # 总 bpd: 按各通道 token 数加权（channel-first 下通道 0 的 N 比 ch1/ch2 少 1）。
+    # token-weighted Σ(ce·n)/Σ n 与 evaluate_model 返回的 bpd_mean 同口径。
+    if channel_bpds:
+        total_n = sum(channel_stats[ch]["n"] for ch in channel_bpds)
+        total_ce = sum(channel_stats[ch]["ce_sum"] for ch in channel_bpds)
+        total_ce_sq = sum(channel_stats[ch]["ce_sq_sum"] for ch in channel_bpds)
+        total_mean_ce = total_ce / total_n
+        total_var_ce = max(total_ce_sq / total_n - total_mean_ce ** 2, 0.0)
+        total_mean = total_mean_ce / math.log(2)
+        total_std = math.sqrt(total_var_ce) / math.log(2)
     else:
         total_mean, total_std = 0.0, 0.0
 
@@ -549,7 +564,9 @@ def _get_amp_dtype(config):
     支持 fp16 / bf16 / null / "none" / "fp32" 五档；后三档表示走 fp32（amp_dtype=None）。
     口径漂移会让 evaluate 与训练时精度不一致，导致 bpd 数值不可比。
     """
-    amp_cfg = config["train"].get("amp_dtype", "bf16")
+    # 默认 fp16 与 train.py:594 同口径；若 yaml 省略 amp_dtype，evaluate 与训练
+    # 走完全相同的精度路径，避免 logits 接近 logsumexp 边界时 bpd 数值不可比。
+    amp_cfg = config["train"].get("amp_dtype", "fp16")
     if amp_cfg in (None, "none", "fp32"):
         return None, str(amp_cfg)
     if amp_cfg == "bf16":

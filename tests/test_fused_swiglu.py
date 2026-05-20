@@ -19,6 +19,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from src.mdlic.ops.fused_swiglu import fused_swiglu
 
+pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton kernel requires CUDA")
+
 
 # ── PyTorch 参考实现 ────────────────────────────────────────────
 def swiglu_ref(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
