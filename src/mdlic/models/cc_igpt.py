@@ -68,7 +68,8 @@ class CCIGPT(nn.Module):
         self.color_transform = _resolve_color_transform(color_transform, use_ycbcr)
         self.use_subpixel_ar = use_subpixel_ar
 
-        coarse_in_channels = coarse_in_channels or in_channels
+        if coarse_in_channels is None:
+            coarse_in_channels = in_channels
         assert 1 <= coarse_in_channels <= in_channels, (
             f"coarse_in_channels ({coarse_in_channels}) 必须 ∈ [1, in_channels={in_channels}]"
         )
@@ -128,7 +129,8 @@ class CCIGPT(nn.Module):
           5. 按 fine 平铺方式排成 (B, T) 后 fine.token_embed 查表 — 出口取决于 self.fine.use_subpixel_ar
              - channel-first: reshape(B, -1)
              - pixel-first  : permute(0,2,3,1).reshape(B, -1)
-          6. 丢掉最后一个 token 做 AR shift
+          6. 丢掉第一个 token 做 AR shift —— ctx[i] 与 fine 被预测位置 i 对齐
+             （PixelCNN++ conditional / VAR multi-scale 标准语义），不作弊原因详见返回处注释
 
         强制 autocast(enabled=False)：encoder/decoder 必须在完全相同的 dtype 下
         跑此函数才能 bit-exact。bilinear interp + round + token_embed 在 bf16/fp16
@@ -203,7 +205,13 @@ class CCIGPT(nn.Module):
                 # channel-first: [ch0_all, ch1_all, ch2_all]
                 x_up_tok = x_up_tok.reshape(B, -1)
             coarse_ctx = self.fine.token_embed(x_up_tok)             # (B, T, d_model)
-            return coarse_ctx[:, :-1]                                 # AR shift
+            # AR 对齐：ctx[i] 对应"被预测的位置 i"（同位置低频先验），与 PixelCNN++
+            # conditional / VAR multi-scale 标准语义一致；旧实现取 [:, :-1] 让 ctx 与
+            # *输入位置* 对齐，相当于"左邻居 coarse"，错开一位。
+            # 不作弊：coarse 走独立 bitstream，decoder 先解完整段 coarse token 得到
+            # 完整 32×32 ctx，再按序解 fine。ctx[i] 是 8×8→32×32 bilinear UP 的 lossy
+            # 低频先验，不能反推 fine_tok[i] 的精确 0-255 整数值。
+            return coarse_ctx[:, 1:]                                  # AR shift
 
     def forward(self, x, z_loss_weight: float = 1e-4):
         """

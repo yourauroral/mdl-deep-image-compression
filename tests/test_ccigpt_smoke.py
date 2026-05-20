@@ -451,7 +451,7 @@ def test_ccigpt_subpixel_ctx_pixel_first_layout(device):
     x_up_tok = (x_up.clamp(0, 1) * 255).round().long()       # (1, 3, 32, 32)
     # 出口：pixel-first 平铺
     expected_pixel_first = x_up_tok.permute(0, 2, 3, 1).reshape(1, -1)
-    expected_ctx = m.fine.token_embed(expected_pixel_first)[:, :-1]
+    expected_ctx = m.fine.token_embed(expected_pixel_first)[:, 1:]
 
     actual_ctx = m._compute_coarse_ctx(coarse_tokens)
     diff = (actual_ctx - expected_ctx).abs().max().item()
@@ -600,7 +600,7 @@ def test_ccigpt_ronly_expand_layout(device):
     assert torch.equal(reshaped[..., 0], reshaped[..., 1])
     assert torch.equal(reshaped[..., 1], reshaped[..., 2])
 
-    expected_ctx = m.fine.token_embed(expected_pixel_first)[:, :-1]
+    expected_ctx = m.fine.token_embed(expected_pixel_first)[:, 1:]
     actual_ctx = m._compute_coarse_ctx(coarse_tokens)
     diff = (actual_ctx - expected_ctx).abs().max().item()
     assert diff < 1e-6, (
