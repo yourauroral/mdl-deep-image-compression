@@ -142,11 +142,8 @@ class CCIGPT(nn.Module):
             "_compute_coarse_ctx 要求 coarse/fine 共享相同 use_subpixel_ar 开关，"
             f"got coarse={self.coarse.use_subpixel_ar} vs fine={self.fine.use_subpixel_ar}"
         )
-        # 强制 autocast 关闭：encoder/decoder 必须在完全相同 dtype 下跑此函数才能
-        # bit-exact。bilinear interp + round + token_embed 在 bf16/fp16 下结果会
-        # 跟 fp32 差 ±1 token，导致 bitstream 不可解。device_type 按输入 tensor
-        # 实际所在设备分发，CPU smoke test 也能正常走（PyTorch 2.4+ 严格校验
-        # device_type='cuda' 在 CPU tensor 上报错）。
+        # device_type 按输入 tensor 实际所在设备分发（PyTorch 2.4+ 严格校验
+        # device_type='cuda' 在 CPU tensor 上报错），让 CPU smoke test 也能走。
         device_type = "cuda" if coarse_tokens.is_cuda else "cpu"
         with torch.amp.autocast(device_type=device_type, enabled=False):
             B = coarse_tokens.size(0)
@@ -155,10 +152,8 @@ class CCIGPT(nn.Module):
             C_fine = self.in_channels
             ct = self.color_transform
 
-            # 入口：把 (B, N_c) 还原成 (B, C_coarse, S, S) 给反量化路径
-            # channel-first: view(B,C,S,S)（coarse_tokens 本身 contiguous，view 后仍是）
-            # pixel-first  : view(B,S,S,C) → permute 回 channel-first；permute 后必须
-            #                .contiguous() 让下游 .float()/255.0 走标准 stride
+            # (B, N_c) → (B, C_coarse, S, S)；pixel-first 下 permute 后 .contiguous()
+            # 让下游 .float()/255.0 走标准 stride（permute 改 stride 不改内存）
             if self.coarse.use_subpixel_ar:
                 coarse_chw = coarse_tokens.view(B, S, S, C_coarse).permute(0, 3, 1, 2).contiguous()
             else:
@@ -182,11 +177,10 @@ class CCIGPT(nn.Module):
                 rec, size=(self.image_size, self.image_size),
                 mode='bilinear', align_corners=False,
             )
-            # R-only / 部分通道 coarse 的"灰度先验"：把 C_coarse 通道复制扩展
-            # 到 fine 的 C_fine 通道。每个像素 R/G/B 三个位置看到同一个 coarse
-            # 值；fine 通过 sub-pixel AR 自学 G/B 相对 R 的偏色。expand 后必须
-            # .contiguous() 因为下游 .clamp/.round/.permute/reshape 期望标准
-            # stride，expand 共享 stride=0 会让 reshape 报错。
+            # R-only / 部分通道 coarse 的"灰度先验"：把 C_coarse 通道复制扩展到
+            # fine 的 C_fine 通道，每个像素 R/G/B 三个位置看到同一 coarse 值；fine
+            # 通过 sub-pixel AR 自学 G/B 相对 R 的偏色。expand 共享 stride=0 让下游
+            # reshape 报错，必须 .contiguous()。
             if C_coarse < C_fine:
                 x_up = x_up.expand(-1, C_fine, -1, -1).contiguous()
 
@@ -197,20 +191,15 @@ class CCIGPT(nn.Module):
             else:
                 x_up_tok = (x_up.clamp(0, 1) * 255).round().long()
             # 出口：按 fine 平铺方式排序 ctx token，与 fine._tokenize 输出顺序一致
-            # 才能让 fine.token_embed 索引、AR shift 正确对齐。
             if self.fine.use_subpixel_ar:
-                # pixel-first: [Y0,Cb0,Cr0, Y1,Cb1,Cr1, ...]
                 x_up_tok = x_up_tok.permute(0, 2, 3, 1).reshape(B, -1)
             else:
-                # channel-first: [ch0_all, ch1_all, ch2_all]
                 x_up_tok = x_up_tok.reshape(B, -1)
             coarse_ctx = self.fine.token_embed(x_up_tok)             # (B, T, d_model)
-            # AR 对齐：ctx[i] 对应"被预测的位置 i"（同位置低频先验），与 PixelCNN++
-            # conditional / VAR multi-scale 标准语义一致；旧实现取 [:, :-1] 让 ctx 与
-            # *输入位置* 对齐，相当于"左邻居 coarse"，错开一位。
-            # 不作弊：coarse 走独立 bitstream，decoder 先解完整段 coarse token 得到
-            # 完整 32×32 ctx，再按序解 fine。ctx[i] 是 8×8→32×32 bilinear UP 的 lossy
-            # 低频先验，不能反推 fine_tok[i] 的精确 0-255 整数值。
+            # AR 对齐：ctx[i] 与 fine 被预测位置 i 同位对齐（PixelCNN++ conditional /
+            # VAR multi-scale 标准语义）。不作弊：coarse 走独立 bitstream，decoder 先
+            # 解完整段 coarse token 得到完整 ctx 再按序解 fine；ctx 是 lossy 低频先验，
+            # 不能反推 fine_tok[i] 的精确 0-255 整数值。
             return coarse_ctx[:, 1:]                                  # AR shift
 
     def forward(self, x, z_loss_weight: float = 1e-4):

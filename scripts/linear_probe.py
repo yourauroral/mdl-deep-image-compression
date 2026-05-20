@@ -55,8 +55,7 @@ def build_model(mcfg, device):
     """构建 IGPT 或 CCIGPT。
 
     复用 train.py 的工厂函数，确保配置键路径与训练完全一致：
-    CC-iGPT yaml 用平铺键 (d_model 描述 fine、coarse_d_model 描述 coarse)，
-    早期版本曾尝试 mcfg["fine"]["d_model"] 嵌套键，与训练不兼容会立刻 KeyError。
+    CC-iGPT yaml 用平铺键 (d_model 描述 fine、coarse_d_model 描述 coarse)。
     """
     model_type = mcfg.get("type", "igpt")
     if model_type == "ccigpt":

@@ -514,8 +514,7 @@ def print_results_table(dataset_name, model_bpd, model_std,
         print("|------|-----------|")
         for ch_name, (bpd, std) in channel_bpds.items():
             print(f"| {ch_name} | {bpd:.4f} ± {std:.4f} |")
-        # Total 是三通道的平均（bits/dim 单位），与 evaluate_model 返回值一致；
-        # 曾经写 sum() 会多出 ~3× 的伪 Total。
+        # Total 是三通道的平均（bits/dim 单位），与 evaluate_model 返回值一致。
         total_bpd = sum(v[0] for v in channel_bpds.values()) / len(channel_bpds)
         print(f"| **Total** | **{total_bpd:.4f}** |")
     print()
