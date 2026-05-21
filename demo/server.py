@@ -185,13 +185,13 @@ def _get_cached_model(device):
         import yaml
         import torch
 
-        # 按优先级尝试主路径 ckpt：CC-iGPT 优于 iGPT-S baseline。
-        # 故意不扫整个 configs/ 目录 —— RGB ablation / YCoCg-R 等是论文对照档，
+        # 按优先级尝试主路径 ckpt：CC-iGPT R-only B1（主表 SOTA）优于 iGPT-S baseline。
+        # 故意不扫整个 configs/ 目录 —— channel-first / sub-pixel 是论文消融对照档，
         # 不应作为 demo 默认模型；如需展示对照档，应手动改这里的列表。
         configs_dir = ROOT / "configs"
         experiments_dir = ROOT / "experiments"
 
-        for cfg_name in ["ccigpt_cifar10_s.yaml", "igpt_cifar10_s.yaml"]:
+        for cfg_name in ["ccigpt_cifar10_s_rgb_ronly.yaml", "igpt_cifar10_s_rgb.yaml"]:
             cfg_path = configs_dir / cfg_name
             if not cfg_path.exists():
                 continue
@@ -243,7 +243,7 @@ def _make_heatmap_b64(model, x, logits):
     use_subpixel_ar = getattr(model, "use_subpixel_ar", False)
 
     logits = logits.float()
-    # 复用模型自身的 tokenize 路径，自动适配 BT.601 / YCoCg-R / none
+    # 复用模型自身的 tokenize 路径（RGB-bit-exact）
     tokens = model._tokenize(x.clamp(0, 1))
     target = tokens[:, 1:]
 

@@ -1,37 +1,24 @@
 exp_name: "ccigpt_cifar10_s_rgb_ronly"
 
-# CC-iGPT RGB-bit-exact 真无损 + sub-pixel AR + R-only coarse（灰度先验）
+# CC-iGPT RGB-bit-exact + sub-pixel AR + R-only coarse（灰度先验）
 #
 # 设计动机：
-#   ccigpt_cifar10_s_rgb_subpixel.yaml (3 通道 coarse + sub-pixel) 实测 3.1625 bpd，
-#   stop gate ≤3.0 未过。诊断：
-#     - CE_c 卡在 3.18 不动，coarse 在 RGB 域要同时学（通道相关 + 空间结构 + 边缘分布）
-#       三件事，4.8M / 6 层 coarse 容量不够。
-#     - α 收敛到 0.321，说明 ctx 信号已被 fine 主动削弱。
-#
-#   R-only 改造：让 coarse 只压 R 单通道 8×8（64 tokens, 2.08% overhead），
+#   coarse 只压 R 单通道 8×8（64 tokens, ~2% overhead），
 #   coarse 不再背"3 通道相关"重担，容量解放给"R 通道空间结构"。fine 通过
 #   sub-pixel AR 自学 G/B 相对 R 的偏色修正。
 #
-#   ctx 注入策略：R 复制三份的"灰度先验"
-#     coarse 输出 64 R token → bilinear UP 到 (B,1,32,32) → expand 到 (B,3,32,32)
-#     → fine.token_embed 查表。bit-exact 严格保留，零新参数（仅 ctx_alpha 标量）。
+# ctx 注入策略：R 复制三份的"灰度先验"
+#   coarse 输出 64 R token → bilinear UP 到 (B,1,32,32) → expand 到 (B,3,32,32)
+#   → fine.token_embed 查表。bit-exact 严格保留，零新参数（仅 ctx_alpha 标量）。
 #
-# 触发条件：sub-pixel 实测 3.1625 落入 [3.10, 3.20] 触发区，启动改造但需准备
-#   方案 B（coarse_d_model 256→384 + coarse_N 6→8）兜底。
-#
-# 同栈对比表：
-#   ccigpt_cifar10_s_rgb.yaml          (channel-first,        3-ch coarse, 50ep) 3.2540
-#   ccigpt_cifar10_s_rgb_subpixel.yaml (sub-pixel AR,         3-ch coarse, 50ep) 3.1625
-#   ccigpt_cifar10_s_rgb_ronly.yaml    (sub-pixel AR + R-only coarse,      50ep) 本配置，待实测
-#   ccigpt_cifar10_s.yaml              (channel-first YCbCr-int, 120ep, ep20早停) 2.8047
+# 本次重训配置：100ep + hflip 数据增强 + EMA (decay=0.999)，目标突破 3.10。
 
 model:
   type: ccigpt
   image_size: 32
   in_channels: 3
   vocab_size: 256
-  pool_factor: 4               # 32 → 8
+  pool_factor: 4
 
   # fine 模型（与 iGPT-S 一致，~76M 参数）
   d_model: 512
@@ -46,16 +33,17 @@ model:
   coarse_h: 4
   coarse_d_ff: 688
 
-  color_transform: "none"       # RGB-bit-exact 前端（真无损）
   use_subpixel_ar: true         # pixel-first AR (coarse + fine 同步开启)
   coarse_in_channels: 1         # ★ R-only coarse；fine 仍 RGB 三通道
-  activation_checkpointing: true   # fine N=24 必须开
+  activation_checkpointing: true
 
 data:
   dataset: "cifar10"
   train: datasets/
   valid: datasets/
   num_workers: 8
+  augment:
+    hflip: true                 # RandomHorizontalFlip(p=0.5)，仅训练集
 
 train:
   amp_dtype: "bf16"
@@ -63,16 +51,19 @@ train:
   grad_accum_steps: 2
   lr: 3e-4
   eps: 1e-8
-  epochs: 50                    # 与 sub-pixel baseline 训练预算对齐保证可比
+  epochs: 100
   log_freq: 50
   clip_max_norm: 1.0
   z_loss_weight: 1e-4
   lr_schedule: "cosine"
-  warmup_epochs: 3              # 6% epochs
+  warmup_epochs: 3
   swa:
     enabled: true
-    start_epoch: 45             # 最后 5 epoch 启动 SWA（90% epochs）
+    start_epoch: 90
     update_interval: 1
+  ema:
+    enabled: true
+    decay: 0.999               # 近 ~1000 step 主导，平滑训练末段抖动
 
 eval:
   interval: 2

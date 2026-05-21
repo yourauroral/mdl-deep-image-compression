@@ -11,7 +11,7 @@ Quick forward pass sanity check — 验证模型构建和 forward 是否正常�
 
 Usage:
     python scripts/dryrun_forward.py
-    python scripts/dryrun_forward.py --config configs/igpt_cifar10_s.yaml
+    python scripts/dryrun_forward.py --config configs/igpt_cifar10_s_rgb.yaml
 """
 
 import os
@@ -43,7 +43,7 @@ def _check_finite(out: dict, tag: str):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config', type=str, default='configs/igpt_cifar10_s.yaml')
+    parser.add_argument('--config', type=str, default='configs/igpt_cifar10_s_rgb.yaml')
     args = parser.parse_args()
 
     with open(args.config, 'r') as f:

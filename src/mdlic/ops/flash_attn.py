@@ -707,7 +707,6 @@ class TritonAttention(torch.autograd.Function):
         O = torch.empty_like(Q)
         stage = 3 if causal else 1
 
-        # grid: 不再使用 lambda（autotune 已移除），直接计算
         grid = (
             triton.cdiv(SEQ_LEN_PADDED, BLOCK_Q_DEFAULT),
             BATCH_SIZE * NUM_HEADS,

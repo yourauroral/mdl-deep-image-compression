@@ -10,11 +10,9 @@ from torchvision.datasets import CIFAR10, CIFAR100
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, project_root)
 
-from src.mdlic.models.igpt import rgb_to_ycbcr_int
-
 
 def test_dataloader_smoke():
-  config_path = os.path.join(project_root, "configs/igpt_cifar10_s.yaml")
+  config_path = os.path.join(project_root, "configs/igpt_cifar10_s_rgb.yaml")
   with open(config_path, "r") as f:
     config = yaml.safe_load(f)
 
@@ -37,8 +35,3 @@ def test_dataloader_smoke():
   x, _ = next(iter(train_loader))
   assert x.dim() == 4 and x.size(1) == 3
   assert 0.0 <= x.min().item() and x.max().item() <= 1.0
-
-  ycbcr = rgb_to_ycbcr_int(x)
-  assert ycbcr.shape == x.shape
-  assert ycbcr.dtype.is_floating_point is False
-  assert 0 <= ycbcr.min().item() and ycbcr.max().item() <= 255

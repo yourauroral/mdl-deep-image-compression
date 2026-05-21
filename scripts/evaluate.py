@@ -9,7 +9,7 @@ PixelCNN++ / Sparse Transformer 等基线原文口径一致；
 
 功能:
   1. 单模型评测: --checkpoint best.pth
-  2. Per-channel bpd 分解: --per_channel (Y/Cb/Cr 或 R/G/B)
+  2. Per-channel bpd 分解: --per_channel (R/G/B)
   3. SWA checkpoint 对比: --swa (同时评测 best.pth 和 swa.pth)
   4. 传统方法对比: --traditional (PNG/WebP lossless bpd)
   5. Per-position bpd 热力图: --heatmap (仅 iGPT)
@@ -18,19 +18,19 @@ PixelCNN++ / Sparse Transformer 等基线原文口径一致；
 
 Usage:
     # 单模型评测
-    python scripts/evaluate.py --config configs/igpt_cifar10_s.yaml \
-        --checkpoint experiments/igpt_cifar10_s/checkpoints/best.pth
+    python scripts/evaluate.py --config configs/igpt_cifar10_s_rgb.yaml \
+        --checkpoint experiments/igpt_cifar10_s_rgb/checkpoints/best.pth
 
     # Per-channel bpd 分解
-    python scripts/evaluate.py --config configs/igpt_cifar10_s.yaml \
+    python scripts/evaluate.py --config configs/igpt_cifar10_s_rgb.yaml \
         --checkpoint best.pth --per_channel
 
     # SWA vs best 对比
-    python scripts/evaluate.py --config configs/igpt_cifar10_s.yaml \
+    python scripts/evaluate.py --config configs/igpt_cifar10_s_rgb.yaml \
         --checkpoint experiments/exp/checkpoints/best.pth --swa
 
     # 传统方法对比
-    python scripts/evaluate.py --config configs/igpt_cifar10_s.yaml \
+    python scripts/evaluate.py --config configs/igpt_cifar10_s_rgb.yaml \
         --checkpoint best.pth --traditional
 
 参考:
@@ -152,9 +152,9 @@ def evaluate_model(model, loader, device, amp_dtype=None):
 
 @torch.no_grad()
 def evaluate_per_channel(model, loader, device, amp_dtype=None,
-                         color_transform: str = "bt601", use_subpixel_ar=False):
+                         use_subpixel_ar=False):
     """
-    Per-channel bits/dim 分解 — 分别计算 Y/Cb/Cr 或 Y/Co/Cg 或 R/G/B 的 bpd。
+    Per-channel bits/dim 分解 — 分别计算 R/G/B 的 bpd。
 
     原理:
       模型预测整个 token 序列，将 logits 和 targets 按通道拆分后分别计算 CE loss。
@@ -164,15 +164,7 @@ def evaluate_per_channel(model, loader, device, amp_dtype=None,
         - pixel-first  (use_subpixel_ar=True):  [c0_p0,c1_p0,c2_p0, c0_p1,...]
 
       bpd_channel = CE_channel / ln(2)
-      bpd_total = mean(bpd_ch0, bpd_ch1, bpd_ch2)  (三通道 token 数相等)
-
-    参数:
-      model: IGPT 模型
-      loader: DataLoader
-      device: torch.device
-      amp_dtype: AMP 精度
-      color_transform: "bt601" | "ycocg_r" | "none"，决定通道命名
-      use_subpixel_ar: bool — 是否使用子像素自回归（pixel-first 布局）
+      bpd_total = mean(bpd_R, bpd_G, bpd_B)  (三通道 token 数相等)
 
     返回:
       channel_bpds: dict[str, (float, float)] — {通道名: (bpd_mean, bpd_std)}
@@ -180,12 +172,7 @@ def evaluate_per_channel(model, loader, device, amp_dtype=None,
     """
     model.eval()
     use_amp = amp_dtype is not None and device.type == 'cuda'
-    if color_transform == "bt601":
-        channel_names = ["Y", "Cb", "Cr"]
-    elif color_transform == "ycocg_r":
-        channel_names = ["Y", "Co", "Cg"]
-    else:
-        channel_names = ["R", "G", "B"]
+    channel_names = ["R", "G", "B"]
 
     # 每个通道按 token 数加权累积 (sum, sum_sq, n)，避免末尾 batch 偏小时
     # `np.mean(batch_means)` 给小 batch 过高权重，造成与 evaluate_model 的口径漂移。
@@ -278,7 +265,7 @@ def evaluate_per_channel(model, loader, device, amp_dtype=None,
 
 @torch.no_grad()
 def evaluate_position_bpp(model, loader, device, amp_dtype=None,
-                           image_size=32, in_channels=3, color_transform: str = "bt601",
+                           image_size=32, in_channels=3,
                            use_subpixel_ar=False):
     """
     Per-position BPP 热力图 — 计算每个像素位置的平均 bits-per-pixel。
@@ -293,15 +280,6 @@ def evaluate_position_bpp(model, loader, device, amp_dtype=None,
       - 观察自回归方向（光栅扫描序列头部 vs 尾部）对压缩率的影响
       - 论文中可视化分析素材
 
-    参数:
-      model: IGPT 模型
-      loader: DataLoader
-      device: torch.device
-      amp_dtype: AMP 精度
-      image_size: int — 图像边长
-      in_channels: int — 通道数
-      color_transform: "bt601" | "ycocg_r" | "none"，决定通道命名
-
     返回:
       heatmap: np.ndarray (H, W) — 每个像素位置的平均 BPP (bits/pixel)
       channel_heatmaps: dict[str, np.ndarray] — 每通道 (H, W) bpd 热力图
@@ -311,12 +289,7 @@ def evaluate_position_bpp(model, loader, device, amp_dtype=None,
     C = in_channels
     H = W = image_size
     seq_len = H * W * C
-    if color_transform == "bt601":
-        channel_names = ["Y", "Cb", "Cr"]
-    elif color_transform == "ycocg_r":
-        channel_names = ["Y", "Co", "Cg"]
-    else:
-        channel_names = ["R", "G", "B"]
+    channel_names = ["R", "G", "B"]
 
     # 累积每个 token 位置的 CE loss
     # 序列布局: [ch0_pixel0, ch0_pixel1, ..., ch1_pixel0, ..., ch2_pixelN]
@@ -616,11 +589,10 @@ def cmd_single(args, config, device):
             print("\n[跳过 per_channel] CC-iGPT 含 coarse 子分支，per-channel 切分仅对 fine 有意义；目前未实现，bpd_total 已含三通道联合压缩率。")
         else:
             print("\n计算 per-channel bits/dim...")
-            color_transform = getattr(model, "color_transform", "bt601")
             use_subpixel_ar = mcfg.get("use_subpixel_ar", False)
             channel_bpds, (total_bpd, total_std) = evaluate_per_channel(
                 model, test_loader, device, amp_dtype=amp_dtype,
-                color_transform=color_transform, use_subpixel_ar=use_subpixel_ar
+                use_subpixel_ar=use_subpixel_ar
             )
             for ch_name, (ch_bpd, ch_std) in channel_bpds.items():
                 print(f"  {ch_name}: {ch_bpd:.4f} ± {ch_std:.4f}")
@@ -654,14 +626,13 @@ def cmd_single(args, config, device):
             print("\n[跳过 heatmap] CC-iGPT 含 coarse 子分支，per-position 热力图未实现。")
         else:
             print("\n生成 per-position BPP 热力图 (bits/pixel)...")
-            color_transform = getattr(model, "color_transform", "bt601")
             use_subpixel_ar = mcfg.get("use_subpixel_ar", False)
             image_size = mcfg.get("image_size", 32)
             in_channels = mcfg.get("in_channels", 3)
             heatmap, channel_heatmaps = evaluate_position_bpp(
                 model, test_loader, device, amp_dtype=amp_dtype,
                 image_size=image_size, in_channels=in_channels,
-                color_transform=color_transform, use_subpixel_ar=use_subpixel_ar
+                use_subpixel_ar=use_subpixel_ar
             )
             # 保存到 checkpoint 同目录
             ckpt_dir = os.path.dirname(args.checkpoint) or "."
@@ -732,15 +703,15 @@ def main():
         epilog="""
 示例:
   # 单模型
-  python scripts/evaluate.py --config configs/igpt_cifar10_s.yaml \\
+  python scripts/evaluate.py --config configs/igpt_cifar10_s_rgb.yaml \\
       --checkpoint best.pth
 
   # Per-channel + 传统方法
-  python scripts/evaluate.py --config configs/igpt_cifar10_s.yaml \\
+  python scripts/evaluate.py --config configs/igpt_cifar10_s_rgb.yaml \\
       --checkpoint best.pth --per_channel --traditional
 
   # SWA 对比
-  python scripts/evaluate.py --config configs/igpt_cifar10_s.yaml \\
+  python scripts/evaluate.py --config configs/igpt_cifar10_s_rgb.yaml \\
       --checkpoint experiments/exp/checkpoints/best.pth --swa
         """
     )
@@ -751,7 +722,7 @@ def main():
     parser.add_argument('--traditional', action='store_true',
                         help='同时计算 PNG/WebP 传统方法 bits/dim')
     parser.add_argument('--per_channel', action='store_true',
-                        help='计算 per-channel bits/dim 分解（Y/Cb/Cr）')
+                        help='计算 per-channel bits/dim 分解（R/G/B）')
     parser.add_argument('--heatmap', action='store_true',
                         help='生成 per-position BPP 热力图（保存为 PNG，单位 bits/pixel）')
     parser.add_argument('--swa', action='store_true',

@@ -1,10 +1,10 @@
 """
-针对 2026-04-20 代码审计发现问题的回归测试。
+DDP checkpoint / grad_accum / config validation 回归测试。
 
 测试范围：
   1. DDP checkpoint 保存/加载：raw_model 解包 + module. 前缀剥离
   2. grad_accum epoch 末尾 flush：余数 micro-batch 的梯度不丢失
-  3. CIFAR-10 / CIFAR-100 配置可加载且字段一致
+  3. configs 目录所有 yaml 通过 _validate_config
   4. 端到端：保存→加载→forward 一致
 
 运行：
@@ -38,7 +38,6 @@ def _build_tiny_igpt(device='cpu'):
         h=4,
         d_ff=128,
         dropout=0.0,
-        use_ycbcr=True,
         activation_checkpointing=False,
         use_subpixel_ar=True,
     ).to(device)
@@ -200,27 +199,6 @@ def test_config_validates(name):
     for key in ['exp_name', 'model', 'data', 'train', 'eval', 'checkpoint']:
         assert key in cfg, f"{name} 缺少字段 {key}"
     _validate_config(cfg)
-
-
-def test_cifar10_vs_cifar100_only_differ_in_dataset_and_expname():
-    """
-    CIFAR-10 和 CIFAR-100 的 S 配置应仅在 exp_name 和 data.dataset 不同，
-    其他超参一致 —— 这样切数据集只需复制配置，不会引入意外差异。
-    """
-    with open(os.path.join(CONFIG_DIR, 'igpt_cifar10_s.yaml')) as f:
-        c10 = yaml.safe_load(f)
-    with open(os.path.join(CONFIG_DIR, 'igpt_cifar100_s.yaml')) as f:
-        c100 = yaml.safe_load(f)
-
-    assert c10['exp_name'] != c100['exp_name']
-    assert c10['data']['dataset'] == 'cifar10'
-    assert c100['data']['dataset'] == 'cifar100'
-
-    # 模型/训练超参完全一致
-    assert c10['model'] == c100['model']
-    assert c10['train'] == c100['train']
-    assert c10['eval'] == c100['eval']
-    assert c10['checkpoint'] == c100['checkpoint']
 
 
 # ──────────────────────────────────────────────────────────────

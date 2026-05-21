@@ -1,10 +1,7 @@
 exp_name: "igpt_cifar10_s_rgb"
 
-# iGPT-S RGB-domain ablation
-# 与 igpt_cifar10_s.yaml 唯一差异：color_transform="none" + 训练预算与 ccigpt_cifar10_s_rgb.yaml 对齐
-# 目的：补齐 RGB 域的单尺度自回归基线，使 "iGPT vs CC-iGPT" 的双尺度增益论证
-# 在 RGB 与 YCbCr 两个域内都可独立成立。同时给出与 PixelCNN++ /
-# Sparse Transformer 等 RGB-bit-exact 基线直接对齐的单尺度 baseline 数。
+# iGPT-S RGB-bit-exact baseline (单尺度自回归)
+# 与 CC-iGPT 三档共用训练预算，作为单尺度对照。
 
 model:
   type: igpt
@@ -16,7 +13,6 @@ model:
   h: 8
   d_ff: 1376
   dropout: 0.0
-  color_transform: "none"        # ablation 主开关：关掉 BT.601 + round 量化（RGB-bit-exact）
   use_subpixel_ar: true
   activation_checkpointing: true
 
@@ -32,15 +28,15 @@ train:
   grad_accum_steps: 2
   lr: 3e-4
   eps: 1e-8
-  epochs: 50                    # 与 ccigpt_cifar10_s_rgb.yaml 训练预算对齐, 保证 RGB 域内 ablation 公平
+  epochs: 50
   log_freq: 50
   clip_max_norm: 1.0
   z_loss_weight: 1e-4
   lr_schedule: "cosine"
-  warmup_epochs: 3              # 6% epochs
+  warmup_epochs: 3
   swa:
     enabled: true
-    start_epoch: 45             # 最后 5 epoch 启动 SWA（90% epochs）
+    start_epoch: 45
     update_interval: 1
 
 eval:

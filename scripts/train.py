@@ -3,9 +3,9 @@
 Training script for iGPT autoregressive image compression.
 
 Usage:
-    python scripts/train.py --config configs/igpt_cifar10_s.yaml
-    python scripts/train.py --config configs/igpt_cifar10_s.yaml --resume experiments/.../epoch_10.pth
-    torchrun --nproc_per_node=2 scripts/train.py --config configs/igpt_cifar10_s.yaml
+    python scripts/train.py --config configs/igpt_cifar10_s_rgb.yaml
+    python scripts/train.py --config configs/igpt_cifar10_s_rgb.yaml --resume experiments/.../epoch_10.pth
+    torchrun --nproc_per_node=2 scripts/train.py --config configs/igpt_cifar10_s_rgb.yaml
 """
 
 import os
@@ -21,9 +21,6 @@ from contextlib import nullcontext
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 import torch.distributed as dist
-# torch.cuda.amp.autocast 和 GradScaler 在 PyTorch 2.4+ 已废弃，
-# 迁移至 torch.amp 统一接口。
-# Ref: PyTorch 2.4 Release Notes — "torch.cuda.amp.autocast is deprecated"
 from torch.amp import autocast
 from torch.cuda.amp import GradScaler
 from torch.utils.tensorboard import SummaryWriter
@@ -122,40 +119,21 @@ def _validate_config(config: dict):
             f"coarse_d_model ({mcfg['coarse_d_model']}) 必须能被 coarse_h ({mcfg['coarse_h']}) 整除"
         )
 
-        # coarse_in_channels：R-only 灰度先验仅在裸 RGB 域有意义
+        # coarse_in_channels：R-only 灰度先验
         coarse_ic = mcfg.get('coarse_in_channels')
         if coarse_ic is not None:
             assert 1 <= coarse_ic <= mcfg['in_channels'], (
                 f"model.coarse_in_channels ({coarse_ic}) 必须 ∈ "
                 f"[1, in_channels={mcfg['in_channels']}]"
             )
-            if coarse_ic < mcfg['in_channels']:
-                ct = mcfg.get('color_transform')
-                uy = mcfg.get('use_ycbcr')
-                # 与 _resolve_color_transform 同一优先级：显式 color_transform > use_ycbcr
-                # > 默认 'bt601'。任何非 'none' 路径下单通道 coarse 都没有合法逆变换。
-                resolved = ct if ct is not None else (
-                    'none' if uy is False else ('bt601' if uy is True else 'bt601')
-                )
-                assert resolved == 'none', (
-                    f"model.coarse_in_channels ({coarse_ic}) < in_channels 仅支持 "
-                    f"color_transform='none' / use_ycbcr=false（裸 RGB 域），"
-                    f"got color_transform='{resolved}'"
-                )
 
 
 def _shared_igpt_kwargs(mcfg: dict) -> dict:
-    """提取 iGPT / CC-iGPT 共用字段。
-
-    color_transform 优先；缺省时 fall back 到旧的 use_ycbcr 布尔字段
-    （True→'bt601', False→'none'），以兼容历史 config。
-    """
+    """提取 iGPT / CC-iGPT 共用字段。"""
     return dict(
         in_channels=mcfg["in_channels"],
         vocab_size=mcfg["vocab_size"],
         dropout=mcfg["dropout"],
-        color_transform=mcfg.get("color_transform"),
-        use_ycbcr=mcfg.get("use_ycbcr"),
         activation_checkpointing=mcfg.get("activation_checkpointing", False),
         use_subpixel_ar=mcfg.get("use_subpixel_ar", False),
     )
@@ -227,7 +205,8 @@ def train_one_epoch(model, loader, optimizer, scaler, device,
                     epoch, log_freq, writer, clip_max_norm,
                     amp_dtype=torch.float16, grad_accum_steps=1,
                     z_loss_weight=1e-4,
-                    distributed=False, rank=0):
+                    distributed=False, rank=0,
+                    on_optimizer_step=None):
     model.train()
     total_loss = 0
     total_bpd = 0
@@ -298,6 +277,9 @@ def train_one_epoch(model, loader, optimizer, scaler, device,
                     writer.add_scalar('train/loss_scale', scaler.get_scale(), step)
 
             optimizer.zero_grad(set_to_none=True)
+
+            if on_optimizer_step is not None:
+                on_optimizer_step()
 
         # 用 tensor 累加，避免每步 .item() 触发 GPU→CPU 同步
         # Ref: CS336 — 只在 log 时才 .item()
@@ -461,15 +443,25 @@ def main():
 
     # Dataset: 根据 config 选择 CIFAR-10 / CIFAR-100 / ImageNet32 npy
     from torchvision.datasets import CIFAR10, CIFAR100
-    transform = transforms.ToTensor()
+    aug_cfg = config["data"].get("augment", {}) or {}
+    train_tf_list = []
+    if aug_cfg.get("hflip", False):
+        train_tf_list.append(transforms.RandomHorizontalFlip(p=0.5))
+    train_tf_list.append(transforms.ToTensor())
+    train_transform = transforms.Compose(train_tf_list)
+    valid_transform = transforms.ToTensor()
+    if rank == 0 and aug_cfg.get("hflip", False):
+        print("Augment: RandomHorizontalFlip(p=0.5) on train split")
     dataset_name = config["data"].get("dataset", "cifar100")
 
     if dataset_name in ("cifar10", "cifar100"):
         DatasetClass = CIFAR10 if dataset_name == "cifar10" else CIFAR100
-        train_dataset = DatasetClass(root=config["data"]["train"], train=True,  download=False, transform=transform)
-        valid_dataset = DatasetClass(root=config["data"]["valid"], train=False, download=False, transform=transform)
+        train_dataset = DatasetClass(root=config["data"]["train"], train=True,  download=False, transform=train_transform)
+        valid_dataset = DatasetClass(root=config["data"]["valid"], train=False, download=False, transform=valid_transform)
     elif dataset_name == "imagenet32_npy":
         from src.mdlic.data.imagenet32_npy import ImageNet32Npy
+        if aug_cfg.get("hflip", False) and rank == 0:
+            print("WARNING: data.augment.hflip 在 imagenet32_npy 路径上当前未实现，已忽略")
         train_dataset = ImageNet32Npy(root=config["data"]["train"], split="train")
         valid_dataset = ImageNet32Npy(root=config["data"]["valid"], split="val")
     else:
@@ -629,6 +621,17 @@ def main():
         if rank == 0:
             print(f"SWA enabled: start_epoch={swa_start_epoch}, interval={swa_update_interval}")
 
+    # EMA (Exponential Moving Average) 初始化
+    # rank 0 维护 fp32 影子权重；每个 optimizer.step() 后更新；finalize 时
+    # broadcast 到全 rank → validate → 保存 ema.pth。
+    # Ref: Polyak & Juditsky 1992；iGPT (Chen 2020) / EDM / Stable Diffusion 标配。
+    ema_cfg = config["train"].get("ema", {})
+    ema_enabled = ema_cfg.get("enabled", False)
+    ema_decay = float(ema_cfg.get("decay", 0.999))
+    ema_state = None
+    if ema_enabled and rank == 0:
+        print(f"EMA enabled: decay={ema_decay}")
+
     best_bpd = float('inf')
     start_epoch = 1
 
@@ -693,6 +696,8 @@ def main():
             if swa_enabled and 'swa_state' in ckpt:
                 swa_state = ckpt['swa_state']
                 swa_n = ckpt.get('swa_n', 0)
+            if ema_enabled and 'ema_state' in ckpt:
+                ema_state = ckpt['ema_state']
             # resume 后用 config 中的 lr 覆盖 checkpoint 里的旧值，
             # 使得修改 yaml lr 后 resume 能立即生效。
             for pg in optimizer.param_groups:
@@ -711,6 +716,22 @@ def main():
                 print(f"Resumed from checkpoint '{args.resume}' (epoch {ckpt.get('epoch', '?')}, best_bpd={best_bpd:.4f})")
                 print(f"  LR overridden to config value: {base_lr:.2e} (schedule continues from epoch {start_epoch})")
 
+    def _ema_step():
+        """rank 0 上每个 optimizer.step() 后调用：用 fp32 累加更新影子权重。
+
+        ema_state 延迟初始化：第一次调用时按 raw_model 当前权重 clone 出 fp32 副本。
+        非 rank 0 走空操作（ema_state 始终 None，由 finalize broadcast 同步）。
+        """
+        nonlocal ema_state
+        if not ema_enabled or rank != 0:
+            return
+        if ema_state is None:
+            ema_state = {name: p.data.detach().float().clone()
+                         for name, p in raw_model.named_parameters()}
+            return
+        for name, p in raw_model.named_parameters():
+            ema_state[name].mul_(ema_decay).add_(p.data.float(), alpha=1.0 - ema_decay)
+
     for epoch in range(start_epoch, config['train']['epochs'] + 1):
         if distributed:
             train_sampler.set_epoch(epoch)
@@ -728,6 +749,7 @@ def main():
             z_loss_weight=float(config["train"].get("z_loss_weight", 1e-4)),
             distributed=distributed,
             rank=rank,
+            on_optimizer_step=_ema_step if ema_enabled else None,
         )
 
         if rank == 0:
@@ -798,7 +820,41 @@ def main():
             if swa_state is not None:
                 ckpt_data['swa_state'] = swa_state
                 ckpt_data['swa_n'] = swa_n
+            if ema_state is not None:
+                ckpt_data['ema_state'] = ema_state
             _atomic_save(ckpt_data, os.path.join(checkpoint_dir, f'epoch_{epoch}.pth'))
+
+    # EMA finalize：rank 0 替换权重 + broadcast → 全 rank 重新验证 → rank 0 保存
+    # 顺序上必须在 SWA finalize 之前，否则会被 SWA 替换后的权重覆盖。
+    # 同样的 DDP 死锁规避：rank 0 广播 0/1 标量决定全 rank 是否同时 finalize。
+    if ema_enabled:
+        ema_done = torch.tensor(
+            [1 if ema_state is not None else 0],
+            device=device, dtype=torch.int32,
+        )
+        if dist.is_available() and dist.is_initialized():
+            dist.broadcast(ema_done, src=0)
+
+        if ema_done.item() == 1:
+            # 备份训练末权重，EMA 验证完后还原（避免覆盖到 SWA finalize 输入）
+            backup_state = {name: p.data.detach().clone()
+                            for name, p in raw_model.named_parameters()}
+            if rank == 0:
+                for name, p in raw_model.named_parameters():
+                    p.data.copy_(ema_state[name].to(p.dtype))
+                print(f"EMA: replaced model weights (decay={ema_decay})")
+            if dist.is_available() and dist.is_initialized():
+                for p in raw_model.parameters():
+                    dist.broadcast(p.data, src=0)
+            bpd_avg, std_bpd, loss_avg = validate(model, valid_loader, device, amp_dtype=amp_dtype)
+            if rank == 0:
+                print(f"EMA Validation: Loss {loss_avg:.4f} | bits/dim {bpd_avg:.4f} ± {std_bpd:.4f}")
+                _atomic_save(raw_model.state_dict(), os.path.join(checkpoint_dir, 'ema.pth'))
+                if writer:
+                    writer.add_scalar('val/ema_bpd', bpd_avg, total_epochs)
+            # 还原训练末权重，给 SWA finalize 干净的输入
+            for name, p in raw_model.named_parameters():
+                p.data.copy_(backup_state[name])
 
     # SWA 后处理：rank 0 替换权重 + broadcast → 全 rank 重新验证 → rank 0 保存
     #

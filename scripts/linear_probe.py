@@ -5,8 +5,8 @@ Linear Probe 评估：加载预训练 iGPT checkpoint，提取各层特征，
 
 用法:
   python scripts/linear_probe.py \
-    --config configs/igpt_cifar10_s.yaml \
-    --checkpoint experiments/igpt_cifar10_s/checkpoints/best.pth \
+    --config configs/igpt_cifar10_s_rgb.yaml \
+    --checkpoint experiments/igpt_cifar10_s_rgb/checkpoints/best.pth \
     --layers all --epochs 100 --lr 0.1 --batch_size 256
 
 原理:
