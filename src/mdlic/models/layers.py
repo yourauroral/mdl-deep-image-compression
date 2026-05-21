@@ -344,6 +344,25 @@ class MultiHeadAttentionBlock(nn.Module):
 
     return self.w_o(attn_output)
 
+class DropPath(nn.Module):
+  """Stochastic Depth：训练时按 drop_prob 随机把整条残差分支置零。
+     Ref: Huang et al., "Deep Networks with Stochastic Depth," ECCV 2016
+          (timm 风格 per-sample 实现).
+  """
+  def __init__(self, drop_prob: float = 0.0):
+    super().__init__()
+    self.drop_prob = drop_prob
+
+  def forward(self, x):
+    if self.drop_prob == 0.0 or not self.training:
+      return x
+    keep_prob = 1.0 - self.drop_prob
+    # per-sample mask: shape (B, 1, 1, ...)，broadcast 到 seq/feature 维
+    shape = (x.shape[0],) + (1,) * (x.ndim - 1)
+    mask = x.new_empty(shape).bernoulli_(keep_prob).div_(keep_prob)
+    return x * mask
+
+
 class GPTBlock(nn.Module):
   """OLMo 2 风格 post-norm GPT Block：
        x = x + RMSNorm(Attn(x))
@@ -351,20 +370,25 @@ class GPTBlock(nn.Module):
      Ref: OLMo 2 arXiv:2501.00656 Section 3.1
   """
   def __init__(self, d_model, h, d_ff, dropout,
-               activation_checkpointing: bool = False):
+               activation_checkpointing: bool = False,
+               drop_path: float = 0.0):
     super().__init__()
     self.activation_checkpointing = activation_checkpointing
     self.norm1 = RMSNorm(d_model)
     self.norm2 = RMSNorm(d_model)
     self.attn = MultiHeadAttentionBlock(d_model, h, dropout)
     self.ff = FeedForwardBlock(d_model, d_ff, dropout)
+    self.drop_path1 = DropPath(drop_path)
+    self.drop_path2 = DropPath(drop_path)
+    # drop_path > 0 时 fused add+rmsnorm 无法在 norm 后插 drop，回退到分步路径
+    self._use_fused_add_rmsnorm = (drop_path == 0.0)
 
   def _attn_forward(self, x, position_ids=None):
     """Attention sublayer，可被 activation checkpoint 包裹。"""
     return self.attn(x, x, x, position_ids=position_ids)
 
   def forward(self, x, position_ids=None):
-    # OLMo 2 post-norm: x = x + RMSNorm(sublayer(x))
+    # OLMo 2 post-norm: x = x + DropPath(RMSNorm(sublayer(x)))
     if self.activation_checkpointing and self.training:
         # Selective activation checkpointing：只 checkpoint attention（显存瓶颈）
         # Ref: Chen et al., "Training Deep Nets with Sublinear Memory Cost,"
@@ -373,14 +397,13 @@ class GPTBlock(nn.Module):
                                     use_reentrant=False)
     else:
         attn_out = self._attn_forward(x, position_ids)
-    # Fused Add+RMSNorm: residual + RMSNorm(sublayer_out) 一次 kernel
-    if _USE_FUSED_ADD_RMSNORM and x.is_cuda:
+    if self._use_fused_add_rmsnorm and _USE_FUSED_ADD_RMSNORM and x.is_cuda:
         x = _fused_add_rms_norm(x, attn_out, self.norm1.weight, self.norm1.eps)
     else:
-        x = x + self.norm1(attn_out)
+        x = x + self.drop_path1(self.norm1(attn_out))
     ff_out = self.ff(x)
-    if _USE_FUSED_ADD_RMSNORM and x.is_cuda:
+    if self._use_fused_add_rmsnorm and _USE_FUSED_ADD_RMSNORM and x.is_cuda:
         x = _fused_add_rms_norm(x, ff_out, self.norm2.weight, self.norm2.eps)
     else:
-        x = x + self.norm2(ff_out)
+        x = x + self.drop_path2(self.norm2(ff_out))
     return x

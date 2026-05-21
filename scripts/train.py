@@ -136,6 +136,7 @@ def _shared_igpt_kwargs(mcfg: dict) -> dict:
         dropout=mcfg["dropout"],
         activation_checkpointing=mcfg.get("activation_checkpointing", False),
         use_subpixel_ar=mcfg.get("use_subpixel_ar", False),
+        drop_path=mcfg.get("drop_path", 0.0),
     )
 
 
@@ -445,13 +446,26 @@ def main():
     from torchvision.datasets import CIFAR10, CIFAR100
     aug_cfg = config["data"].get("augment", {}) or {}
     train_tf_list = []
+    crop_cfg = aug_cfg.get("random_crop") or {}
+    if crop_cfg:
+        train_tf_list.append(transforms.RandomCrop(
+            size=crop_cfg.get("size", 32),
+            padding=crop_cfg.get("padding", 4),
+            padding_mode=crop_cfg.get("padding_mode", "reflect"),
+        ))
     if aug_cfg.get("hflip", False):
         train_tf_list.append(transforms.RandomHorizontalFlip(p=0.5))
     train_tf_list.append(transforms.ToTensor())
     train_transform = transforms.Compose(train_tf_list)
     valid_transform = transforms.ToTensor()
-    if rank == 0 and aug_cfg.get("hflip", False):
-        print("Augment: RandomHorizontalFlip(p=0.5) on train split")
+    if rank == 0:
+        active = []
+        if crop_cfg:
+            active.append(f"RandomCrop(size={crop_cfg.get('size',32)},pad={crop_cfg.get('padding',4)},{crop_cfg.get('padding_mode','reflect')})")
+        if aug_cfg.get("hflip", False):
+            active.append("RandomHorizontalFlip(p=0.5)")
+        if active:
+            print("Augment (train only): " + " + ".join(active))
     dataset_name = config["data"].get("dataset", "cifar100")
 
     if dataset_name in ("cifar10", "cifar100"):
@@ -460,8 +474,8 @@ def main():
         valid_dataset = DatasetClass(root=config["data"]["valid"], train=False, download=False, transform=valid_transform)
     elif dataset_name == "imagenet32_npy":
         from src.mdlic.data.imagenet32_npy import ImageNet32Npy
-        if aug_cfg.get("hflip", False) and rank == 0:
-            print("WARNING: data.augment.hflip 在 imagenet32_npy 路径上当前未实现，已忽略")
+        if rank == 0 and (aug_cfg.get("hflip", False) or crop_cfg):
+            print("WARNING: data.augment (hflip/random_crop) 在 imagenet32_npy 路径上当前未实现，已忽略")
         train_dataset = ImageNet32Npy(root=config["data"]["train"], split="train")
         valid_dataset = ImageNet32Npy(root=config["data"]["valid"], split="val")
     else:

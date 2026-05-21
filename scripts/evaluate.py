@@ -86,7 +86,7 @@ ACADEMIC_BASELINES = {
 
 
 @torch.no_grad()
-def evaluate_model(model, loader, device, amp_dtype=None):
+def evaluate_model(model, loader, device, amp_dtype=None, tta_hflip: bool = False):
     """
     评估模型在数据集上的 bits/dim (bpd)。
 
@@ -95,6 +95,11 @@ def evaluate_model(model, loader, device, amp_dtype=None):
       bpd_std:  float — bpd 标准差（batch-level 加权，与 train.py:validate() 同口径）
       bpd_list: list[float] — 每个 batch 的 bpd（保留供 caller 自定义聚合）
       extras:   dict — 可选的额外字段（CC-iGPT 时含 ce_coarse / ce_fine / ctx_alpha）
+
+    TTA (Test-Time Augmentation):
+      tta_hflip=True 时对每张图同时跑 x 与 hflip(x) 两次 forward，取 bpd 均值。
+      hflip(x) 的 -log p 仍是 H(X) 的合法上界（hflip 在 RGB-bit-exact 域是确定函数），
+      平均能降低估计方差。Ref: Sparse Transformer (Child 2019, §4.2) 采用类似 ensemble.
     """
     model.eval()
     bpd_per_batch = []
@@ -118,11 +123,18 @@ def evaluate_model(model, loader, device, amp_dtype=None):
 
         with autocast(device_type="cuda", dtype=amp_dtype) if use_amp else nullcontext():
             out = model(x)
+            if tta_hflip:
+                out_flip = model(torch.flip(x, dims=[-1]))
 
         if "bpd" in out and out["bpd"] is not None:
             bpd = out["bpd"]
+            if tta_hflip:
+                bpd = (bpd + out_flip["bpd"]) * 0.5
         else:
-            bpd = compute_bpd(out["ce_loss"])
+            ce = out["ce_loss"]
+            if tta_hflip:
+                ce = (ce + out_flip["ce_loss"]) * 0.5
+            bpd = compute_bpd(ce)
         bpd_val = bpd.item()
         bpd_per_batch.append(bpd_val)
         bpd_weighted_sum += bpd_val * B
@@ -131,8 +143,13 @@ def evaluate_model(model, loader, device, amp_dtype=None):
 
         if "ce_loss_coarse" in out and out["ce_loss_coarse"] is not None:
             is_ccigpt = True
-            ce_c_sum += out["ce_loss_coarse"].item() * B
-            ce_f_sum += out["ce_loss_fine"].item() * B
+            ce_c = out["ce_loss_coarse"]
+            ce_f = out["ce_loss_fine"]
+            if tta_hflip:
+                ce_c = (ce_c + out_flip["ce_loss_coarse"]) * 0.5
+                ce_f = (ce_f + out_flip["ce_loss_fine"]) * 0.5
+            ce_c_sum += ce_c.item() * B
+            ce_f_sum += ce_f.item() * B
             if "ctx_alpha" in out and out["ctx_alpha"] is not None:
                 alpha_sum += out["ctx_alpha"].item() * B
 
@@ -566,9 +583,10 @@ def cmd_single(args, config, device):
     amp_dtype, amp_dtype_str = _get_amp_dtype(config)
 
     # 基本 bits/dim 评测
-    print(f"\n评测中... (AMP: {amp_dtype_str})")
+    print(f"\n评测中... (AMP: {amp_dtype_str}, TTA hflip: {args.tta_hflip})")
     bpd_mean, bpd_std, _, extras = evaluate_model(model, test_loader, device,
-                                                    amp_dtype=amp_dtype)
+                                                    amp_dtype=amp_dtype,
+                                                    tta_hflip=args.tta_hflip)
     print(f"{model_type.upper()} bits/dim: {bpd_mean:.4f} ± {bpd_std:.4f}")
     if extras:
         # CC-iGPT 多输出 CE_c / CE_f / α，便于诊断 fine 弱 vs coarse overhead 过大
@@ -671,7 +689,8 @@ def cmd_swa(args, config, device):
     model = _build_from_config(mcfg, device)
     _load_checkpoint(model, best_path, device)
     bpd_best, std_best, _, _ = evaluate_model(model, test_loader, device,
-                                                amp_dtype=amp_dtype)
+                                                amp_dtype=amp_dtype,
+                                                tta_hflip=args.tta_hflip)
     results.append(("best.pth", bpd_best, std_best))
     print(f"best.pth  bits/dim: {bpd_best:.4f} ± {std_best:.4f}")
 
@@ -679,7 +698,8 @@ def cmd_swa(args, config, device):
     model = _build_from_config(mcfg, device)
     _load_checkpoint(model, swa_path, device)
     bpd_swa, std_swa, _, _ = evaluate_model(model, test_loader, device,
-                                               amp_dtype=amp_dtype)
+                                               amp_dtype=amp_dtype,
+                                               tta_hflip=args.tta_hflip)
     results.append(("swa.pth", bpd_swa, std_swa))
     print(f"swa.pth   bits/dim: {bpd_swa:.4f} ± {std_swa:.4f}")
 
@@ -727,6 +747,8 @@ def main():
                         help='生成 per-position BPP 热力图（保存为 PNG，单位 bits/pixel）')
     parser.add_argument('--swa', action='store_true',
                         help='同时评测 SWA checkpoint（swa.pth vs best.pth）')
+    parser.add_argument('--tta_hflip', action='store_true',
+                        help='Test-Time Augmentation：对每张图同时跑 x 与 hflip(x)，bpd 取均值')
     parser.add_argument('--batch_size', type=int, default=64,
                         help='评测 batch size')
     args = parser.parse_args()

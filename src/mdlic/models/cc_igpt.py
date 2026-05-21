@@ -45,6 +45,8 @@ class CCIGPT(nn.Module):
         use_subpixel_ar: bool = False,
         # coarse 通道数；None → 与 in_channels 一致。R-only 灰度先验传 1。
         coarse_in_channels: int = None,
+        # DropPath 仅作用于 fine（深 24 层），coarse 浅层 6 层不需要
+        drop_path: float = 0.0,
     ):
         super().__init__()
         assert image_size % pool_factor == 0, (
@@ -72,11 +74,13 @@ class CCIGPT(nn.Module):
         self.coarse = IGPT(image_size=self.coarse_size,
                            in_channels=coarse_in_channels,
                            d_model=coarse_d_model, N=coarse_N,
-                           h=coarse_h, d_ff=coarse_d_ff, **shared)
+                           h=coarse_h, d_ff=coarse_d_ff,
+                           drop_path=0.0, **shared)
         self.fine = IGPT(image_size=image_size,
                          in_channels=in_channels,
                          d_model=fine_d_model, N=fine_N,
-                         h=fine_h, d_ff=fine_d_ff, **shared)
+                         h=fine_h, d_ff=fine_d_ff,
+                         drop_path=drop_path, **shared)
 
         # 可学习注入强度 α，初始 1.0。允许模型自适应 ctx 贡献度，
         # 避免 ctx 过强压制 fine 自身的 token embed。

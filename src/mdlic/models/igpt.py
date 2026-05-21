@@ -46,6 +46,7 @@ class IGPT(nn.Module):
     #   p(G_i | R_i, context)  和  p(B_i | R_i, G_i, context)
     # Ref: Salimans et al., "PixelCNN++," ICLR 2017 — 通道间条件依赖
     use_subpixel_ar: bool = False,
+    drop_path: float = 0.0,
   ):
     super().__init__()
     self.seq_len = image_size * image_size * in_channels
@@ -63,10 +64,14 @@ class IGPT(nn.Module):
     if use_subpixel_ar:
         self.channel_embed = nn.Embedding(in_channels, d_model)
 
+    # DropPath 线性 schedule: 第 i 层 drop_prob = drop_path · i/(N-1)
+    # Ref: Huang et al., ECCV 2016 — 深层 drop 更激进，浅层保留信息
+    dpr = [drop_path * i / max(N - 1, 1) for i in range(N)]
     self.blocks = nn.ModuleList([
       GPTBlock(d_model, h, d_ff, dropout,
-               activation_checkpointing=activation_checkpointing)
-      for _ in range(N)
+               activation_checkpointing=activation_checkpointing,
+               drop_path=dpr[i])
+      for i in range(N)
     ])
 
     # Output head + Weight Tying

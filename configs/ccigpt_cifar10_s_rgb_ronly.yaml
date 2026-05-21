@@ -11,7 +11,9 @@ exp_name: "ccigpt_cifar10_s_rgb_ronly"
 #   coarse 输出 64 R token → bilinear UP 到 (B,1,32,32) → expand 到 (B,3,32,32)
 #   → fine.token_embed 查表。bit-exact 严格保留，零新参数（仅 ctx_alpha 标量）。
 #
-# 本次重训配置：100ep + hflip 数据增强 + EMA (decay=0.999)，目标突破 3.10。
+# 本次重训配置（SOTA 冲刺）：100ep + hflip + RandomCrop(reflect) + dropout 0.1 +
+# DropPath 0→0.1 + EMA(decay=0.9995) + SWA(last 10ep)。
+# 目标：单 forward bpd ≤ 3.00；评测加 --tta_hflip 再降 −0.01~−0.03。
 
 model:
   type: ccigpt
@@ -25,7 +27,8 @@ model:
   N: 24
   h: 8
   d_ff: 1376
-  dropout: 0.0
+  dropout: 0.1                  # 0.0 → 0.1，对抗 100ep 长训过拟合
+  drop_path: 0.1                # Stochastic Depth 线性 0 → 0.1（仅作用于 fine）
 
   # coarse 模型（小且浅）
   coarse_d_model: 256
@@ -43,7 +46,11 @@ data:
   valid: datasets/
   num_workers: 8
   augment:
-    hflip: true                 # RandomHorizontalFlip(p=0.5)，仅训练集
+    hflip: true                 # RandomHorizontalFlip(p=0.5)
+    random_crop:                # PixelCNN++ recipe：reflect padding 4 + crop 32
+      size: 32
+      padding: 4
+      padding_mode: reflect
 
 train:
   amp_dtype: "bf16"
@@ -63,7 +70,7 @@ train:
     update_interval: 1
   ema:
     enabled: true
-    decay: 0.999               # 近 ~1000 step 主导，平滑训练末段抖动
+    decay: 0.9995              # 100ep 长训，半衰期更长更稳
 
 eval:
   interval: 2
