@@ -1,0 +1,46 @@
+exp_name: "_mini_dmol"
+model:
+  type: ccigpt
+  image_size: 32
+  in_channels: 3
+  vocab_size: 256
+  pool_factor: 4
+  d_model: 128
+  N: 2
+  h: 4
+  d_ff: 256
+  dropout: 0.0
+  output_head: "dmol"
+  n_mixtures: 10
+  coarse_d_model: 128
+  coarse_N: 2
+  coarse_h: 4
+  coarse_d_ff: 256
+  coarse_in_channels: 1
+data:
+  dataset: "cifar10"
+  train: datasets/
+  valid: datasets/
+  num_workers: 4
+train:
+  amp_dtype: null
+  batch_size: 64
+  grad_accum_steps: 1
+  lr: 5e-5
+  eps: 1e-8
+  epochs: 5
+  log_freq: 50
+  clip_max_norm: 0.5
+  z_loss_weight: 0.0
+  lr_schedule: "cosine"
+  warmup_epochs: 1
+  optimizer_dmol_head:
+    type: adamax
+    lr: 2e-5
+    betas: [0.9, 0.999]
+    eps: 1e-7
+    weight_decay: 0.0
+eval:
+  interval: 1
+checkpoint:
+  save_interval: 5
