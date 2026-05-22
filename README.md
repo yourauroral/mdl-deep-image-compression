@@ -5,8 +5,9 @@
 > **无损口径**：本系统所有主结果都在 **RGB-bit-exact** 域报告 — 直接在 RGB uint8 上建模，与 PixelCNN++ / Sparse Transformer 等基线同域可比。
 
 - **Phase A (完成)**: iGPT token-level 自回归压缩 + 8 个手写 Triton Kernel（7 个进入训练栈，1 个 `fused_linear_ce` 在 V=256 下经 roofline 分析证伪、保留作反面案例，~2,400 行）
-- **Phase B (进行中)**: CC-iGPT（Coarse-Conditioned iGPT）双尺度条件自回归 — 浅层 coarse iGPT (8×8, 192 token) 独立编码进 bitstream，UP + 量化后通过 additive embedding（可学习标量 α）注入 fine iGPT (32×32, 3072 token)
-- **Phase C (完成)**: Demo 前端可视化系统 (FastAPI + Chart.js, 5 个展示面板)
+- **Phase B (主表完成)**: CC-iGPT（Coarse-Conditioned iGPT）双尺度条件自回归 — 浅层 coarse iGPT (R-only 配置 8×8×1, 64 token, ~2% overhead) 独立编码进 bitstream，UP + 量化后通过 additive embedding（可学习标量 α）注入 fine iGPT (32×32×3, 3072 token)。CIFAR-10 RGB-bit-exact R-only 主表 **2.9035 bpd**（softmax head, 100ep + 全套正则 + TTA hflip）
+- **Phase C (完成)**: Demo 前端可视化系统 (FastAPI + Chart.js, 5 个展示面板，已为 Phase D DMoL 预留 ckpt 加载优先级 + 输出头展示)
+- **Phase D (进行中, 2026-05-22 启动)**: DMoL 第 6 次实现 — fine 输出头从 softmax 256-way 改为 sub-pixel 1D K-mix 离散化 logistic 混合 (K=10)，目标 ≤ 2.85 bpd。详见 [future.md §8](future.md)
 
 ## Baseline 对比
 
@@ -20,7 +21,7 @@
 | PNG | — | ~5.87 | RGB-bit-exact | 传统方法 |
 | WebP (lossless mode) | — | ~5.02 | RGB-bit-exact | 传统方法 |
 
-CC-iGPT R-only **平 Image Transformer 95M (2.90)、胜 PixelCNN++ 52M (2.92)**，参数预算 ~81M。与 Sparse Transformer 2.80 的差距来自架构深度（24 层 dense vs 128 层 strided sparse attention）/ DMoL 输出头（5 轮训练不稳已 revert，softmax 256-way 保留）。**冲击 SOTA** 靠 ImageNet 64×64 < 3.44（Sparse Transformer 152M strided）路线支撑。
+CC-iGPT R-only **平 Image Transformer 95M (2.90)、胜 PixelCNN++ 52M (2.92)**，参数预算 ~81M。与 Sparse Transformer 2.80 的差距来自架构深度（24 层 dense vs 128 层 strided sparse attention）；softmax 256-way 是当前主表，DMoL 第 6 次实现（[future.md §8](future.md)）正在进行，目标 ≤ 2.85（成功 → 主表更新；失败 → 主表保持 2.9035）。**冲击 SOTA** 靠 ImageNet 64×64 < 3.44（Sparse Transformer 152M strided）路线支撑。
 
 ### 创新点定位 & 与 SOTA 的关系
 
@@ -44,8 +45,12 @@ python scripts/dryrun_forward.py
 # 训练 — 多卡 DDP (按 GPU 数调整 nproc_per_node)
 torchrun --nproc_per_node=2 scripts/train.py --config configs/igpt_cifar10_s_rgb.yaml
 
-# CC-iGPT RGB-bit-exact (R-only 主表)
+# CC-iGPT RGB-bit-exact (R-only 主表 — softmax head, 2.9035 bpd)
 torchrun --nproc_per_node=2 scripts/train.py --config configs/ccigpt_cifar10_s_rgb_ronly.yaml
+
+# CC-iGPT + DMoL fine head (Phase D, 目标 ≤ 2.85, 详见 future.md §8 / §8.9)
+# 注意：DMoL 路径强制 fp32 + 双 optimizer (AdamW + Adamax)，与 softmax ckpt 不兼容
+torchrun --nproc_per_node=2 scripts/train.py --config configs/ccigpt_cifar10_s_rgb_ronly_dmol.yaml
 
 # 断点续训 (resume 会自动用 config 中的 lr 覆盖 checkpoint 旧值)
 torchrun --nproc_per_node=2 scripts/train.py \
@@ -110,13 +115,14 @@ scp -P <port> root@<autodl-host>:/root/autodl-tmp/mdl-deep-image-compression/exp
                               |
           +-------------------+-------------------+
           |                                       |
-    iGPT (Phase A)                       CC-iGPT (Phase B)
+    iGPT (Phase A)                       CC-iGPT (Phase B / D)
           |                                       |
   +-------v--------+                  +-----------v-----------+
   | Flatten: 3072  |                  | DOWN avg_pool 8×8     |
   | tokens         |                  |   → Coarse iGPT       |
-  | (3×32×32)      |                  |     192 tokens, 进 bs |
-  +-------+--------+                  | bit-exact ctx 路径:    |
+  | (3×32×32)      |                  |     R-only 8×8×1=64   |
+  +-------+--------+                  |     tokens, 进 bs     |
+          |                           | bit-exact ctx 路径:    |
           |                           |   coarse 量化 token    |
           |                           |   → 反量化 (RGB /255)  |
           |                           |   → bilinear UP 32×32  |
@@ -174,19 +180,22 @@ scp -P <port> root@<autodl-host>:/root/autodl-tmp/mdl-deep-image-compression/exp
             └─────────────────────────────────────────────────────┘
                               |                      |
                     +---------v-----------+          |
-                    |    Output Head      |--- Weight Tying
-                    |    Linear(→256)     |
+                    |    Output Head      |--- Weight Tying (softmax)
+                    |  softmax: Linear→256|    DMoL: DMoLHead1D
+                    |  dmol:    K*3=30/tk |    (K=10, sub-pixel 1D)
                     +---------+-----------+
                               |
                     +---------v-----------+
-                    | Cross-Entropy Loss  |
-                    | + z-loss 正则 (1e-4) |
-                    | (Fused CE Triton)   |
+                    | softmax: CE+z-loss  |
+                    |  (Fused CE Triton)  |
+                    | dmol:   dmol_loss_1d|
+                    |  (fp32, no z-loss)  |
                     +---------+-----------+
                               |
               iGPT:    bpd = CE × T / ln(2) / (H·W·C)
               CC-iGPT: bpd_total = (CE_c · N_c + CE_f · N_f) / ln(2) / N_f
-                       (coarse + fine 联合压缩率，N_f = H·W·C)
+                       (coarse + fine 联合压缩率，N_f = H·W·C；
+                        DMoL 路径下 CE_f 为 dmol_loss_1d NLL/N，单位仍是 nat/sub-pixel)
 ```
 
 **OLMo 2 Reordered Norm**:  `x = x + RMSNorm(Attention(x))`, `x = x + RMSNorm(FFN(x))`
@@ -231,7 +240,7 @@ Coarse-Conditioned iGPT —— 双尺度条件式自回归。回避了多尺度 
 | 组件 | 说明 |
 |------|------|
 | DOWN | `F.adaptive_avg_pool2d(x, 8)` 在 float 域下采样到 8×8 |
-| Coarse iGPT | 浅层（d_model=256, N=6），独立 NTP 训练，CE 进 bitstream（192 token，~6% overhead；R-only 配置下为 64 token，~2% overhead） |
+| Coarse iGPT | 浅层（d_model=256, N=6），独立 NTP 训练，CE 进 bitstream。R-only 主表配置仅压 R 通道 8×8（64 token, ~2% overhead）；完整三通道版本为 192 token (~6%) | 
 | **Bit-exact ctx 路径** | encoder/decoder 必须看到**同一个** `coarse_ctx`，否则 fine 端算术编码不可解。统一管线：coarse 量化 token → `/255` 反量化为 RGB float → bilinear UP 到 32×32 → 与 fine encoder 同规则 re-tokenize → `fine.token_embed` |
 | Ctx 注入 | AR shift `coarse_ctx[:, 1:]`（ctx[i] 对应 fine 被预测位置 i，PixelCNN++ conditional 标准语义）→ `α · coarse_ctx`（additive，仅引入 1 个标量参数 α） |
 | 可学习 α | `nn.Parameter(torch.ones(1))`，初始 1.0；模型自适应注入强度 |
@@ -276,12 +285,15 @@ src/mdlic/
 └── utils/     seed, bpd, clean_state_dict
 scripts/       train.py, evaluate.py, linear_probe.py, dryrun_forward.py, profile_kernels.py, prepare_imagenet32.py
 configs/       igpt_cifar10_s_rgb,
-               ccigpt_cifar10_s_rgb_ronly (R-only B1, 主表 2.9035 bpd)
-tests/         8 个 kernel/模型 单元测试 (含 test_ccigpt_smoke)
+               ccigpt_cifar10_s_rgb_ronly      (R-only B1, softmax 主表 2.9035 bpd),
+               ccigpt_cifar10_s_rgb_ronly_dmol (Phase D 进行中, DMoL fine head),
+               _mini_dmol                      (Phase D Stage 1 mini setup G1)
+tests/         12 个单元测试（含 test_ccigpt_smoke, test_dmol）
 demo/
 ├── server.py          FastAPI 后端 (predict / metrics / probe / kernels / scales)
+│                      ckpt 加载优先级: dmol → ronly softmax → igpt-s baseline
 ├── static/            HTML + JS (Chart.js) + CSS 前端，5 个面板
-└── data/              预计算 JSON 数据
+└── data/              预计算 JSON 数据（metrics 含 DMoL TBD 占位行）
 ```
 
 **参考文献**
