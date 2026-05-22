@@ -12,7 +12,7 @@ Demo 可视化后端 — FastAPI + 静态文件。
   GET  /api/probe       — Linear Probe 各层准确率
   GET  /api/kernels     — Triton Kernel 性能数据
   GET  /api/scales      — CC-iGPT coarse/fine token 分配
-  POST /api/predict     — 上传图片 → 返回 bits/dim 热力图 + 数值
+  POST /api/predict     — 上传图片 → 返回 bpd / output_head / 双尺度 CE / 热力图（仅 softmax 头）
 """
 
 import json

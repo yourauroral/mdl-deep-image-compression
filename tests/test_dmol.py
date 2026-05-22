@@ -1,13 +1,14 @@
 """DMoL (Discretized Mixture of Logistics) 单元测试。
 
-覆盖 6 个核心数值不变量 + optimizer 分组划分：
-  1. random init forward NLL ∈ [5.0, 8.0] nat/sub-pixel（远低于均匀 8.0）
+8 个测试 = 6 项数值不变量 + optimizer 分组 partition + softmax 路径回归：
+  1. random init forward NLL ∈ [5.0, 15.0] nat/sub-pixel（窄高斯 init vs uniform target 的"分布外"NLL）
   2. 离散化分布归一性：sum_{x=0}^{255} exp(log_prob(x)) ≈ 1.0
-  3. gradient check（小规模 K=2, d_model=16）
+  3. gradient check（小规模 K=2，fp64 gradcheck）
   4. 边界 target=0 / 255 走特殊分支 loss 仍 finite
   5. head bias init 让 inv_s 落在 sigmoid 线性区 [0.05, 0.5]
   6. CC-iGPT + DMoL fine head smoke：forward + backward 三处 grad 非零
   7. optimizer 分组划分：head_params + other_params 并集=全集，交集=空
+  8. softmax 路径不回归：默认 output_head=softmax 行为完全等价历史路径
 """
 import os
 import sys

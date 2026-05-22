@@ -247,7 +247,6 @@ def train_one_epoch(model, loader, optimizers, scaler, device,
             x = batch
 
         x = x.to(device)
-        _, C, _, _ = x.shape
 
         # DDP no_sync: 梯度累积中间步跳过 AllReduce，只在同步步通信。
         # Ref: PyTorch DDP 文档 — `DistributedDataParallel.no_sync()` 上下文
@@ -380,7 +379,7 @@ def validate(model, loader, device, amp_dtype=None):
         else:
             x = batch
         x = x.to(device)
-        B, C, _, _ = x.shape
+        B = x.size(0)
         with autocast(device_type="cuda", dtype=amp_dtype) if use_amp else nullcontext():
             out = model(x)
         loss = out["loss"]
@@ -572,8 +571,9 @@ def main():
 
     # Optimizer 构造
     # softmax 路径: 单 AdamW（与历史完全一致）
-    # dmol 路径:    AdamW (主网) + Adamax (DMoL head 单独，PixelCNN++ 原版做法,
-    #               L∞-norm 二阶矩对 DMoL 稀疏大梯度更鲁棒)
+    # dmol 路径:    AdamW (主网) + Adamax (DMoL head 单独，参考 PixelCNN++ 原版
+    #               用 Adamax 训 DMoL；本项目主网保持 AdamW)。L∞-norm 二阶矩对
+    #               DMoL 稀疏大梯度更鲁棒
     base_lr = float(config["train"]["lr"])
     is_dmol = mcfg.get("output_head", "softmax") == "dmol"
 

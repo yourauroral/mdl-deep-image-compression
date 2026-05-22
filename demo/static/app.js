@@ -284,11 +284,17 @@ Chart.defaults.borderColor = "#2a2d3a";
 })();
 
 // ── Panel 4: Kernel 性能 ──
+// kernels.json schema：嵌套 `{forward_only: {kernels:[...]}, forward_backward: {kernels:[...]}}`。
+// Panel 4 默认渲染 forward_only；avg/max speedup 来自同一段。
 (async function initKernels() {
   const data = await fetchJSON("/api/kernels");
   if (!data) return;
 
-  const labels = data.kernels.map(k => k.name);
+  const section = data.forward_only || data.forward_backward;
+  if (!section || !Array.isArray(section.kernels)) return;
+  const kernels = section.kernels;
+
+  const labels = kernels.map(k => k.name);
   new Chart(document.getElementById("chart-kernels"), {
     type: "bar",
     data: {
@@ -296,13 +302,13 @@ Chart.defaults.borderColor = "#2a2d3a";
       datasets: [
         {
           label: "Triton (ms)",
-          data: data.kernels.map(k => k.triton_ms),
+          data: kernels.map(k => k.triton_ms),
           backgroundColor: "#6c8cff",
           borderRadius: 3,
         },
         {
           label: "PyTorch (ms)",
-          data: data.kernels.map(k => k.pytorch_ms),
+          data: kernels.map(k => k.pytorch_ms),
           backgroundColor: "#4a4d5e",
           borderRadius: 3,
         }
@@ -313,11 +319,14 @@ Chart.defaults.borderColor = "#2a2d3a";
       maintainAspectRatio: false,
       plugins: {
         legend: { position: "top" },
+        title: { display: true,
+                 text: `Forward-only — avg ${section.avg_speedup}x / max ${section.max_speedup}x (${section.max_speedup_kernel})`,
+                 color: "#e1e4ed" },
         tooltip: {
           callbacks: {
             afterBody: (items) => {
               const idx = items[0].dataIndex;
-              return `Speedup: ${data.kernels[idx].speedup}x`;
+              return `Speedup: ${kernels[idx].speedup}x`;
             }
           }
         }
