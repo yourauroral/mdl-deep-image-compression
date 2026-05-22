@@ -8,7 +8,6 @@ Refs:
   Salimans et al., "PixelCNN++," ICLR 2017 — 离散化 logistic 混合定义
   Chen et al., "Generative Pretraining from Pixels (iGPT)," ICML 2020 — std=0.005 head init
 """
-import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -67,20 +66,6 @@ def dmol_loss_1d(params: torch.Tensor,
 
     Returns:
         NLL（nat / sub-pixel），与 categorical CE 同口径，下游 bpd = NLL / ln2 不变
-
-    数值实现：
-        - mean = 127.5 · (1 + tanh(mean_raw))         ∈ [0, 255]
-        - log_scale = clamp(log_scale_raw, -7, +5)
-        - inv_s = exp(-log_scale)
-        - half_bin = 0.5（bin 宽=1，target ∈ [0, 255]）
-        - plus_in  = (target + 0.5 - mean) · inv_s
-        - minus_in = (target - 0.5 - mean) · inv_s
-        - 边界 target=0:    log σ(plus_in)
-        - 边界 target=255:  log σ(-minus_in)  =  log(1 - σ(minus_in))
-        - 中间:             log((σ(plus_in) - σ(minus_in)).clamp(min=1e-12))
-        - log_w = log_softmax(logit_w, dim=-1)
-        - log_prob = logsumexp(log_w + log_prob_per_mix, dim=-1).clamp(min=-30)
-        - NLL = -log_prob.mean()  # 或 reshape (B, T)
     """
     K = n_mixtures
     assert params.size(-1) == 3 * K, (

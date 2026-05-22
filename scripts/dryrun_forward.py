@@ -134,9 +134,9 @@ def main():
     ce_f_dmol = out_dmol["ce_loss_fine"].item()
     assert math.isfinite(loss_dmol), "DMoL loss NaN/Inf"
     assert 0.0 < bpd_dmol < 50.0, f"DMoL bpd_total={bpd_dmol:.2f} 超出合理范围"
-    # DMoL 路径 fine 不返回 logits（plan §4.2）
-    assert out_dmol["logits"] is None or out_dmol["logits"].shape[-1] != 256, (
-        "DMoL 路径下 fine.logits 应为 None（输出是 K*3 维 mixture 参数，非 V=256 categorical）"
+    # DMoL 路径 fine.logits 必须为 None（plan §4.2 契约；test_dmol 已 hard-assert）
+    assert out_dmol["logits"] is None, (
+        f"DMoL 路径下 fine.logits 应为 None, got {type(out_dmol['logits'])}"
     )
     print(f"  [ccigpt-dmol] loss={loss_dmol:.4f}  ce_coarse={ce_c_dmol:.4f}  "
           f"ce_fine={ce_f_dmol:.4f}  bpd_total={bpd_dmol:.4f}")

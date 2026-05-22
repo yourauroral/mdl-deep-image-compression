@@ -187,7 +187,7 @@ class IGPT(nn.Module):
       with torch.amp.autocast(device_type=device_type, enabled=False):
         params = self.head(hidden.float())   # (B, T-1, K*3)
         ce_loss = dmol_loss_1d(params, target_tokens, self.n_mixtures)
-        loss = ce_loss   # z-loss 路径下游已 dispatch 跳过；显式不加 z_loss 项
+        loss = ce_loss
 
       return {
         "loss": loss,

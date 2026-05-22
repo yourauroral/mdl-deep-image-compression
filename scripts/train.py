@@ -595,12 +595,8 @@ def main():
             print(f"DMoL optimizer split: head={len(head_params)} params "
                   f"({list(head_param_names)}), other={len(other_params)} params")
 
-        # 主网 AdamW（保持与 softmax 路径一致的 wd / no_decay 逻辑）
-        # _get_param_groups 现在会扫描全模型；DMoL head 名字含 "head.proj"，
-        # 在 no_decay 集合外（不是 Embedding/RMSNorm，也不是 bias）→ 会进 wd 组。
-        # 这会导致冲突：head 既被 AdamW step 又被 Adamax step。
-        # 修复：建一个不含 head 的 sub-model 视图给 _get_param_groups。
-        # 简单做法：手动构造 param groups，排除 head_params。
+        # 主网 AdamW 参数组 — 与 _get_param_groups 同样的 no_decay 规则，
+        # 但额外排除 head_param_names 防 head 同时被 AdamW + Adamax 双更新。
         from src.mdlic.models.layers import RMSNorm
         no_decay_modules = (nn.Embedding, RMSNorm, nn.LayerNorm)
         no_decay = set()
@@ -611,7 +607,6 @@ def main():
         for name, _ in raw_for_split.named_parameters():
             if name.endswith('bias') or name.endswith('ctx_alpha'):
                 no_decay.add(name)
-        # 关键：从两个 group 里都剔除 head_params
         adamw_decay = [p for n, p in raw_for_split.named_parameters()
                        if n not in no_decay and n not in head_param_names]
         adamw_nodecay = [p for n, p in raw_for_split.named_parameters()
@@ -814,10 +809,11 @@ def main():
                 for opt, sd_opt in zip(optimizers, opt_states):
                     opt.load_state_dict(sd_opt)
             elif 'optimizer_state_dict' in ckpt:
-                # 历史单 optimizer 格式（softmax ckpt，仅含 AdamW 主网状态）
+                # 历史单 optimizer 格式：softmax ckpt 仅含 AdamW 主网状态。
+                # DMoL 路径下 plan §6.2 明确"完全重训"，不支持跨 head 类型 resume。
                 assert len(optimizers) == 1, (
-                    f"ckpt 是历史单 optimizer 格式，但当前模型用 {len(optimizers)} 个 optimizer；"
-                    "DMoL head optimizer 状态将从零开始（不影响正确性，但训练动力学有 warmup）"
+                    "ckpt 是单 optimizer (softmax) 格式，但当前是 DMoL 路径 (2 optimizers)；"
+                    "plan §6.2 不支持跨 head 类型 resume，请删除 --resume 走全新训练"
                 )
                 optimizers[0].load_state_dict(ckpt['optimizer_state_dict'])
             start_epoch = ckpt.get('epoch', 0) + 1

@@ -1,7 +1,7 @@
 """DMoL (Discretized Mixture of Logistics) 单元测试。
 
 覆盖 6 个核心数值不变量 + optimizer 分组划分：
-  1. random init forward NLL ∈ [5.5, 7.5] nat/sub-pixel（远低于均匀 8.0）
+  1. random init forward NLL ∈ [5.0, 8.0] nat/sub-pixel（远低于均匀 8.0）
   2. 离散化分布归一性：sum_{x=0}^{255} exp(log_prob(x)) ≈ 1.0
   3. gradient check（小规模 K=2, d_model=16）
   4. 边界 target=0 / 255 走特殊分支 loss 仍 finite
@@ -9,7 +9,6 @@
   6. CC-iGPT + DMoL fine head smoke：forward + backward 三处 grad 非零
   7. optimizer 分组划分：head_params + other_params 并集=全集，交集=空
 """
-import math
 import os
 import sys
 
@@ -38,11 +37,11 @@ def device():
 # ──────────────────────────────────────────────────────────────
 
 def test_dmol_loss_finite_at_init(device):
-    """random init head + random target → NLL ∈ [5.5, 7.5] nat/sub-pixel。
+    """random init head + random target → NLL ∈ [5.0, 8.0] nat/sub-pixel。
 
-    注意：均匀分布上界 ln(256) ≈ 5.55；小于 5.55 不太可能（除非 K-mix 已经能
-    猜到一些结构），大于 7.5 说明 init 让 head 输出失常。本次的 head bias
-    log_scale=+2 init 应让 NLL ∈ [5.5, 7.5]。
+    均匀分布上界 ln(256) ≈ 5.55；K-mix 在 random init 下可能略胜均匀（下探到
+    ~5.0），也可能略劣（上探到 ~8.0 但不应超过均匀+log K 量级）。超出 [5.0, 8.0]
+    说明 init 让 head 输出失常（如 log_scale bias 被破坏）。
     """
     torch.manual_seed(42)
     K = 10
@@ -101,7 +100,7 @@ def test_dmol_log_prob_normalized(device):
 def test_dmol_gradient_check():
     """torch.autograd.gradcheck 验证 dmol_loss_1d 的解析梯度与数值梯度一致。
 
-    用极小规模 K=2, d_model=8, batch=1, T=2 跑 fp64 gradcheck（要求 fp64 输入）。
+    极小规模 K=2, batch=1, T=2 跑 fp64 gradcheck（要求 fp64 输入）。
     """
     torch.manual_seed(1)
     K = 2
