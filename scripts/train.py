@@ -188,6 +188,29 @@ def _get_param_groups(model, weight_decay=0.1):
     ]
 
 
+def _split_dmol_head_params(model):
+    """DMoL 路径专用：把 fine.head (DMoLHead1D) 参数从主参数集中分离出来。
+
+    返回 (head_params, other_params)，两个列表的并集 = 全部参数，交集为空。
+    main() 用这两个列表分别建 Adamax (head) 和 AdamW (other) 两个独立 optimizer。
+
+    DMoL head 名前缀:
+      - CCIGPT: "fine.head.proj.weight" / "fine.head.proj.bias"
+      - 单尺度 IGPT: "head.proj.weight" / "head.proj.bias"
+    """
+    head_params = []
+    other_params = []
+    head_param_names = set()
+    for name, p in model.named_parameters():
+        # 匹配 .head.proj.* 即 DMoL head（softmax head 是 nn.Linear，参数名为 head.weight，不带 .proj）
+        if ".head.proj." in name or name.startswith("head.proj."):
+            head_params.append(p)
+            head_param_names.add(name)
+        else:
+            other_params.append(p)
+    return head_params, other_params, head_param_names
+
+
 # ==================== Training ====================
 def _atomic_save(obj, path: str):
     """torch.save 的原子写包装：先写 .tmp 再 os.replace，避免崩溃中断产生半截文件。
@@ -200,18 +223,22 @@ def _atomic_save(obj, path: str):
     os.replace(tmp_path, path)
 
 
-def train_one_epoch(model, loader, optimizer, scaler, device,
+def train_one_epoch(model, loader, optimizers, scaler, device,
                     epoch, log_freq, writer, clip_max_norm,
                     amp_dtype=torch.float16, grad_accum_steps=1,
                     z_loss_weight=1e-4,
                     distributed=False, rank=0,
                     on_optimizer_step=None):
+    """optimizers: list[Optimizer] — 支持单 (AdamW) 或多 optimizer (DMoL 路径下
+    AdamW + Adamax 两个独立实例)。每个 step 都遍历列表分别 step/zero_grad。
+    """
     model.train()
     total_loss = 0
     total_bpd = 0
     steps = len(loader)
 
-    optimizer.zero_grad(set_to_none=True)
+    for opt in optimizers:
+        opt.zero_grad(set_to_none=True)
 
     for i, batch in enumerate(loader):
         if isinstance(batch, (list, tuple)):
@@ -261,13 +288,16 @@ def train_one_epoch(model, loader, optimizer, scaler, device,
         if (i + 1) % grad_accum_steps == 0 or (i + 1) == steps:
             # Unscale → clip → step → update
             if scaler is not None:
-                scaler.unscale_(optimizer)
+                for opt in optimizers:
+                    scaler.unscale_(opt)
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), clip_max_norm)
             if scaler is not None:
-                scaler.step(optimizer)
+                for opt in optimizers:
+                    scaler.step(opt)
                 scaler.update()
             else:
-                optimizer.step()
+                for opt in optimizers:
+                    opt.step()
 
             if writer and (i + 1) % log_freq == 0:
                 step = epoch * steps + i
@@ -275,7 +305,8 @@ def train_one_epoch(model, loader, optimizer, scaler, device,
                 if scaler is not None:
                     writer.add_scalar('train/loss_scale', scaler.get_scale(), step)
 
-            optimizer.zero_grad(set_to_none=True)
+            for opt in optimizers:
+                opt.zero_grad(set_to_none=True)
 
             if on_optimizer_step is not None:
                 on_optimizer_step()
@@ -292,7 +323,7 @@ def train_one_epoch(model, loader, optimizer, scaler, device,
             bpd_val  = bpd.item()
             if not math.isfinite(loss_val) and rank == 0:
                 print(f"WARNING: loss is {loss_val} at epoch {epoch} step {i+1}/{steps}. "
-                      f"LR={optimizer.param_groups[0]['lr']:.2e}. Training may diverge.")
+                      f"LR={optimizers[0].param_groups[0]['lr']:.2e}. Training may diverge.")
             if rank == 0:
                 # CC-iGPT 路径：loss = ce_c + z·z_c + ce_f + z·z_f，数值大但视觉上让 CE_c
                 # 错觉主导，实际 bpd_total 中 coarse 仅 ~5%（N_c=64 vs N_f=3072）。
@@ -539,14 +570,85 @@ def main():
             model, device_ids=[local_rank], output_device=local_rank
         )
 
-    # Optimizer: AdamW with parameter groups (no weight decay for embeddings/norm/bias)
+    # Optimizer 构造
+    # softmax 路径: 单 AdamW（与历史完全一致）
+    # dmol 路径:    AdamW (主网) + Adamax (DMoL head 单独，PixelCNN++ 原版做法,
+    #               L∞-norm 二阶矩对 DMoL 稀疏大梯度更鲁棒)
     base_lr = float(config["train"]["lr"])
-    optimizer = optim.AdamW(
-        _get_param_groups(model, weight_decay=0.1),
-        lr=base_lr,
-        betas=(0.9, 0.95),
-        eps=float(config["train"].get("eps", 1e-8)),
-    )
+    is_dmol = mcfg.get("output_head", "softmax") == "dmol"
+
+    if is_dmol:
+        # DMoL 路径专用 assert（plan §6.1 hard 约束）
+        amp_cfg_check = config["train"].get("amp_dtype", "fp16")
+        assert amp_cfg_check in (None, "none", "fp32"), (
+            f"DMoL 路径必须 amp_dtype=null/none/fp32（fp32 强制），got '{amp_cfg_check}'"
+        )
+        assert float(config["train"].get("z_loss_weight", 1e-4)) == 0.0, (
+            "DMoL 路径必须 z_loss_weight=0.0（DMoL 输出无 logits 的 logsumexp 语义）"
+        )
+
+        # 拆 head / other 两组参数
+        raw_for_split = model.module if distributed else model
+        raw_for_split = getattr(raw_for_split, '_orig_mod', raw_for_split)
+        head_params, other_params, head_param_names = _split_dmol_head_params(raw_for_split)
+        if rank == 0:
+            print(f"DMoL optimizer split: head={len(head_params)} params "
+                  f"({list(head_param_names)}), other={len(other_params)} params")
+
+        # 主网 AdamW（保持与 softmax 路径一致的 wd / no_decay 逻辑）
+        # _get_param_groups 现在会扫描全模型；DMoL head 名字含 "head.proj"，
+        # 在 no_decay 集合外（不是 Embedding/RMSNorm，也不是 bias）→ 会进 wd 组。
+        # 这会导致冲突：head 既被 AdamW step 又被 Adamax step。
+        # 修复：建一个不含 head 的 sub-model 视图给 _get_param_groups。
+        # 简单做法：手动构造 param groups，排除 head_params。
+        from src.mdlic.models.layers import RMSNorm
+        no_decay_modules = (nn.Embedding, RMSNorm, nn.LayerNorm)
+        no_decay = set()
+        for module_name, module in raw_for_split.named_modules():
+            if isinstance(module, no_decay_modules):
+                for pname, _ in module.named_parameters(recurse=False):
+                    no_decay.add(f"{module_name}.{pname}" if module_name else pname)
+        for name, _ in raw_for_split.named_parameters():
+            if name.endswith('bias') or name.endswith('ctx_alpha'):
+                no_decay.add(name)
+        # 关键：从两个 group 里都剔除 head_params
+        adamw_decay = [p for n, p in raw_for_split.named_parameters()
+                       if n not in no_decay and n not in head_param_names]
+        adamw_nodecay = [p for n, p in raw_for_split.named_parameters()
+                         if n in no_decay and n not in head_param_names]
+        adamw_groups = [
+            {"params": adamw_decay,   "weight_decay": 0.1},
+            {"params": adamw_nodecay, "weight_decay": 0.0},
+        ]
+        optimizer_main = optim.AdamW(
+            adamw_groups, lr=base_lr,
+            betas=(0.9, 0.95),
+            eps=float(config["train"].get("eps", 1e-8)),
+        )
+
+        # DMoL head 用 Adamax（lr 更小，更稳）
+        optim_head_cfg = config["train"].get("optimizer_dmol_head", {})
+        head_lr = float(optim_head_cfg.get("lr", base_lr * 0.4))   # 默认 0.4× base_lr
+        optimizer_head = optim.Adamax(
+            head_params,
+            lr=head_lr,
+            betas=tuple(optim_head_cfg.get("betas", [0.9, 0.999])),
+            eps=float(optim_head_cfg.get("eps", 1e-7)),
+            weight_decay=float(optim_head_cfg.get("weight_decay", 0.0)),
+        )
+
+        optimizers = [optimizer_main, optimizer_head]
+        if rank == 0:
+            print(f"Optimizers: AdamW(main, lr={base_lr:.2e}) + Adamax(dmol_head, lr={head_lr:.2e}, wd=0)")
+    else:
+        # softmax 路径：保持单 AdamW，零行为变化
+        optimizer_main = optim.AdamW(
+            _get_param_groups(model, weight_decay=0.1),
+            lr=base_lr,
+            betas=(0.9, 0.95),
+            eps=float(config["train"].get("eps", 1e-8)),
+        )
+        optimizers = [optimizer_main]
 
     # Learning rate scheduler
     #
@@ -579,7 +681,7 @@ def main():
             progress = float(epoch - warmup_epochs) / float(max(1, total_epochs - warmup_epochs))
             cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
             return min_lr_ratio + (1.0 - min_lr_ratio) * cosine
-        scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+        scheduler = optim.lr_scheduler.LambdaLR(optimizers[0], lr_lambda)
     elif lr_schedule == "wsd":
         # WSD: Warmup-Stable-Decay
         # warmup: 线性 0→1（warmup_epochs 个 epoch）
@@ -600,10 +702,10 @@ def main():
                 decay_length = max(1, total_epochs - stable_epochs)
                 progress = float(epoch - stable_epochs) / float(decay_length)
                 return max(0.0, (1.0 - progress) ** decay_beta)
-        scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda_wsd)
+        scheduler = optim.lr_scheduler.LambdaLR(optimizers[0], lr_lambda_wsd)
     elif lr_schedule == "multistep":
         scheduler = optim.lr_scheduler.MultiStepLR(
-            optimizer,
+            optimizers[0],
             milestones=config["train"]["lr_milestones"],
             gamma=config["train"].get("lr_gamma", 0.1),
         )
@@ -702,8 +804,22 @@ def main():
                 raw_model.load_state_dict(sd, strict=False)
             else:
                 raw_model.load_state_dict(sd)
-            if 'optimizer_state_dict' in ckpt:
-                optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+            if 'optimizer_state_dicts' in ckpt:
+                # v6+ 多 optimizer 格式（list）
+                opt_states = ckpt['optimizer_state_dicts']
+                assert len(opt_states) == len(optimizers), (
+                    f"ckpt 含 {len(opt_states)} 个 optimizer state，当前模型用 {len(optimizers)} 个；"
+                    "config 是否切换了 output_head？"
+                )
+                for opt, sd_opt in zip(optimizers, opt_states):
+                    opt.load_state_dict(sd_opt)
+            elif 'optimizer_state_dict' in ckpt:
+                # 历史单 optimizer 格式（softmax ckpt，仅含 AdamW 主网状态）
+                assert len(optimizers) == 1, (
+                    f"ckpt 是历史单 optimizer 格式，但当前模型用 {len(optimizers)} 个 optimizer；"
+                    "DMoL head optimizer 状态将从零开始（不影响正确性，但训练动力学有 warmup）"
+                )
+                optimizers[0].load_state_dict(ckpt['optimizer_state_dict'])
             start_epoch = ckpt.get('epoch', 0) + 1
             best_bpd = ckpt.get('best_bpd', float('inf'))
             if scheduler is not None and 'scheduler_state_dict' in ckpt:
@@ -717,7 +833,9 @@ def main():
                 ema_state = ckpt['ema_state']
             # resume 后用 config 中的 lr 覆盖 checkpoint 里的旧值，
             # 使得修改 yaml lr 后 resume 能立即生效。
-            for pg in optimizer.param_groups:
+            # 注意：仅覆盖主 optimizer (optimizers[0])，DMoL head 的 lr 由其自身的
+            # config 字段控制（optimizer_dmol_head.lr），不被 base_lr 覆盖。
+            for pg in optimizers[0].param_groups:
                 pg['initial_lr'] = base_lr
                 pg['lr'] = base_lr
             # Scheduler base_lrs 同步（cosine/wsd 的 lr_lambda 乘以 base_lr）。
@@ -725,7 +843,7 @@ def main():
             # lr_lambda 把 pg['lr'] 同步成正确的衰减值。否则 LambdaLR.__init__ 后
             # 主循环 epoch 末才 step()，resume 后第一个 epoch 会跑全峰值 lr。
             if scheduler is not None:
-                scheduler.base_lrs = [pg['initial_lr'] for pg in optimizer.param_groups]
+                scheduler.base_lrs = [pg['initial_lr'] for pg in optimizers[0].param_groups]
                 scheduler.last_epoch = start_epoch - 2
                 scheduler.step()
 
@@ -755,7 +873,7 @@ def main():
 
         # ── 训练一个 epoch (iGPT/CC-iGPT 共用 NTP 训练循环) ──
         avg_loss, avg_bpd = train_one_epoch(
-            model, train_loader, optimizer, scaler,
+            model, train_loader, optimizers, scaler,
             device=device,
             epoch=epoch,
             log_freq=config['train']['log_freq'],
@@ -770,7 +888,7 @@ def main():
         )
 
         if rank == 0:
-            current_lr = optimizer.param_groups[0]['lr']
+            current_lr = optimizers[0].param_groups[0]['lr']
             # CC-iGPT 路径下 avg_loss 是 ce_c+z+ce_f+z 之和，非 bpd 同口径，省略避免误读；
             # iGPT 单尺度无 coarse overhead，loss ≈ ce_loss，保留供监控参考。
             if model_type == "ccigpt":
@@ -790,7 +908,7 @@ def main():
                     writer.add_scalar('val/bpd', bpd_avg, epoch)
                     writer.add_scalar('val/bpd_std', std_bpd, epoch)
                 if csv_writer:
-                    current_lr = optimizer.param_groups[0]['lr']
+                    current_lr = optimizers[0].param_groups[0]['lr']
                     csv_writer.writerow([epoch, f'{avg_loss:.6f}', f'{avg_bpd:.6f}',
                                          f'{loss_avg:.6f}', f'{bpd_avg:.6f}',
                                          f'{std_bpd:.6f}', f'{current_lr:.2e}'])
@@ -831,7 +949,8 @@ def main():
             ckpt_data = {
                 'epoch': epoch,
                 'model_state_dict': raw_model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
+                # v6+ 多 optimizer 格式：list of state_dicts（softmax 路径仍为单元素 list）
+                'optimizer_state_dicts': [opt.state_dict() for opt in optimizers],
                 'loss': avg_loss,
                 'best_bpd': best_bpd,
             }

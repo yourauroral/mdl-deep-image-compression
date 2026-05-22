@@ -115,6 +115,41 @@ def main():
     assert model5.ctx_alpha.grad is not None, "ctx_alpha 无梯度"
     print(f"  [ccigpt.grad] coarse + fine + α 全部有梯度: OK")
 
+    # ── Test 3: CC-iGPT + DMoL fine head smoke ──
+    print("\n=== Test 3: CC-iGPT + DMoL fine head ===")
+    model_dmol = CCIGPT(
+        image_size=32, in_channels=3, vocab_size=256,
+        pool_factor=4,
+        fine_d_model=mcfg["d_model"], fine_N=2,
+        fine_h=mcfg["h"], fine_d_ff=mcfg["d_ff"],
+        coarse_d_model=128, coarse_N=2, coarse_h=4, coarse_d_ff=344,
+        dropout=0.0,
+        output_head="dmol",       # ★ fine 走 DMoL；coarse 强制 softmax
+        n_mixtures=10,
+    ).to(device)
+    out_dmol = model_dmol(x)
+    bpd_dmol = out_dmol["bpd"].item()
+    loss_dmol = out_dmol["loss"].item()
+    ce_c_dmol = out_dmol["ce_loss_coarse"].item()
+    ce_f_dmol = out_dmol["ce_loss_fine"].item()
+    assert math.isfinite(loss_dmol), "DMoL loss NaN/Inf"
+    assert 0.0 < bpd_dmol < 50.0, f"DMoL bpd_total={bpd_dmol:.2f} 超出合理范围"
+    # DMoL 路径 fine 不返回 logits（plan §4.2）
+    assert out_dmol["logits"] is None or out_dmol["logits"].shape[-1] != 256, (
+        "DMoL 路径下 fine.logits 应为 None（输出是 K*3 维 mixture 参数，非 V=256 categorical）"
+    )
+    print(f"  [ccigpt-dmol] loss={loss_dmol:.4f}  ce_coarse={ce_c_dmol:.4f}  "
+          f"ce_fine={ce_f_dmol:.4f}  bpd_total={bpd_dmol:.4f}")
+    out_dmol["loss"].backward()
+    grad_ok_dmol = all(p.grad is not None for p in model_dmol.parameters() if p.requires_grad)
+    assert grad_ok_dmol, "CC-iGPT+DMoL: some params missing gradients"
+    # 关键：DMoL head 必须有非零梯度（如 init log_scale bias=+2 是否 hot）
+    head_grad_sum = sum(p.grad.abs().sum().item()
+                        for p in model_dmol.fine.head.parameters()
+                        if p.grad is not None)
+    assert head_grad_sum > 0, "DMoL head 梯度全 0（init 可能有问题）"
+    print(f"  [ccigpt-dmol.grad] DMoL head + coarse + α 全部有梯度: OK")
+
     print("\nAll checks passed!")
 
 

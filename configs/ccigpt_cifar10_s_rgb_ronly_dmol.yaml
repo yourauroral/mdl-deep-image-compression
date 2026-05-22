@@ -1,0 +1,91 @@
+exp_name: "ccigpt_cifar10_s_rgb_ronly_dmol"
+
+# CC-iGPT R-only B1 + DMoL fine 输出头（v6 第 6 次实现）
+#
+# 与 softmax 版 (ccigpt_cifar10_s_rgb_ronly.yaml, 主表 2.9035) 的差异：
+#   - fine 输出头 softmax-256 → DMoLHead1D (K=10 mix logistic, sub-pixel 1D 无通道耦合)
+#   - amp_dtype: bf16 → null（fp32 强制；DMoL CDF 差分对 bf16 数值不稳定）
+#   - z_loss_weight: 1e-4 → 0.0（DMoL 输出无 logits-logsumexp 语义）
+#   - optimizer: 单 AdamW → AdamW(主网) + Adamax(DMoL head, lr 更小、wd=0)
+#
+# 数值加固（vs v1-v5 失败）见 future.md §8.3：
+#   - head init std 0.02→0.005, log_scale 通道 bias 0→+2.0（v1-v5 隐藏 bug 修复）
+#   - log_scale clamp [-7, +5]; log_prob_floor=-30
+#   - target ∈ [0, 255] long, bin 宽=1（不归一到 [-1,1]）
+#   - 删除通道耦合（sub-pixel AR 已通过 attention 建模 R/G/B 依赖）
+
+model:
+  type: ccigpt
+  image_size: 32
+  in_channels: 3
+  vocab_size: 256
+  pool_factor: 4
+
+  # fine 主网（与 ronly softmax 同容量 ~76M）
+  d_model: 512
+  N: 24
+  h: 8
+  d_ff: 1376
+  dropout: 0.1
+  drop_path: 0.1
+
+  # ★ DMoL 关键开关（仅 fine 生效；coarse 强制 softmax）
+  output_head: "dmol"
+  n_mixtures: 10
+
+  # coarse (R-only 灰度先验，强制 softmax)
+  coarse_d_model: 256
+  coarse_N: 6
+  coarse_h: 4
+  coarse_d_ff: 688
+  coarse_in_channels: 1         # ★ R-only coarse；fine 仍 RGB 三通道
+
+  activation_checkpointing: true
+
+data:
+  dataset: "cifar10"
+  train: datasets/
+  valid: datasets/
+  num_workers: 8
+  augment:
+    hflip: true
+    random_crop:
+      size: 32
+      padding: 4
+      padding_mode: reflect
+
+train:
+  amp_dtype: null              # ★ fp32 强制（_validate_config 校验 + DMoL forward 包 autocast(enabled=False)）
+  batch_size: 64
+  grad_accum_steps: 2
+  lr: 5e-5                     # 主网 AdamW lr（与 v3 试过的 1e-4 比再降一档）
+  eps: 1e-8
+  epochs: 100
+  log_freq: 50
+  clip_max_norm: 0.5           # 保留 v3 紧约束（v1-v2 用 1.0 也未稳）
+  z_loss_weight: 0.0           # ★ DMoL 路径 dispatch 跳过；显式置 0 防误读
+  lr_schedule: "cosine"
+  warmup_epochs: 5
+
+  # ★ DMoL head 专用 optimizer（Adamax）
+  # 主网仍走 AdamW (lr=5e-5, betas=(0.9, 0.95), wd=0.1 配 _get_param_groups)
+  optimizer_dmol_head:
+    type: adamax
+    lr: 2e-5                   # head 比主网小 2.5×，更慢更稳
+    betas: [0.9, 0.999]        # PixelCNN++ 原版 Adamax 默认
+    eps: 1e-7
+    weight_decay: 0.0          # DMoL 输出语义不齐次（mean / log_scale / logit_w 量级不同），关 wd
+
+  swa:
+    enabled: true
+    start_epoch: 90
+    update_interval: 1
+  ema:
+    enabled: true
+    decay: 0.9995
+
+eval:
+  interval: 2
+
+checkpoint:
+  save_interval: 5
