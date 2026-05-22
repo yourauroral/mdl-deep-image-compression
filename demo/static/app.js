@@ -22,6 +22,11 @@ Chart.defaults.borderColor = "#2a2d3a";
   const bpdEl = $("result-bpd");
   const ceEl = $("result-ce");
   const modelEl = $("result-model");
+  const headEl = $("result-head");
+  const extrasEl = $("result-extras");
+  const ceCoarseEl = $("result-ce-coarse");
+  const ceFineEl = $("result-ce-fine");
+  const alphaEl = $("result-alpha");
   const hmImg = $("heatmap-img");
   const hmPlaceholder = $("heatmap-placeholder");
 
@@ -44,7 +49,8 @@ Chart.defaults.borderColor = "#2a2d3a";
     };
     reader.readAsDataURL(file);
 
-    bpdEl.textContent = ceEl.textContent = modelEl.textContent = "...";
+    bpdEl.textContent = ceEl.textContent = modelEl.textContent = headEl.textContent = "...";
+    extrasEl.hidden = true;
 
     const form = new FormData();
     form.append("file", file);
@@ -54,12 +60,22 @@ Chart.defaults.borderColor = "#2a2d3a";
         const err = await res.json().catch(() => ({}));
         bpdEl.textContent = "N/A";
         modelEl.textContent = err.detail || "错误";
+        headEl.textContent = "—";
         return;
       }
       const data = await res.json();
       bpdEl.textContent = data.bpd;
       ceEl.textContent = data.ce_loss;
       modelEl.textContent = data.model_type.toUpperCase();
+      headEl.textContent = (data.output_head || "softmax").toUpperCase();
+
+      // CC-iGPT: 显示双尺度 CE 分解 + α
+      if (data.ce_coarse !== undefined) {
+        ceCoarseEl.textContent = data.ce_coarse;
+        ceFineEl.textContent = data.ce_fine;
+        alphaEl.textContent = data.ctx_alpha !== undefined ? data.ctx_alpha : "—";
+        extrasEl.hidden = false;
+      }
 
       if (data.heatmap) {
         hmImg.src = "data:image/png;base64," + data.heatmap;
@@ -68,12 +84,19 @@ Chart.defaults.borderColor = "#2a2d3a";
       } else {
         hmImg.hidden = true;
         hmPlaceholder.hidden = false;
-        hmPlaceholder.textContent = data.model_type === "ccigpt"
-          ? "CC-iGPT 含 coarse 子分支，per-position 热力图未实现" : "热力图不可用";
+        // 文案按 model_type / output_head 分别说明
+        if (data.output_head === "dmol") {
+          hmPlaceholder.textContent = "DMoL head 输出 K*3 维 mixture 参数，per-position 热力图待实现";
+        } else if (data.model_type === "ccigpt") {
+          hmPlaceholder.textContent = "CC-iGPT 含 coarse 子分支，per-position 热力图未实现";
+        } else {
+          hmPlaceholder.textContent = "热力图不可用";
+        }
       }
     } catch (e) {
       bpdEl.textContent = "离线";
       modelEl.textContent = "无法连接后端";
+      headEl.textContent = "—";
     }
   }
 })();
@@ -87,6 +110,8 @@ Chart.defaults.borderColor = "#2a2d3a";
   if (!data) return;
 
   const isTraditional = (n) => n.includes("PNG") || n.includes("WebP");
+  const isOurs = (n) => n.includes("(Ours)");
+  // 过滤掉 bpd=null 的占位行（如 DMoL TBD），lollipop 图只画已落地结果
   const traditional = data.methods.filter(m => isTraditional(m.name) && m.bpd !== null);
   const neural = data.methods.filter(m => !isTraditional(m.name) && m.bpd !== null)
                              .sort((a, b) => a.bpd - b.bpd);
@@ -95,21 +120,21 @@ Chart.defaults.borderColor = "#2a2d3a";
   const values = neural.map(m => m.bpd);
 
   const colorFor = (m) => {
-    if (m.name === "CC-iGPT (Ours)") return "#6c8cff";
+    if (isOurs(m.name)) return "#6c8cff";
     return "#5a5d72";
   };
   const colors = neural.map(colorFor);
 
-  const ourBest = neural.find(m => m.name === "CC-iGPT (Ours)");
+  const ourBest = neural.find(m => isOurs(m.name));
 
-  // 副标题：传统方法上下文 + 主结果
+  // 副标题：传统方法上下文 + 主结果（取 Ours 中 bpd 最低的一行）
   const desc = document.createElement("p");
   desc.className = "panel-desc";
   desc.innerHTML =
     `聚焦神经自回归方法 (bits/dim ∈ [2.7, 3.0])。传统无损基线作为参照: ` +
     traditional.map(m => `<b>${m.name.replace(" (lossless)", "")}</b> ${m.bpd.toFixed(2)}`).join(" · ") +
     (ourBest
-      ? ` &nbsp;|&nbsp; <span style="color:#6c8cff">CC-iGPT (Ours) <b>${ourBest.bpd.toFixed(4)}</b> bits/dim</span>`
+      ? ` &nbsp;|&nbsp; <span style="color:#6c8cff">${ourBest.name} <b>${ourBest.bpd.toFixed(4)}</b> bits/dim</span>`
       : "");
   const panel = document.getElementById("panel-metrics");
   const chartCt = panel.querySelector(".chart-container");
@@ -132,7 +157,7 @@ Chart.defaults.borderColor = "#2a2d3a";
       ctx.textAlign = "left";
       ctx.textBaseline = "middle";
       meta.data.forEach((bar, i) => {
-        ctx.fillStyle = neural[i].name.includes("Ours") ? "#6c8cff" : "#cfd3e0";
+        ctx.fillStyle = isOurs(neural[i].name) ? "#6c8cff" : "#cfd3e0";
         ctx.fillText(values[i].toFixed(2), bar.x + 10, bar.y);
       });
       ctx.restore();
@@ -159,9 +184,9 @@ Chart.defaults.borderColor = "#2a2d3a";
         data: values.map((v, i) => ({ x: v, y: i })),
         backgroundColor: colors,
         borderColor: colors.map(c => c === "#6c8cff" ? "#ffffff" : c),
-        borderWidth: neural.map(m => m.name === "CC-iGPT (Ours)" ? 2 : 0),
-        pointRadius: neural.map(m => m.name === "CC-iGPT (Ours)" ? 9 : 6),
-        pointHoverRadius: neural.map(m => m.name === "CC-iGPT (Ours)" ? 11 : 8),
+        borderWidth: neural.map(m => isOurs(m.name) ? 2 : 0),
+        pointRadius: neural.map(m => isOurs(m.name) ? 9 : 6),
+        pointHoverRadius: neural.map(m => isOurs(m.name) ? 11 : 8),
       }]
     },
     options: {
@@ -195,9 +220,9 @@ Chart.defaults.borderColor = "#2a2d3a";
           type: "category",
           labels,
           ticks: {
-            font: (ctx) => labels[ctx.index]?.includes("Ours")
+            font: (ctx) => isOurs(labels[ctx.index] || "")
               ? { size: 12, weight: "700" } : { size: 12 },
-            color: (ctx) => labels[ctx.index]?.includes("Ours") ? "#6c8cff" : "#8b8fa3",
+            color: (ctx) => isOurs(labels[ctx.index] || "") ? "#6c8cff" : "#8b8fa3",
             autoSkip: false,
             padding: 8,
           },
@@ -209,14 +234,15 @@ Chart.defaults.borderColor = "#2a2d3a";
     plugins: [overlayPlugin]
   });
 
-  // 表格保留全部方法（含 PNG/WebP）作为完整数据展示
+  // 表格保留全部方法（含 PNG/WebP + 待回填的 TBD 行）作为完整数据展示
   const tbody = document.querySelector("#table-metrics tbody");
   data.methods.forEach(m => {
     const tr = document.createElement("tr");
-    const isOurs = m.name.includes("Ours");
+    const ours = isOurs(m.name);
+    const bpdCell = m.bpd !== null ? m.bpd.toFixed(4) : "<i>TBD</i>";
     tr.innerHTML = `
-      <td class="${isOurs ? "highlight" : ""}">${m.name}</td>
-      <td class="${isOurs ? "highlight" : ""}">${m.bpd !== null ? m.bpd.toFixed(2) : "TBD"}</td>
+      <td class="${ours ? "highlight" : ""}">${m.name}</td>
+      <td class="${ours ? "highlight" : ""}">${bpdCell}</td>
       <td>${m.note}</td>`;
     tbody.appendChild(tr);
   });
@@ -338,7 +364,7 @@ Chart.defaults.borderColor = "#2a2d3a";
   data.scales.forEach(s => {
     const pct = (s.tokens / total * 100).toFixed(1);
     const tr = document.createElement("tr");
-    tr.innerHTML = `<td>${s.scale}</td><td>${s.resolution}</td><td>${s.tokens}</td><td>${pct}%</td>`;
+    tr.innerHTML = `<td>${s.scale}</td><td>${s.resolution}</td><td>${s.tokens}</td><td>${pct}%</td><td>${s.head || "—"}</td>`;
     tbody.appendChild(tr);
   });
 })();

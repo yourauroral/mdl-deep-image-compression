@@ -111,7 +111,7 @@ main {
 .metric-cards {
   display: flex;
   gap: 0.8rem;
-  margin-bottom: 1rem;
+  margin-bottom: 0.6rem;
 }
 
 .metric-card {
@@ -122,6 +122,20 @@ main {
   padding: 0.8rem;
   text-align: center;
 }
+
+.result-extras {
+  display: flex;
+  gap: 1.2rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+  padding: 0.5rem 0.8rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 0.82rem;
+  color: var(--text-dim);
+}
+.result-extras b { color: #cfd3e0; }
 
 .metric-label {
   display: block;

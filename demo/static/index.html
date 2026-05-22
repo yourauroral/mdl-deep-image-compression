@@ -43,11 +43,20 @@
           <span class="metric-label">模型</span>
           <span class="metric-value" id="result-model">—</span>
         </div>
+        <div class="metric-card">
+          <span class="metric-label">输出头</span>
+          <span class="metric-value" id="result-head">—</span>
+        </div>
+      </div>
+      <div id="result-extras" class="result-extras" hidden>
+        <span class="extra-item">CE<sub>coarse</sub>: <b id="result-ce-coarse">—</b></span>
+        <span class="extra-item">CE<sub>fine</sub>: <b id="result-ce-fine">—</b></span>
+        <span class="extra-item">α: <b id="result-alpha">—</b></span>
       </div>
       <div class="heatmap-container">
         <p class="heatmap-title">Per-position BPP 热力图 (bits/pixel)</p>
         <img id="heatmap-img" class="heatmap-img" hidden>
-        <p id="heatmap-placeholder" class="hint">上传图片后生成（仅 iGPT 模型）</p>
+        <p id="heatmap-placeholder" class="hint">上传图片后生成（仅 softmax 输出头）</p>
       </div>
     </div>
   </div>
@@ -86,12 +95,12 @@
 <!-- Panel 5: CC-iGPT coarse/fine token 分配 -->
 <section class="panel" id="panel-scales">
   <h2>CC-iGPT 双尺度 Token 分配</h2>
-  <p class="panel-desc">浅层 coarse iGPT (8×8, 192 token) 独立编码进 bitstream，UP+量化后注入 fine iGPT (32×32, 3072 token)</p>
+  <p class="panel-desc">浅层 coarse iGPT (R-only, 8×8×1, 64 token) 独立编码进 bitstream，UP+量化后注入 fine iGPT (32×32×3, 3072 token)</p>
   <div class="chart-container">
     <canvas id="chart-scales"></canvas>
   </div>
   <table id="table-scales" class="data-table">
-    <thead><tr><th>分支</th><th>分辨率</th><th>Token 数</th><th>占比</th></tr></thead>
+    <thead><tr><th>分支</th><th>分辨率</th><th>Token 数</th><th>占比</th><th>输出头</th></tr></thead>
     <tbody></tbody>
   </table>
 </section>

@@ -128,7 +128,7 @@ def predict(file: UploadFile = File(...)):
     x = transforms.ToTensor()(img).unsqueeze(0)  # (1, 3, 32, 32)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model, model_type = _get_cached_model(device)
+    model, model_type, output_head = _get_cached_model(device)
     if model is None:
         raise HTTPException(status_code=503, detail="No checkpoint available. Place a checkpoint in experiments/*/checkpoints/best.pth")
 
@@ -154,7 +154,9 @@ def predict(file: UploadFile = File(...)):
         if "ctx_alpha" in out and out["ctx_alpha"] is not None:
             extras["ctx_alpha"] = round(out["ctx_alpha"].item(), 4)
 
-    # 仅 iGPT 支持完整 per-position 热力图（复用同一次 forward 的 logits）
+    # Per-position 热力图：仅 softmax 路径返回 logits，DMoL 路径 logits=None
+    # （DMoL 输出是 K*3 维 mixture 参数，per-token NLL 需走 dmol_loss_1d(reduction='none')，
+    # 后续可扩展，当前未实现）
     heatmap_b64 = None
     if model_type == "igpt" and out.get("logits") is not None:
         heatmap_b64 = _make_heatmap_b64(model, x, out["logits"])
@@ -163,33 +165,44 @@ def predict(file: UploadFile = File(...)):
         "bpd": round(bpd, 4),
         "ce_loss": round(ce_loss, 4),
         "model_type": model_type,
+        "output_head": output_head,
         "heatmap": heatmap_b64,
         **extras,
     })
 
 
-_MODEL_CACHE = {"model": None, "type": None}
+_MODEL_CACHE = {"model": None, "type": None, "output_head": None}
 _MODEL_CACHE_LOCK = threading.Lock()
 
 
 def _get_cached_model(device):
     """线程安全的延迟加载：double-checked locking 防止并发首请求重复 torch.load
-    同一份 ckpt 造成显存峰值翻倍。"""
+    同一份 ckpt 造成显存峰值翻倍。
+
+    返回 (model, model_type, output_head)：
+      - model_type: "ccigpt" / "igpt"
+      - output_head: "softmax" / "dmol"（CC-iGPT 反映 fine 的头类型；iGPT 总是 softmax）
+    """
     if _MODEL_CACHE["model"] is not None:
-        return _MODEL_CACHE["model"], _MODEL_CACHE["type"]
+        return _MODEL_CACHE["model"], _MODEL_CACHE["type"], _MODEL_CACHE["output_head"]
 
     with _MODEL_CACHE_LOCK:
         if _MODEL_CACHE["model"] is not None:
-            return _MODEL_CACHE["model"], _MODEL_CACHE["type"]
+            return _MODEL_CACHE["model"], _MODEL_CACHE["type"], _MODEL_CACHE["output_head"]
 
         import yaml
         import torch
 
-        # 按优先级尝试主路径 ckpt：CC-iGPT R-only 主表优于 iGPT-S baseline。
+        # 按优先级尝试主路径 ckpt：DMoL v6 → R-only softmax 主表 → iGPT-S baseline。
+        # DMoL 优先以便 Stage 3 评测通过后 demo 自动切到新主表；不存在时无缝回退。
         configs_dir = ROOT / "configs"
         experiments_dir = ROOT / "experiments"
 
-        for cfg_name in ["ccigpt_cifar10_s_rgb_ronly.yaml", "igpt_cifar10_s_rgb.yaml"]:
+        for cfg_name in [
+            "ccigpt_cifar10_s_rgb_ronly_dmol.yaml",
+            "ccigpt_cifar10_s_rgb_ronly.yaml",
+            "igpt_cifar10_s_rgb.yaml",
+        ]:
             cfg_path = configs_dir / cfg_name
             if not cfg_path.exists():
                 continue
@@ -202,6 +215,7 @@ def _get_cached_model(device):
 
             mcfg = config["model"]
             model_type = mcfg.get("type", "igpt")
+            output_head = mcfg.get("output_head", "softmax")
 
             from scripts.train import _build_model_from_config, _build_ccigpt_from_config
             if model_type == "ccigpt":
@@ -222,9 +236,10 @@ def _get_cached_model(device):
 
             _MODEL_CACHE["model"] = model
             _MODEL_CACHE["type"] = model_type
-            return model, model_type
+            _MODEL_CACHE["output_head"] = output_head
+            return model, model_type, output_head
 
-        return None, None
+        return None, None, None
 
 
 def _make_heatmap_b64(model, x, logits):
