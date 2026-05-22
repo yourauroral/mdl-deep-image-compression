@@ -39,7 +39,6 @@ import argparse
 import yaml
 import math
 import torch
-import torch.nn.functional as F
 import numpy as np
 from contextlib import nullcontext
 
@@ -369,15 +368,12 @@ def cmd_swa(args, config, device):
         print("请确保训练时启用了 SWA (train.swa.enabled=true)")
         return
 
-    results = []
-
     # 评测 best
     model = _build_from_config(mcfg, device)
     _load_checkpoint(model, best_path, device)
     bpd_best, std_best, _, _ = evaluate_model(model, test_loader, device,
                                                 amp_dtype=amp_dtype,
                                                 tta_hflip=args.tta_hflip)
-    results.append(("best.pth", bpd_best, std_best))
     print(f"best.pth  bits/dim: {bpd_best:.4f} ± {std_best:.4f}")
 
     # 评测 swa
@@ -386,7 +382,6 @@ def cmd_swa(args, config, device):
     bpd_swa, std_swa, _, _ = evaluate_model(model, test_loader, device,
                                                amp_dtype=amp_dtype,
                                                tta_hflip=args.tta_hflip)
-    results.append(("swa.pth", bpd_swa, std_swa))
     print(f"swa.pth   bits/dim: {bpd_swa:.4f} ± {std_swa:.4f}")
 
     delta = bpd_swa - bpd_best

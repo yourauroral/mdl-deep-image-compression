@@ -81,12 +81,6 @@ class CCIGPT(nn.Module):
         # 避免 ctx 过强压制 fine 自身的 token embed。
         self.ctx_alpha = nn.Parameter(torch.ones(1))
 
-        # 暴露给 train.py 日志使用
-        self.seq_len = self.fine.seq_len
-        self.d_model = fine_d_model
-        self.N_layers = fine_N
-        self.vocab_size = vocab_size
-
     def _compute_coarse_ctx(self, coarse_tokens: torch.Tensor) -> torch.Tensor:
         """coarse 量化 token (B, N_c) → fine 用 additive coarse context (B, T_fine-1, d_model)。
 
@@ -124,10 +118,11 @@ class CCIGPT(nn.Module):
             )
             # R-only / 部分通道 coarse 的"灰度先验"：把 C_coarse 通道复制扩展到
             # fine 的 C_fine 通道，每个像素 R/G/B 三个位置看到同一 coarse 值；fine
-            # 自学 G/B 相对 R 的偏色。expand 共享 stride=0 让下游 reshape 报错，
-            # 必须 .contiguous()。
+            # 自学 G/B 相对 R 的偏色。expand 仅是 stride=0 view（free），实际 materialize
+            # 由下一行 (clamp * 255).round().long() 完成 —— 它创建新 storage 是 contiguous 的，
+            # 因此后续 permute+reshape 安全，无需在 expand 后调 .contiguous() 多走一次 memcpy。
             if C_coarse < C_fine:
-                x_up = x_up.expand(-1, C_fine, -1, -1).contiguous()
+                x_up = x_up.expand(-1, C_fine, -1, -1)
 
             x_up_tok = (x_up.clamp(0, 1) * 255).round().long()
             x_up_tok = x_up_tok.permute(0, 2, 3, 1).reshape(B, -1)

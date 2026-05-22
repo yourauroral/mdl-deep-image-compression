@@ -27,7 +27,7 @@ class IGPT(nn.Module):
   建模 p(x_t | x_{<t})，CE loss 直接对应 Shannon 最优编码长度。
 
   架构：RoPE base=500000、QK-Norm、RMSNorm Post-Norm（OLMo 2 风格）、
-  SwiGLU FFN、Weight Tying、z-loss 正则、深度缩放初始化、子像素自回归（可选）。
+  SwiGLU FFN、Weight Tying、z-loss 正则、深度缩放初始化、子像素自回归 (pixel-first)。
   """
   def __init__(
     self,

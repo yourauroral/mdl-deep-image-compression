@@ -103,10 +103,9 @@ def _validate_config(config: dict):
             f"({tcfg['epochs']})，否则 SWA 永不触发，swa.pth 无法生成。"
         )
 
-    # 以下校验仅适用于自回归模型 (iGPT / CC-iGPT)
-    if model_type in ('igpt', 'ccigpt'):
-        z_w = float(tcfg.get('z_loss_weight', 1e-4))
-        assert z_w >= 0, f"train.z_loss_weight 必须 >= 0，got {z_w}"
+    # z-loss 权重校验（model_type 在上面 if-else 已限定 ∈ {igpt, ccigpt}）
+    z_w = float(tcfg.get('z_loss_weight', 1e-4))
+    assert z_w >= 0, f"train.z_loss_weight 必须 >= 0，got {z_w}"
 
     # CC-iGPT 额外校验
     if model_type == 'ccigpt':
@@ -295,12 +294,17 @@ def train_one_epoch(model, loader, optimizer, scaler, device,
                 print(f"WARNING: loss is {loss_val} at epoch {epoch} step {i+1}/{steps}. "
                       f"LR={optimizer.param_groups[0]['lr']:.2e}. Training may diverge.")
             if rank == 0:
-                extra = ""
+                # CC-iGPT 路径：loss = ce_c + z·z_c + ce_f + z·z_f，数值大但视觉上让 CE_c
+                # 错觉主导，实际 bpd_total 中 coarse 仅 ~5%（N_c=64 vs N_f=3072）。
+                # 这里改为 CC-iGPT 只打印 bpd + CE 分解 + α，省略易误读的 Loss 汇总；
+                # iGPT 单尺度无 coarse overhead，保留 Loss + bpd 双轴。
                 if "ce_loss_coarse" in out and "ce_loss_fine" in out:
-                    extra = (f" | CE_c: {out['ce_loss_coarse'].item():.4f}"
-                             f" | CE_f: {out['ce_loss_fine'].item():.4f}"
-                             f" | α: {out['ctx_alpha'].item():.3f}")
-                print(f"Epoch {epoch} Step {i+1}/{steps} | Loss: {loss_val:.4f} | bits/dim: {bpd_val:.4f}{extra}")
+                    print(f"Epoch {epoch} Step {i+1}/{steps} | bits/dim: {bpd_val:.4f}"
+                          f" | CE_c: {out['ce_loss_coarse'].item():.4f}"
+                          f" | CE_f: {out['ce_loss_fine'].item():.4f}"
+                          f" | α: {out['ctx_alpha'].item():.3f}")
+                else:
+                    print(f"Epoch {epoch} Step {i+1}/{steps} | Loss: {loss_val:.4f} | bits/dim: {bpd_val:.4f}")
             if writer:
                 step = epoch * steps + i
                 writer.add_scalar('train/loss', loss_val, step)
@@ -767,7 +771,12 @@ def main():
 
         if rank == 0:
             current_lr = optimizer.param_groups[0]['lr']
-            print(f"Epoch {epoch} | Loss: {avg_loss:.4f} | bits/dim: {avg_bpd:.4f} | LR: {current_lr:.2e}")
+            # CC-iGPT 路径下 avg_loss 是 ce_c+z+ce_f+z 之和，非 bpd 同口径，省略避免误读；
+            # iGPT 单尺度无 coarse overhead，loss ≈ ce_loss，保留供监控参考。
+            if model_type == "ccigpt":
+                print(f"Epoch {epoch} | bits/dim: {avg_bpd:.4f} | LR: {current_lr:.2e}")
+            else:
+                print(f"Epoch {epoch} | Loss: {avg_loss:.4f} | bits/dim: {avg_bpd:.4f} | LR: {current_lr:.2e}")
             if writer:
                 writer.add_scalar('train/lr', current_lr, epoch)
 
