@@ -9,29 +9,20 @@ PixelCNN++ / Sparse Transformer 等基线原文口径一致；
 
 功能:
   1. 单模型评测: --checkpoint best.pth
-  2. Per-channel bpd 分解: --per_channel (R/G/B)
-  3. SWA checkpoint 对比: --swa (同时评测 best.pth 和 swa.pth)
-  4. 传统方法对比: --traditional (PNG/WebP lossless bpd)
-  5. Per-position bpd 热力图: --heatmap (仅 iGPT)
+  2. SWA checkpoint 对比: --swa (同时评测 best.pth 和 swa.pth)
+  3. 传统方法对比: --traditional (PNG/WebP lossless bpd)
+  4. TTA hflip: --tta_hflip (评测时对每张图取 x 与 hflip(x) 的 bpd 均值)
 
 输出 Markdown 格式的对比表格，可直接粘贴到论文中。
 
 Usage:
-    # 单模型评测
-    python scripts/evaluate.py --config configs/igpt_cifar10_s_rgb.yaml \
-        --checkpoint experiments/igpt_cifar10_s_rgb/checkpoints/best.pth
-
-    # Per-channel bpd 分解
-    python scripts/evaluate.py --config configs/igpt_cifar10_s_rgb.yaml \
-        --checkpoint best.pth --per_channel
+    # 单模型评测 (主表数字)
+    python scripts/evaluate.py --config configs/ccigpt_cifar10_s_rgb_ronly.yaml \
+        --checkpoint experiments/ccigpt_cifar10_s_rgb_ronly/checkpoints/best.pth --tta_hflip
 
     # SWA vs best 对比
-    python scripts/evaluate.py --config configs/igpt_cifar10_s_rgb.yaml \
-        --checkpoint experiments/exp/checkpoints/best.pth --swa
-
-    # 传统方法对比
-    python scripts/evaluate.py --config configs/igpt_cifar10_s_rgb.yaml \
-        --checkpoint best.pth --traditional
+    python scripts/evaluate.py --config configs/ccigpt_cifar10_s_rgb_ronly.yaml \
+        --checkpoint experiments/ccigpt_cifar10_s_rgb_ronly/checkpoints/best.pth --swa
 
 参考:
   [1] Shannon, "A Mathematical Theory of Communication," 1948.
@@ -167,257 +158,6 @@ def evaluate_model(model, loader, device, amp_dtype=None, tta_hflip: bool = Fals
     return bpd_mean, bpd_std, bpd_per_batch, extras
 
 
-@torch.no_grad()
-def evaluate_per_channel(model, loader, device, amp_dtype=None,
-                         use_subpixel_ar=False):
-    """
-    Per-channel bits/dim 分解 — 分别计算 R/G/B 的 bpd。
-
-    原理:
-      模型预测整个 token 序列，将 logits 和 targets 按通道拆分后分别计算 CE loss。
-
-      序列布局:
-        - channel-first (use_subpixel_ar=False): [ch0_all, ch1_all, ch2_all]
-        - pixel-first  (use_subpixel_ar=True):  [c0_p0,c1_p0,c2_p0, c0_p1,...]
-
-      bpd_channel = CE_channel / ln(2)
-      bpd_total = mean(bpd_R, bpd_G, bpd_B)  (三通道 token 数相等)
-
-    返回:
-      channel_bpds: dict[str, (float, float)] — {通道名: (bpd_mean, bpd_std)}
-      total_bpd: (float, float) — 总 bpd (mean, std)
-    """
-    model.eval()
-    use_amp = amp_dtype is not None and device.type == 'cuda'
-    channel_names = ["R", "G", "B"]
-
-    # 每个通道按 token 数加权累积 (sum, sum_sq, n)，避免末尾 batch 偏小时
-    # `np.mean(batch_means)` 给小 batch 过高权重，造成与 evaluate_model 的口径漂移。
-    channel_stats = {ch: {"ce_sum": 0.0, "ce_sq_sum": 0.0, "n": 0} for ch in channel_names}
-
-    for batch in loader:
-        if isinstance(batch, (list, tuple)):
-            x = batch[0]
-        else:
-            x = batch
-        x = x.to(device)
-        B, C, H, W = x.shape
-        pixels_per_channel = H * W
-
-        with autocast(device_type="cuda", dtype=amp_dtype) if use_amp else nullcontext():
-            out = model(x)
-
-        if out["logits"] is None:
-            raise RuntimeError(
-                "evaluate_per_channel: model returned logits=None even after disabling "
-                "fused linear CE. Please check igpt.py forward path."
-            )
-        logits = out["logits"].float()  # (B, T, vocab_size), T = seq_len - 1
-
-        # 复用模型自身的 tokenize 路径（保证与 forward 完全一致）
-        tokens = model._tokenize(x)
-        target_tokens = tokens[:, 1:]    # (B, T)
-
-        # 按通道拆分: 根据序列布局提取每通道的 token
-        for i, ch_name in enumerate(channel_names):
-            if use_subpixel_ar:
-                # pixel-first: target_tokens[t] 对应 tokens[t+1]，通道 = (t+1) % C
-                T = target_tokens.shape[1]
-                ch_mask = ((torch.arange(T, device=device) + 1) % C) == i
-                if not ch_mask.any():
-                    continue
-                ch_logits = logits[:, ch_mask]      # (B, ch_len, vocab)
-                ch_targets = target_tokens[:, ch_mask]  # (B, ch_len)
-            else:
-                # channel-first: 通道 i 的原始 tokens 占 [i*HW, (i+1)*HW)。
-                # target_tokens = tokens[:,1:]，logits[:,t] 预测 target_tokens[:,t] = tokens[:,t+1]。
-                # 因此"target 属于通道 i"等价于 tokens 下标 ∈ [i*HW, (i+1)*HW)
-                # 对应 target_tokens 下标 ∈ [i*HW - 1, (i+1)*HW - 1)（通道 0 的 token[0] 无预测）。
-                ch_start = max(0, i * pixels_per_channel - 1)
-                ch_end = (i + 1) * pixels_per_channel - 1
-                ch_end = min(ch_end, logits.shape[1])
-                if ch_start >= ch_end:
-                    continue
-                ch_logits = logits[:, ch_start:ch_end]    # (B, ch_len, vocab)
-                ch_targets = target_tokens[:, ch_start:ch_end]  # (B, ch_len)
-
-            ce_per_token = F.cross_entropy(
-                ch_logits.reshape(-1, ch_logits.shape[-1]),
-                ch_targets.reshape(-1),
-                reduction="none",
-            )
-            ce_sum = ce_per_token.sum().item()
-            ce_sq_sum = (ce_per_token ** 2).sum().item()
-            n_tokens = ce_per_token.numel()
-            channel_stats[ch_name]["ce_sum"] += ce_sum
-            channel_stats[ch_name]["ce_sq_sum"] += ce_sq_sum
-            channel_stats[ch_name]["n"] += n_tokens
-
-    # 汇总：token-level mean / std（per-token 的标准差，与论文表的 bpd ± std 口径一致）
-    channel_bpds = {}
-    for ch_name in channel_names:
-        stat = channel_stats[ch_name]
-        if stat["n"] > 0:
-            n = stat["n"]
-            ce_mean = stat["ce_sum"] / n
-            ce_var = max(stat["ce_sq_sum"] / n - ce_mean ** 2, 0.0)
-            ce_std = math.sqrt(ce_var)
-            channel_bpds[ch_name] = (ce_mean / math.log(2), ce_std / math.log(2))
-
-    # 总 bpd: 按各通道 token 数加权（channel-first 下通道 0 的 N 比 ch1/ch2 少 1）。
-    # token-weighted Σ(ce·n)/Σ n 与 evaluate_model 返回的 bpd_mean 同口径。
-    if channel_bpds:
-        total_n = sum(channel_stats[ch]["n"] for ch in channel_bpds)
-        total_ce = sum(channel_stats[ch]["ce_sum"] for ch in channel_bpds)
-        total_ce_sq = sum(channel_stats[ch]["ce_sq_sum"] for ch in channel_bpds)
-        total_mean_ce = total_ce / total_n
-        total_var_ce = max(total_ce_sq / total_n - total_mean_ce ** 2, 0.0)
-        total_mean = total_mean_ce / math.log(2)
-        total_std = math.sqrt(total_var_ce) / math.log(2)
-    else:
-        total_mean, total_std = 0.0, 0.0
-
-    return channel_bpds, (total_mean, total_std)
-
-
-@torch.no_grad()
-def evaluate_position_bpp(model, loader, device, amp_dtype=None,
-                           image_size=32, in_channels=3,
-                           use_subpixel_ar=False):
-    """
-    Per-position BPP 热力图 — 计算每个像素位置的平均 bits-per-pixel。
-
-    对于 CIFAR-100 32×32×3，每个位置有一个 token，
-    将 per-token CE loss 重新 reshape 回 (H, W, C) 并对 batch 取平均。
-    最终输出 (H, W) 的 BPP 热力图（对 C 通道求和 → bits/pixel 单位，
-    与主流程的 bpd = bits/dim 差 C 倍）。
-
-    用途:
-      - 分析图像哪些空间位置难以压缩（高 BPP 区域）
-      - 观察自回归方向（光栅扫描序列头部 vs 尾部）对压缩率的影响
-      - 论文中可视化分析素材
-
-    返回:
-      heatmap: np.ndarray (H, W) — 每个像素位置的平均 BPP (bits/pixel)
-      channel_heatmaps: dict[str, np.ndarray] — 每通道 (H, W) bpd 热力图
-    """
-    model.eval()
-    use_amp = amp_dtype is not None and device.type == 'cuda'
-    C = in_channels
-    H = W = image_size
-    seq_len = H * W * C
-    channel_names = ["R", "G", "B"]
-
-    # 累积每个 token 位置的 CE loss
-    # 序列布局: [ch0_pixel0, ch0_pixel1, ..., ch1_pixel0, ..., ch2_pixelN]
-    # token 数 = seq_len - 1（NTP 偏移 1）
-    position_ce_sum = torch.zeros(seq_len - 1, device=device)
-    n_samples = 0
-
-    for batch in loader:
-        if isinstance(batch, (list, tuple)):
-            x = batch[0]
-        else:
-            x = batch
-        x = x.to(device)
-        B_cur = x.shape[0]
-
-        with autocast(device_type="cuda", dtype=amp_dtype) if use_amp else nullcontext():
-            out = model(x)
-
-        logits = out["logits"]
-        if logits is None:
-            raise RuntimeError(
-                "evaluate_position_bpp: model returned logits=None. "
-                "Please check igpt.py forward path."
-            )
-        logits = logits.float()
-
-        # 复用模型自身的 tokenize 路径
-        tokens = model._tokenize(x)
-        target_tokens = tokens[:, 1:]
-
-        # Per-token CE loss: (B, T)
-        per_token_ce = F.cross_entropy(
-            logits.reshape(-1, logits.shape[-1]),
-            target_tokens.reshape(-1),
-            reduction="none"
-        ).reshape(B_cur, -1)  # (B, seq_len-1)
-
-        # 对 batch 维度求和
-        position_ce_sum += per_token_ce.sum(dim=0)
-        n_samples += B_cur
-
-    # 平均 CE per position
-    position_ce_avg = (position_ce_sum / n_samples).cpu().numpy()  # (seq_len-1,)
-
-    # 转换为 bpd: CE / ln(2)（单 token 单位即 bits/dim；后续按 C 求和才是 bits/pixel）
-    position_bpd = position_ce_avg / math.log(2)
-
-    # Reshape 回空间结构
-    # 注意: 序列的第一个 token 没有 prediction（被偏移掉了），
-    # 所以在 position_bpd 前面填 0，使其长度 = seq_len
-    position_bpd_full = np.zeros(seq_len)
-    position_bpd_full[1:] = position_bpd
-
-    if use_subpixel_ar:
-        # pixel-first: (seq_len,) → (H, W, C) → (C, H, W)
-        position_bpd_hwc = position_bpd_full.reshape(H, W, C)
-        position_bpd_chw = position_bpd_hwc.transpose(2, 0, 1)  # (C, H, W)
-    else:
-        # channel-first: (seq_len,) → (C, H, W)
-        position_bpd_chw = position_bpd_full.reshape(C, H, W)
-
-    # 总 BPP 热力图: 对 C 通道求和 → (H, W)
-    # 单位变化：position_bpd_chw 是 bits/sub-pixel (bpd per token)，
-    # 沿 C 维 sum 得到 bits/pixel（每像素 3 个 sub-pixel bpd 之和）。
-    # 与主流程 evaluate_model 返回的 bits/dim (bpd) 单位差 C=3 倍。
-    # 命名为 bpp_heatmap 以避免与 bpd_chw 单位混淆。
-    bpp_heatmap = position_bpd_chw.sum(axis=0)
-
-    # 每通道热力图（单位仍是 bpd / bits per sub-pixel）
-    channel_heatmaps = {}
-    for i, ch_name in enumerate(channel_names):
-        channel_heatmaps[ch_name] = position_bpd_chw[i]
-
-    return bpp_heatmap, channel_heatmaps
-
-
-def save_heatmap(heatmap, output_path, title="BPP Heatmap", vmin=None, vmax=None):
-    """
-    将 BPP 热力图保存为 PNG 图片。
-
-    使用 matplotlib 的 'hot' colormap（高 BPP → 亮色/红色，低 BPP → 暗色）。
-    若 matplotlib 不可用，保存为 .npy 文件。
-
-    参数:
-      heatmap: np.ndarray (H, W)
-      output_path: str — 输出路径（.png）
-      title: str — 图片标题
-      vmin, vmax: float — colorbar 范围
-    """
-    try:
-        import matplotlib
-        matplotlib.use('Agg')  # 无 GUI 后端
-        import matplotlib.pyplot as plt
-
-        fig, ax = plt.subplots(1, 1, figsize=(6, 5))
-        im = ax.imshow(heatmap, cmap='hot', interpolation='nearest',
-                        vmin=vmin, vmax=vmax)
-        ax.set_title(title)
-        ax.set_xlabel('Width')
-        ax.set_ylabel('Height')
-        fig.colorbar(im, ax=ax, label='BPP (bits/pixel)')
-        fig.tight_layout()
-        fig.savefig(output_path, dpi=150, bbox_inches='tight')
-        plt.close(fig)
-        print(f"  保存热力图: {output_path}")
-    except ImportError:
-        # matplotlib 不可用，保存原始数据
-        npy_path = output_path.replace('.png', '.npy')
-        np.save(npy_path, heatmap)
-        print(f"  matplotlib 不可用，保存 numpy 数组: {npy_path}")
-
 
 def compute_traditional_bpd(dataset, method="png"):
     """
@@ -467,7 +207,7 @@ def compute_traditional_bpd(dataset, method="png"):
 
 def print_results_table(dataset_name, model_bpd, model_std,
                          traditional_results=None,
-                         channel_bpds=None, model_label="iGPT (Ours)"):
+                         model_label="iGPT (Ours)"):
     """
     打印 Markdown 格式的结果表格。
 
@@ -476,7 +216,6 @@ def print_results_table(dataset_name, model_bpd, model_std,
       model_bpd: float — 本文模型 bits/dim
       model_std: float — bits/dim 标准差
       traditional_results: dict[str, (float, float)] — 传统方法 {name: (bpd, std)}
-      channel_bpds: dict[str, (float, float)] — per-channel {name: (bpd, std)}
     """
     print(f"\n{'='*60}")
     print(f"  评测结果 — {dataset_name.upper()}")
@@ -496,17 +235,6 @@ def print_results_table(dataset_name, model_bpd, model_std,
 
     # 本文
     print(f"| **{model_label}** | **{model_bpd:.4f} ± {model_std:.4f}** | **本文** |")
-
-    # Per-channel bits/dim
-    if channel_bpds:
-        print()
-        print("| 通道 | bits/dim ↓ |")
-        print("|------|-----------|")
-        for ch_name, (bpd, std) in channel_bpds.items():
-            print(f"| {ch_name} | {bpd:.4f} ± {std:.4f} |")
-        # Total 是三通道的平均（bits/dim 单位），与 evaluate_model 返回值一致。
-        total_bpd = sum(v[0] for v in channel_bpds.values()) / len(channel_bpds)
-        print(f"| **Total** | **{total_bpd:.4f}** |")
     print()
 
 
@@ -600,22 +328,6 @@ def cmd_single(args, config, device):
         print(f"  CE_fine   = {ce_f:.4f}  → bpd_share = {bpd_f_share:.4f} ({100*bpd_f_share/bpd_mean:.1f}%)")
         print(f"  ctx_alpha = {extras['ctx_alpha']:.4f}")
 
-    # Per-channel bits/dim（可选，仅 iGPT 支持；CC-iGPT 联合 coarse+fine 序列与单尺度通道切分不兼容）
-    channel_bpds = None
-    if args.per_channel:
-        if model_type == "ccigpt":
-            print("\n[跳过 per_channel] CC-iGPT 含 coarse 子分支，per-channel 切分仅对 fine 有意义；目前未实现，bpd_total 已含三通道联合压缩率。")
-        else:
-            print("\n计算 per-channel bits/dim...")
-            use_subpixel_ar = mcfg.get("use_subpixel_ar", False)
-            channel_bpds, (total_bpd, total_std) = evaluate_per_channel(
-                model, test_loader, device, amp_dtype=amp_dtype,
-                use_subpixel_ar=use_subpixel_ar
-            )
-            for ch_name, (ch_bpd, ch_std) in channel_bpds.items():
-                print(f"  {ch_name}: {ch_bpd:.4f} ± {ch_std:.4f}")
-            print(f"  Total: {total_bpd:.4f} ± {total_std:.4f}")
-
     # 传统方法（可选）
     traditional_results = None
     if args.traditional:
@@ -634,34 +346,8 @@ def cmd_single(args, config, device):
             print(f"  WebP: 跳过 ({e})")
 
     print_results_table(dataset_name, bpd_mean, bpd_std,
-                         traditional_results, channel_bpds,
+                         traditional_results,
                          model_label=f"{model_type.upper()} (Ours)")
-
-    # Per-position BPP 热力图（可选，仅 iGPT — CC-iGPT 含 coarse 分支未实现；
-    # 注意热力图单位是 bits/pixel = bpd × C，与表格里的 bits/dim 主指标差 C 倍）
-    if args.heatmap:
-        if model_type == "ccigpt":
-            print("\n[跳过 heatmap] CC-iGPT 含 coarse 子分支，per-position 热力图未实现。")
-        else:
-            print("\n生成 per-position BPP 热力图 (bits/pixel)...")
-            use_subpixel_ar = mcfg.get("use_subpixel_ar", False)
-            image_size = mcfg.get("image_size", 32)
-            in_channels = mcfg.get("in_channels", 3)
-            heatmap, channel_heatmaps = evaluate_position_bpp(
-                model, test_loader, device, amp_dtype=amp_dtype,
-                image_size=image_size, in_channels=in_channels,
-                use_subpixel_ar=use_subpixel_ar
-            )
-            # 保存到 checkpoint 同目录
-            ckpt_dir = os.path.dirname(args.checkpoint) or "."
-            save_heatmap(heatmap, os.path.join(ckpt_dir, "bpp_heatmap_total.png"),
-                         title=f"BPP Heatmap — {dataset_name}")
-            for ch_name, ch_hm in channel_heatmaps.items():
-                save_heatmap(ch_hm, os.path.join(ckpt_dir, f"bpp_heatmap_{ch_name}.png"),
-                             title=f"bpd Heatmap — {ch_name}")
-            # 打印统计
-            print(f"  Total BPP range: [{heatmap.min():.4f}, {heatmap.max():.4f}]")
-            print(f"  Mean: {heatmap.mean():.4f}, Std: {heatmap.std():.4f}")
 
 
 def cmd_swa(args, config, device):
@@ -722,17 +408,13 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
-  # 单模型
-  python scripts/evaluate.py --config configs/igpt_cifar10_s_rgb.yaml \\
-      --checkpoint best.pth
-
-  # Per-channel + 传统方法
-  python scripts/evaluate.py --config configs/igpt_cifar10_s_rgb.yaml \\
-      --checkpoint best.pth --per_channel --traditional
+  # 单模型 (主表数字 best + TTA hflip)
+  python scripts/evaluate.py --config configs/ccigpt_cifar10_s_rgb_ronly.yaml \\
+      --checkpoint experiments/ccigpt_cifar10_s_rgb_ronly/checkpoints/best.pth --tta_hflip
 
   # SWA 对比
-  python scripts/evaluate.py --config configs/igpt_cifar10_s_rgb.yaml \\
-      --checkpoint experiments/exp/checkpoints/best.pth --swa
+  python scripts/evaluate.py --config configs/ccigpt_cifar10_s_rgb_ronly.yaml \\
+      --checkpoint experiments/ccigpt_cifar10_s_rgb_ronly/checkpoints/best.pth --swa
         """
     )
     parser.add_argument('--config', type=str, required=True,
@@ -741,10 +423,6 @@ def main():
                         help='模型 checkpoint 路径（best.pth）')
     parser.add_argument('--traditional', action='store_true',
                         help='同时计算 PNG/WebP 传统方法 bits/dim')
-    parser.add_argument('--per_channel', action='store_true',
-                        help='计算 per-channel bits/dim 分解（R/G/B）')
-    parser.add_argument('--heatmap', action='store_true',
-                        help='生成 per-position BPP 热力图（保存为 PNG，单位 bits/pixel）')
     parser.add_argument('--swa', action='store_true',
                         help='同时评测 SWA checkpoint（swa.pth vs best.pth）')
     parser.add_argument('--tta_hflip', action='store_true',

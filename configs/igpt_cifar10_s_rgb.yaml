@@ -1,7 +1,6 @@
 exp_name: "igpt_cifar10_s_rgb"
 
-# iGPT-S RGB-bit-exact baseline (单尺度自回归)
-# 与 CC-iGPT 三档共用训练预算，作为单尺度对照。
+# iGPT-S RGB-bit-exact baseline (单尺度自回归对照)，pixel-first sub-pixel AR
 
 model:
   type: igpt
@@ -13,7 +12,6 @@ model:
   h: 8
   d_ff: 1376
   dropout: 0.0
-  use_subpixel_ar: true
   activation_checkpointing: true
 
 data:

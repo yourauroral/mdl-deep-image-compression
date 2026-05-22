@@ -1,16 +1,13 @@
 {
-  "model": "CC-iGPT",
+  "model": "CC-iGPT (R-only)",
   "image_size": 32,
   "scales": [
-    {"scale": "Coarse", "resolution": "8x8",   "tokens": 192,  "role": "独立编码进 bitstream", "ce_nats": 2.9289, "bpd_share": 0.2641, "share_pct": 9.4},
-    {"scale": "Fine",   "resolution": "32x32", "tokens": 3072, "role": "条件 fine NTP（注入 α·coarse_ctx）", "ce_nats": 1.7610, "bpd_share": 2.5406, "share_pct": 90.6}
+    {"scale": "Coarse (R-only)", "resolution": "8x8x1",   "tokens": 64,   "role": "灰度先验，独立编码进 bitstream",                                       "ce_nats": 4.3379, "bpd_share": 0.1304, "share_pct": 4.5},
+    {"scale": "Fine",            "resolution": "32x32x3", "tokens": 3072, "role": "条件 fine NTP（注入 α·coarse_ctx）+ pixel-first AR 自学 G/B 偏色", "ce_nats": 1.9222, "bpd_share": 2.7731, "share_pct": 95.5}
   ],
-  "total_tokens": 3264,
-  "bpd_total": 2.8047,
-  "bpd_std": 0.0747,
-  "ctx_alpha": 0.5407,
-  "baseline_igpt_s_swa": 2.9739,
-  "improvement_bits_per_dim": 0.1692,
-  "improvement_pct": 5.7,
-  "note": "early-stop @ epoch 20 (CIFAR-10 + fine 76M 容量过剩，120ep 训练第 25 epoch val bits/dim 反弹至 2.86)"
+  "total_tokens": 3136,
+  "bpd_total": 2.9035,
+  "bpd_std": 0.0854,
+  "ctx_alpha": 0.0982,
+  "note": "100ep + RandomCrop + DropPath 0.1 + dropout 0.1 + EMA 0.9995 + TTA hflip; coarse 仅 64 token (~2% overhead)，fine 通过 sub-pixel AR 自学 G/B 相对 R 的偏色修正"
 }

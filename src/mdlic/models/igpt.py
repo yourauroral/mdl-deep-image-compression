@@ -40,12 +40,6 @@ class IGPT(nn.Module):
     d_ff=1024,
     dropout=0.1,
     activation_checkpointing: bool = False,
-    # 子像素自回归 (Sub-pixel Autoregression):
-    # 将序列从 channel-first [R_all, G_all, B_all] 改为 pixel-first
-    # [R0,G0,B0, R1,G1,B1, ...]，使同一像素内的通道能相互条件化:
-    #   p(G_i | R_i, context)  和  p(B_i | R_i, G_i, context)
-    # Ref: Salimans et al., "PixelCNN++," ICLR 2017 — 通道间条件依赖
-    use_subpixel_ar: bool = False,
     drop_path: float = 0.0,
   ):
     super().__init__()
@@ -55,14 +49,14 @@ class IGPT(nn.Module):
     self.vocab_size = vocab_size
     self.d_model = d_model
     self.N_layers = N
-    self.use_subpixel_ar = use_subpixel_ar
     self.token_embed = nn.Embedding(vocab_size, d_model)
 
-    # Channel embedding: 子像素自回归模式下，为每个通道位置（0=R, 1=G, 2=B）
-    # 添加可学习的通道嵌入，帮助模型区分同一像素内的不同通道 token。
-    # Ref: van den Oord et al., NeurIPS 2016 — 通道条件化需要通道标识
-    if use_subpixel_ar:
-        self.channel_embed = nn.Embedding(in_channels, d_model)
+    # 子像素自回归 (sub-pixel AR, Salimans et al., PixelCNN++ ICLR 2017):
+    # 序列布局 [R0,G0,B0, R1,G1,B1, ...]，使同一像素内的通道能相互条件化:
+    #   p(G_i | R_i, context), p(B_i | R_i, G_i, context)
+    # channel_embed 给每个通道位置 (0=R, 1=G, 2=B) 学习一个嵌入，
+    # 帮助模型区分同一像素内的不同通道 token (van den Oord NeurIPS 2016)
+    self.channel_embed = nn.Embedding(in_channels, d_model)
 
     # DropPath 线性 schedule: 第 i 层 drop_prob = drop_path · i/(N-1)
     # Ref: Huang et al., ECCV 2016 — 深层 drop 更激进，浅层保留信息
@@ -107,16 +101,11 @@ class IGPT(nn.Module):
         nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
   def _tokenize(self, x: torch.Tensor) -> torch.Tensor:
-    """RGB float [0,1] → 整数 token 序列 (B, T)。RGB-bit-exact: 直接 *255 round。"""
+    """RGB float [0,1] → 整数 token 序列 (B, T)。pixel-first: [R0,G0,B0, R1,...]。"""
     B = x.size(0)
     x = x.clamp(0, 1)
     x = (x * 255).round().long()
-    if self.use_subpixel_ar:
-      # pixel-first: [R0,G0,B0, R1,G1,B1, ...]
-      x = x.permute(0, 2, 3, 1).reshape(B, -1)
-    else:
-      x = x.reshape(B, -1)
-    return x
+    return x.permute(0, 2, 3, 1).reshape(B, -1)
 
   def _embed_inputs(self, input_tokens: torch.Tensor,
                     coarse_ctx: torch.Tensor = None):
@@ -136,12 +125,10 @@ class IGPT(nn.Module):
         hidden = hidden + coarse_ctx
 
     T = input_tokens.shape[1]
-    position_ids = None
-    if self.use_subpixel_ar:
-        C = self.in_channels
-        channel_indices = torch.arange(T, device=input_tokens.device) % C
-        hidden = hidden + self.channel_embed(channel_indices).unsqueeze(0)
-        position_ids = torch.arange(T, device=input_tokens.device) // C
+    C = self.in_channels
+    channel_indices = torch.arange(T, device=input_tokens.device) % C
+    hidden = hidden + self.channel_embed(channel_indices).unsqueeze(0)
+    position_ids = torch.arange(T, device=input_tokens.device) // C
 
     return hidden, position_ids
 

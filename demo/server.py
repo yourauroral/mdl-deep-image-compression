@@ -185,9 +185,7 @@ def _get_cached_model(device):
         import yaml
         import torch
 
-        # 按优先级尝试主路径 ckpt：CC-iGPT R-only B1（主表 SOTA）优于 iGPT-S baseline。
-        # 故意不扫整个 configs/ 目录 —— channel-first / sub-pixel 是论文消融对照档，
-        # 不应作为 demo 默认模型；如需展示对照档，应手动改这里的列表。
+        # 按优先级尝试主路径 ckpt：CC-iGPT R-only 主表优于 iGPT-S baseline。
         configs_dir = ROOT / "configs"
         experiments_dir = ROOT / "experiments"
 
@@ -240,10 +238,9 @@ def _make_heatmap_b64(model, x, logits):
 
     H = W = model.image_size
     C = model.in_channels
-    use_subpixel_ar = getattr(model, "use_subpixel_ar", False)
 
     logits = logits.float()
-    # 复用模型自身的 tokenize 路径（RGB-bit-exact）
+    # 复用模型自身的 tokenize 路径（RGB-bit-exact, pixel-first）
     tokens = model._tokenize(x.clamp(0, 1))
     target = tokens[:, 1:]
 
@@ -257,11 +254,8 @@ def _make_heatmap_b64(model, x, logits):
     seq_len = C * H * W
     full = np.zeros(seq_len)
     full[1:] = bpd_vals[:seq_len - 1]
-    if use_subpixel_ar:
-        # pixel-first → (H, W, C) → 沿 C 求和得到 (H, W)
-        heatmap = full.reshape(H, W, C).sum(axis=-1)
-    else:
-        heatmap = full.reshape(C, H, W).sum(axis=0)
+    # pixel-first → (H, W, C) → 沿 C 求和得到 (H, W) bits/pixel
+    heatmap = full.reshape(H, W, C).sum(axis=-1)
 
     # 用 Figure + FigureCanvasAgg 绕开 pyplot 全局 figure manager；
     # threadpool 并发请求下 plt.subplots/plt.close 共享 figure 池会互相干扰。

@@ -135,7 +135,6 @@ def _shared_igpt_kwargs(mcfg: dict) -> dict:
         vocab_size=mcfg["vocab_size"],
         dropout=mcfg["dropout"],
         activation_checkpointing=mcfg.get("activation_checkpointing", False),
-        use_subpixel_ar=mcfg.get("use_subpixel_ar", False),
         drop_path=mcfg.get("drop_path", 0.0),
     )
 

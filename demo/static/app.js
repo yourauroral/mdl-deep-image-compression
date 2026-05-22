@@ -96,13 +96,11 @@ Chart.defaults.borderColor = "#2a2d3a";
 
   const colorFor = (m) => {
     if (m.name === "CC-iGPT (Ours)") return "#6c8cff";
-    if (m.name === "iGPT-S (Ours)")  return "#9bb0ff";
     return "#5a5d72";
   };
   const colors = neural.map(colorFor);
 
   const ourBest = neural.find(m => m.name === "CC-iGPT (Ours)");
-  const ourBaseline = neural.find(m => m.name === "iGPT-S (Ours)");
 
   // 副标题：传统方法上下文 + 主结果
   const desc = document.createElement("p");
@@ -110,8 +108,8 @@ Chart.defaults.borderColor = "#2a2d3a";
   desc.innerHTML =
     `聚焦神经自回归方法 (bits/dim ∈ [2.7, 3.0])。传统无损基线作为参照: ` +
     traditional.map(m => `<b>${m.name.replace(" (lossless)", "")}</b> ${m.bpd.toFixed(2)}`).join(" · ") +
-    (ourBest && ourBaseline
-      ? ` &nbsp;|&nbsp; <span style="color:#6c8cff">CC-iGPT 较 iGPT-S baseline 改善 <b>−${(ourBaseline.bpd - ourBest.bpd).toFixed(2)}</b> bits/dim</span>`
+    (ourBest
+      ? ` &nbsp;|&nbsp; <span style="color:#6c8cff">CC-iGPT (Ours) <b>${ourBest.bpd.toFixed(4)}</b> bits/dim</span>`
       : "");
   const panel = document.getElementById("panel-metrics");
   const chartCt = panel.querySelector(".chart-container");
@@ -122,28 +120,11 @@ Chart.defaults.borderColor = "#2a2d3a";
   const X_MIN = 2.70;
   const X_MAX = 3.05;
 
-  // 自定义 plugin: 在每个点末端绘制数值标签 + 在 baseline 处画虚线
+  // 自定义 plugin: 在每个点末端绘制数值标签
   const overlayPlugin = {
     id: "overlay",
     afterDatasetsDraw(chart) {
-      const { ctx, chartArea, scales } = chart;
-      // baseline 虚线 (iGPT-S)
-      if (ourBaseline) {
-        const x = scales.x.getPixelForValue(ourBaseline.bpd);
-        ctx.save();
-        ctx.strokeStyle = "rgba(155,176,255,0.35)";
-        ctx.setLineDash([4, 4]);
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.moveTo(x, chartArea.top);
-        ctx.lineTo(x, chartArea.bottom);
-        ctx.stroke();
-        ctx.fillStyle = "#9bb0ff";
-        ctx.font = "11px -apple-system, sans-serif";
-        ctx.textAlign = "left";
-        ctx.fillText("iGPT-S baseline", x + 4, chartArea.top + 12);
-        ctx.restore();
-      }
+      const { ctx } = chart;
       // 数值标签
       const meta = chart.getDatasetMeta(0);
       ctx.save();

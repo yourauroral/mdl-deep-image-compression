@@ -16,17 +16,11 @@
 | Image Transformer | 95M | 2.90 | RGB-bit-exact | Parmar et al., ICML 2018 |
 | PixelSNAIL | 380M | 2.85 | RGB-bit-exact | Chen et al., ICML 2018 |
 | Sparse Transformer | 59M | 2.80 | RGB-bit-exact | Child et al., 2019 (128 层 strided sparse attention) |
-| **CC-iGPT (Ours, channel-first)** | ~81M | 3.2540 | RGB-bit-exact | `[R…G…B…]` 平铺，消融起点 |
-| **CC-iGPT (Ours, R-only)** | ~81M | **3.1074** | RGB-bit-exact | `coarse_in_channels=1`，coarse 仅压 R 8×8（64 token），fine 通过 sub-pixel AR 自学 G/B，**主表 SOTA** |
-| **CC-iGPT (Ours, sub-pixel)** | ~81M | 3.1953 | RGB-bit-exact | `use_subpixel_ar=true`，序列布局 `[R₀G₀B₀ R₁G₁B₁ ...]`，coarse 192 token RGB |
+| **CC-iGPT (Ours, R-only)** | ~81M | **2.9035** | RGB-bit-exact | `coarse_in_channels=1`，coarse 仅压 R 8×8（64 token），fine 通过 sub-pixel AR 自学 G/B，**主表**（100ep + RandomCrop + DropPath 0.1 + dropout 0.1 + EMA 0.9995 + TTA hflip）|
 | PNG | — | ~5.87 | RGB-bit-exact | 传统方法 |
 | WebP (lossless mode) | — | ~5.02 | RGB-bit-exact | 传统方法 |
 
-**消融三角内部论证**（不依赖跨基线绝对数字）：
-- **双尺度方法本身有效**：R-only 3.11 vs channel-first 3.25 = **−0.14 bpd**
-- **更多 coarse 信号未必更好**：sub-pixel 3.20 > R-only 3.11（差 +0.09），验证 R-only 灰度先验是双尺度容量配置的**甜点** — fine CE 在两种配置下都触底到 ~2.0，coarse 开销线性增长但 fine 边际收益饱和
-
-CC-iGPT 主表与 Sparse Transformer 2.80 的差距来自参数预算（~81M vs 59M）/ 深度（24 层 dense vs 128 层 strided sparse）/ 训练 epoch（50 vs 200+）/ DMoL 输出头已尝试失败 git revert（详见 [`future.md`](future.md)）。CIFAR-10 主表的方法有效性靠**消融三角内部差值**论证；**SOTA 对比**靠 ImageNet 64×64 < 3.44（Sparse Transformer 152M strided）路线支撑。
+CC-iGPT R-only **平 Image Transformer 95M (2.90)、胜 PixelCNN++ 52M (2.92)**，参数预算 ~81M。与 Sparse Transformer 2.80 的差距来自架构深度（24 层 dense vs 128 层 strided sparse attention）/ DMoL 输出头（5 轮训练不稳已 revert，softmax 256-way 保留）。**冲击 SOTA** 靠 ImageNet 64×64 < 3.44（Sparse Transformer 152M strided）路线支撑。
 
 ### 创新点定位 & 与 SOTA 的关系
 
@@ -34,7 +28,7 @@ CC-iGPT 主表与 Sparse Transformer 2.80 的差距来自参数预算（~81M vs 
 
 1. **方法 — 零新参数的双尺度条件注入**：coarse iGPT 量化 token 经 bit-exact 反量化/上采样/重 tokenize 后，复用 `fine.token_embed` 得到 `coarse_ctx`，再以可学习标量 α 做 additive 注入。整个 ctx 通路只引入 1 个标量参数；encoder/decoder 共用同一函数，bitstream 真实可解码。回避了多尺度联合 AR (MSPA) 的 loss 平衡难题。
 2. **工程 — 8 个手写 Triton kernel + 1 个 roofline 证伪的反面案例**：7 个进入训练栈，1 个 `fused_linear_ce` 在 V=256 下经 roofline 分析判定为负收益（compute-bound + 三重循环失去 cuBLAS GEMM 利用率），保留在 `ops/` 作工程严谨性的反向证据，详见 [`experiments/kernel_negative_finding.md`](experiments/kernel_negative_finding.md)。
-3. **分析 — RGB-bit-exact 三档消融 + 跨数据集 SOTA 对比**：CIFAR-10 RGB-bit-exact 三档消融（channel-first / R-only / sub-pixel）证明双尺度方法本身有效（−0.14 bpd）与 pixel-first AR 红利；ImageNet 64×64 跨数据集验证（目标 < 3.44 超 Sparse Transformer 152M）；Linear Probe 逐层表征曲线；roofline forward 与 fwd+bwd 双视角。
+3. **分析 — RGB-bit-exact 主表 + 跨数据集 SOTA 对比**：CIFAR-10 RGB-bit-exact R-only 主表 **2.9035 bpd**（平 Image Transformer，胜 PixelCNN++）；ImageNet 64×64 跨数据集验证（目标 < 3.44 超 Sparse Transformer 152M）；Linear Probe 逐层表征曲线；roofline forward 与 fwd+bwd 双视角。
 
 ## 快速开始
 
@@ -50,22 +44,17 @@ python scripts/dryrun_forward.py
 # 训练 — 多卡 DDP (按 GPU 数调整 nproc_per_node)
 torchrun --nproc_per_node=2 scripts/train.py --config configs/igpt_cifar10_s_rgb.yaml
 
-# CC-iGPT RGB-bit-exact 三档
-torchrun --nproc_per_node=2 scripts/train.py --config configs/ccigpt_cifar10_s_rgb.yaml          # channel-first
-torchrun --nproc_per_node=2 scripts/train.py --config configs/ccigpt_cifar10_s_rgb_ronly.yaml    # R-only 灰度先验
-torchrun --nproc_per_node=2 scripts/train.py --config configs/ccigpt_cifar10_s_rgb_subpixel.yaml # sub-pixel AR (主表)
+# CC-iGPT RGB-bit-exact (R-only 主表)
+torchrun --nproc_per_node=2 scripts/train.py --config configs/ccigpt_cifar10_s_rgb_ronly.yaml
 
 # 断点续训 (resume 会自动用 config 中的 lr 覆盖 checkpoint 旧值)
 torchrun --nproc_per_node=2 scripts/train.py \
-    --config configs/ccigpt_cifar10_s_rgb_subpixel.yaml \
-    --resume experiments/ccigpt_cifar10_s_rgb_subpixel/checkpoints/epoch_30.pth
+    --config configs/ccigpt_cifar10_s_rgb_ronly.yaml \
+    --resume experiments/ccigpt_cifar10_s_rgb_ronly/checkpoints/epoch_90.pth
 
-# 评测 — CC-iGPT (含 coarse / fine CE 分解 + bpd_total)
-python scripts/evaluate.py --config configs/ccigpt_cifar10_s_rgb_subpixel.yaml \
-    --checkpoint experiments/ccigpt_cifar10_s_rgb_subpixel/checkpoints/best.pth
-# SWA vs best 对比（同时评测 best.pth 和 swa.pth）
-python scripts/evaluate.py --config configs/ccigpt_cifar10_s_rgb_subpixel.yaml \
-    --checkpoint experiments/ccigpt_cifar10_s_rgb_subpixel/checkpoints/best.pth --swa
+# 评测 — CC-iGPT (含 coarse / fine CE 分解 + bpd_total)，主表数字用 best + TTA hflip
+python scripts/evaluate.py --config configs/ccigpt_cifar10_s_rgb_ronly.yaml \
+    --checkpoint experiments/ccigpt_cifar10_s_rgb_ronly/checkpoints/best.pth --tta_hflip
 
 # Linear Probe (各层表征分类准确率)
 python scripts/linear_probe.py --config configs/igpt_cifar10_s_rgb.yaml \
@@ -101,15 +90,15 @@ pytest tests/ -v
 # ⚠️ AutoDL 多卡 DDP 必须设置 NCCL_P2P_DISABLE=1 NCCL_IB_DISABLE=1
 NCCL_P2P_DISABLE=1 NCCL_IB_DISABLE=1 \
 nohup torchrun --nproc_per_node=2 scripts/train.py \
-    --config configs/ccigpt_cifar10_s_rgb_subpixel.yaml --export_csv \
-  > experiments/ccigpt_cifar10_s_rgb_subpixel_train.log 2>&1 &
+    --config configs/ccigpt_cifar10_s_rgb_ronly.yaml --export_csv \
+  > experiments/ccigpt_cifar10_s_rgb_ronly_train.log 2>&1 &
 
 watch -n 1 nvidia-smi
 tensorboard --logdir experiments/ --port 6006 --host 0.0.0.0
 
 # ========== AutoDL → 本地: 回收 checkpoint ==========
-scp -P <port> root@<autodl-host>:/root/autodl-tmp/mdl-deep-image-compression/experiments/ccigpt_cifar10_s_rgb_subpixel/checkpoints/best.pth \
-    ./experiments/ccigpt_cifar10_s_rgb_subpixel/checkpoints/
+scp -P <port> root@<autodl-host>:/root/autodl-tmp/mdl-deep-image-compression/experiments/ccigpt_cifar10_s_rgb_ronly/checkpoints/best.pth \
+    ./experiments/ccigpt_cifar10_s_rgb_ronly/checkpoints/
 ```
 
 ## 架构
@@ -140,16 +129,17 @@ scp -P <port> root@<autodl-host>:/root/autodl-tmp/mdl-deep-image-compression/exp
           |                                       |
           +-------------------+-------------------+
                               |
-            +-----------------+-----------------+
-            |  channel-first                     |  pixel-first (子像素自回归)
-            |  [R_all | G_all | B_all]           |  [R₀,G₀,B₀, R₁,G₁,B₁, ...]
-            |  (消融起点)                         |  (主表配置)
-            +-----------------+-----------------+
+                    +---------v-----------+
+                    | 序列布局: R-only 主表 |
+                    | coarse: R 8×8 (64)  |
+                    | fine: sub-pixel AR  |
+                    | [R₀,G₀,B₀, R₁,...] |
+                    +---------+-----------+
                               |
                     +---------v-----------+
-                    | 自回归移位:          |  input  = x[0..T-1]
-                    |  input = x[:-1]    |  target = x[1..T]
-                    |  target = x[1:]    |  (用 x₀ 预测 x₁, 用 x₀x₁ 预测 x₂, ...)
+                    | 自回归移位:          |
+                    |  input  = x[:-1]    |
+                    |  target = x[1:]     |
                     +---------+-----------+
                               |
                     +---------v-----------+
@@ -203,7 +193,6 @@ scp -P <port> root@<autodl-host>:/root/autodl-tmp/mdl-deep-image-compression/exp
 
 **子像素自回归序列**:
 ```
-channel-first:  [R₀ R₁ ... R₁₀₂₃ | G₀ G₁ ... G₁₀₂₃ | B₀ B₁ ... B₁₀₂₃]
 pixel-first:    [R₀ G₀ B₀ | R₁ G₁ B₁ | ... | R₁₀₂₃ G₁₀₂₃ B₁₀₂₃]
                      ↑ causal mask 使 G₀ 看到 R₀, B₀ 看到 R₀+G₀
 ```
@@ -287,9 +276,7 @@ src/mdlic/
 └── utils/     seed, bpd, clean_state_dict
 scripts/       train.py, evaluate.py, linear_probe.py, dryrun_forward.py, profile_kernels.py, prepare_imagenet32.py
 configs/       igpt_cifar10_s_rgb,
-               ccigpt_cifar10_s_rgb (channel-first),
-               ccigpt_cifar10_s_rgb_ronly (R-only B1, 主表 SOTA),
-               ccigpt_cifar10_s_rgb_subpixel (sub-pixel B1)
+               ccigpt_cifar10_s_rgb_ronly (R-only B1, 主表 2.9035 bpd)
 tests/         8 个 kernel/模型 单元测试 (含 test_ccigpt_smoke)
 demo/
 ├── server.py          FastAPI 后端 (predict / metrics / probe / kernels / scales)

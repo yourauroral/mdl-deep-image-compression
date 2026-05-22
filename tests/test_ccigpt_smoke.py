@@ -183,38 +183,30 @@ def test_backward_grads_flow(small_ccigpt, device):
 # ===================== sub-pixel AR + RGB 真无损测试 =====================
 
 def test_ccigpt_subpixel_rgb_forward_finite(device):
-    """CC-iGPT (use_subpixel_ar=True) forward 必须给出有限的 loss/bpd，
-    且 coarse 与 fine 子模型都进入 pixel-first 平铺模式。"""
+    """CC-iGPT forward 必须给出有限的 loss/bpd。"""
     torch.manual_seed(5)
     m = CCIGPT(
         image_size=32, in_channels=3, vocab_size=256, pool_factor=4,
         fine_d_model=64, fine_N=2, fine_h=2, fine_d_ff=128,
         coarse_d_model=64, coarse_N=2, coarse_h=2, coarse_d_ff=64,
-        dropout=0.0, use_subpixel_ar=True,
+        dropout=0.0,
     ).to(device).eval()
     x = torch.rand(2, 3, 32, 32, device=device)
     out = m(x)
     assert torch.isfinite(out["loss"]).item()
     assert torch.isfinite(out["bpd"]).item()
     assert 0.0 < out["bpd"].item() < 50.0
-    # coarse 与 fine 同步切到 pixel-first
-    assert m.coarse.use_subpixel_ar is True
-    assert m.fine.use_subpixel_ar is True
 
 
 def test_ccigpt_subpixel_rgb_ctx_consistency(device):
-    """sub-pixel AR 路径下，encoder forward 实际用的 ctx 必须等于
-    decoder 仅凭 coarse bitstream tokens 重建的 ctx (bit-exact 不变量)。
-
-    _compute_coarse_ctx 在入口/出口两处都有 if self.use_subpixel_ar 分支，
-    任何一处错位都会让 forward 仍能跑但 bitstream 不可解。
-    """
+    """encoder forward 实际用的 ctx 必须等于 decoder 仅凭 coarse bitstream
+    tokens 重建的 ctx (bit-exact 不变量)。"""
     torch.manual_seed(6)
     m = CCIGPT(
         image_size=32, in_channels=3, vocab_size=256, pool_factor=4,
         fine_d_model=64, fine_N=2, fine_h=2, fine_d_ff=128,
         coarse_d_model=64, coarse_N=2, coarse_h=2, coarse_d_ff=64,
-        dropout=0.0, use_subpixel_ar=True,
+        dropout=0.0,
     ).to(device).eval()
     x = torch.rand(2, 3, 32, 32, device=device)
 
@@ -235,7 +227,7 @@ def test_ccigpt_subpixel_rgb_ctx_consistency(device):
     ctx_dec = m._compute_coarse_ctx(captured["tokens"])
     max_diff = (captured["ctx"] - ctx_dec).abs().max().item()
     assert max_diff < 1e-6, (
-        f"sub-pixel 路径 ctx 不一致 (max diff={max_diff:.6e})"
+        f"ctx 不一致 (max diff={max_diff:.6e})"
     )
 
     # forward 用的 token 必须可独立从 coarse._tokenize(x_c_float) 复现
@@ -245,18 +237,14 @@ def test_ccigpt_subpixel_rgb_ctx_consistency(device):
 
 
 def test_ccigpt_subpixel_ctx_pixel_first_layout(device):
-    """关键单测：use_subpixel_ar=True 时，_compute_coarse_ctx 的入口/出口都必须
-    走 pixel-first 分支。手算两端的平铺顺序与 _compute_coarse_ctx 实际输出对比。
-
-    错位会让 forward 仍能跑但 ctx 语义乱套（fine.token_embed 索引顺序与 fine
-    自身的 _tokenize 输出顺序不一致，loss 仍降但 bitstream 不可解）。
-    """
+    """_compute_coarse_ctx 入口/出口必须走 pixel-first 平铺。手算两端平铺顺序
+    与实际输出对比；错位会让 forward 仍能跑但 bitstream 不可解。"""
     torch.manual_seed(7)
     m = CCIGPT(
         image_size=32, in_channels=3, vocab_size=256, pool_factor=4,
         fine_d_model=64, fine_N=2, fine_h=2, fine_d_ff=128,
         coarse_d_model=64, coarse_N=2, coarse_h=2, coarse_d_ff=64,
-        dropout=0.0, use_subpixel_ar=True,
+        dropout=0.0,
     ).to(device).eval()
 
     x = torch.rand(1, 3, 32, 32, device=device)
@@ -277,19 +265,18 @@ def test_ccigpt_subpixel_ctx_pixel_first_layout(device):
     actual_ctx = m._compute_coarse_ctx(coarse_tokens)
     diff = (actual_ctx - expected_ctx).abs().max().item()
     assert diff < 1e-6, (
-        f"_compute_coarse_ctx 在 use_subpixel_ar=True 时未走 pixel-first 双端分支"
-        f" (max diff={diff:.6e})"
+        f"_compute_coarse_ctx 未走 pixel-first 双端分支 (max diff={diff:.6e})"
     )
 
 
 def test_ccigpt_subpixel_backward(device):
-    """sub-pixel AR 路径下 coarse / fine / ctx_alpha 三处都必须有非零梯度。"""
+    """coarse / fine / ctx_alpha 三处都必须有非零梯度。"""
     torch.manual_seed(8)
     m = CCIGPT(
         image_size=32, in_channels=3, vocab_size=256, pool_factor=4,
         fine_d_model=64, fine_N=2, fine_h=2, fine_d_ff=128,
         coarse_d_model=64, coarse_N=2, coarse_h=2, coarse_d_ff=64,
-        dropout=0.0, use_subpixel_ar=True,
+        dropout=0.0,
     ).to(device).train()
     x = torch.rand(2, 3, 32, 32, device=device)
     out = m(x)
@@ -313,12 +300,12 @@ def test_ccigpt_subpixel_backward(device):
 # ──────────────────────────────────────────────────────────────
 
 def _build_ronly_ccigpt(device):
-    """coarse_in_channels=1 + sub-pixel AR 的最小 CCIGPT。"""
+    """coarse_in_channels=1 的最小 CCIGPT。"""
     return CCIGPT(
         image_size=32, in_channels=3, vocab_size=256, pool_factor=4,
         fine_d_model=64, fine_N=2, fine_h=2, fine_d_ff=128,
         coarse_d_model=64, coarse_N=2, coarse_h=2, coarse_d_ff=64,
-        dropout=0.0, use_subpixel_ar=True,
+        dropout=0.0,
         coarse_in_channels=1,
     ).to(device)
 

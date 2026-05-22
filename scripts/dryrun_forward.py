@@ -4,10 +4,9 @@ Quick forward pass sanity check — 验证模型构建和 forward 是否正常�
 
 包含:
   1. 默认配置 forward + weight tying / post-norm 验证
-  2. 子像素自回归 backward
-  3. CC-iGPT smoke (coarse + fine + ctx_alpha 梯度检查)
-  4. Fused kernel 状态检查
-  5. Numerical sanity（loss 有限、bits/dim 合理范围）
+  2. CC-iGPT smoke (coarse + fine + ctx_alpha 梯度检查)
+  3. Fused kernel 状态检查
+  4. Numerical sanity（loss 有限、bits/dim 合理范围）
 
 Usage:
     python scripts/dryrun_forward.py
@@ -79,29 +78,14 @@ def main():
     else:
         assert model.head.weight is model.token_embed.weight, "Weight tying failed!"
         print("  [weight tying] OK — head.weight is token_embed.weight")
-
-    # ── 2. 子像素自回归 (硬编码 mini iGPT；CC-iGPT 子像素 smoke 见 Test 3 + tests/test_ccigpt_smoke.py) ──
-    if model_type != "ccigpt":
-        print("\n=== Test 2: Sub-pixel Autoregression ===")
-        model4 = IGPT(
-            image_size=32, in_channels=3, vocab_size=256,
-            d_model=mcfg["d_model"], N=mcfg["N"], h=mcfg["h"], d_ff=mcfg["d_ff"],
-            dropout=0.1, use_subpixel_ar=True,
-        ).to(device)
-        out4 = model4(x)
-        _check_finite(out4, "subpixel-ar")
-        assert hasattr(model4, 'channel_embed'), "sub-pixel AR model should have channel_embed"
-        assert model4.channel_embed.weight.shape == (3, mcfg["d_model"]), (
-            f"channel_embed shape mismatch: {model4.channel_embed.weight.shape}"
-        )
-        print("  [channel_embed] OK — shape (3, d_model)")
-        out4['loss'].backward()
-        grad_ok4 = all(p.grad is not None for p in model4.parameters() if p.requires_grad)
-        assert grad_ok4, "Some parameters missing gradients after backward (subpixel-ar)"
+        # 子像素 AR 是唯一序列布局，channel_embed 永远存在
+        assert hasattr(model, 'channel_embed') and model.channel_embed.weight.shape == (3, mcfg["d_model"])
+        out['loss'].backward()
+        assert all(p.grad is not None for p in model.parameters() if p.requires_grad)
         print("  [backward] all grads computed: OK")
 
-    # ── 3. CC-iGPT smoke (硬编码 mini 配置，与 Test 1 真实 config 路径互补) ──
-    print("\n=== Test 3: CC-iGPT (Coarse-Conditioned iGPT, mini hardcoded) ===")
+    # ── 2. CC-iGPT smoke (硬编码 mini 配置，与 Test 1 真实 config 路径互补) ──
+    print("\n=== Test 2: CC-iGPT (Coarse-Conditioned iGPT, mini hardcoded) ===")
     model5 = CCIGPT(
         image_size=32, in_channels=3, vocab_size=256,
         pool_factor=4,

@@ -39,7 +39,6 @@ def _build_tiny_igpt(device='cpu'):
         d_ff=128,
         dropout=0.0,
         activation_checkpointing=False,
-        use_subpixel_ar=True,
     ).to(device)
 
 

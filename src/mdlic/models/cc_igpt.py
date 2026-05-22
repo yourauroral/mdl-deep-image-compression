@@ -15,13 +15,12 @@ class CCIGPT(nn.Module):
 
     bpd_total = (CE_coarse · N_coarse + CE_fine · N_fine) / ln2 / N_fine
 
-    `use_subpixel_ar` 控制 coarse/fine 共享平铺方式：channel-first（默认）下
-    fine 注意力需要跨 1024 token 找同位置 R/G/B，信噪比低；pixel-first 把
-    [R0,G0,B0,R1,G1,B1,...] 让模型 token-level 学到 p(G|R), p(B|R,G)。
+    序列布局：coarse / fine 都用 sub-pixel AR (pixel-first)
+    [R0,G0,B0,R1,G1,B1,...]，token-level 自然学到 p(G|R), p(B|R,G)。
 
     `coarse_in_channels` 允许 coarse 只压部分通道（R-only 灰度先验）：默认
     None → 与 in_channels 一致；传 1 → coarse 仅看 R 8×8（64 tokens, ~2%
-    overhead），fine 通过 sub-pixel AR 自行学 G/B 相对 R 的偏色修正。
+    overhead），fine 自学 G/B 相对 R 的偏色修正。
 
     Refs:
       Burt & Adelson, "The Laplacian Pyramid as a Compact Image Code," 1983
@@ -41,8 +40,6 @@ class CCIGPT(nn.Module):
         coarse_d_model=256, coarse_N=6, coarse_h=4, coarse_d_ff=688,
         dropout=0.1,
         activation_checkpointing: bool = False,
-        # coarse/fine 共享平铺开关；类 docstring + _compute_coarse_ctx 详述
-        use_subpixel_ar: bool = False,
         # coarse 通道数；None → 与 in_channels 一致。R-only 灰度先验传 1。
         coarse_in_channels: int = None,
         # DropPath 仅作用于 fine（深 24 层），coarse 浅层 6 层不需要
@@ -57,7 +54,6 @@ class CCIGPT(nn.Module):
         self.in_channels = in_channels
         self.pool_factor = pool_factor
         self.coarse_size = image_size // pool_factor
-        self.use_subpixel_ar = use_subpixel_ar
 
         if coarse_in_channels is None:
             coarse_in_channels = in_channels
@@ -68,7 +64,6 @@ class CCIGPT(nn.Module):
         shared = dict(
             vocab_size=vocab_size, dropout=dropout,
             activation_checkpointing=activation_checkpointing,
-            use_subpixel_ar=use_subpixel_ar,
         )
 
         self.coarse = IGPT(image_size=self.coarse_size,
@@ -99,16 +94,12 @@ class CCIGPT(nn.Module):
         独立从 token 重建出与 encoder 相同的 fine 条件分布。因此本路径输入是
         **量化后的 coarse token**（不是 float），整个管线 encoder/decoder 共用。
 
-        管线（RGB-bit-exact）：
-          1. token (B, N_c) → reshape (B, C, S, S) — 入口取决于 self.coarse.use_subpixel_ar
-             - channel-first: 直接 view(B,C,S,S)
-             - pixel-first  : view(B,S,S,C) → permute(0,3,1,2) 转回 (B,C,S,S)
+        管线（RGB-bit-exact, pixel-first）：
+          1. token (B, N_c) → view(B,S,S,C) → permute(0,3,1,2) 转回 (B,C,S,S)
           2. 反量化到 RGB float [0,1]：int / 255
           3. bilinear UP 到 fine 分辨率
           4. 用 fine encoder 的 tokenize 规则重新 tokenize：(*255).round().long()
-          5. 按 fine 平铺方式排成 (B, T) 后 fine.token_embed 查表 — 出口取决于 self.fine.use_subpixel_ar
-             - channel-first: reshape(B, -1)
-             - pixel-first  : permute(0,2,3,1).reshape(B, -1)
+          5. permute(0,2,3,1).reshape(B,-1) 排成 pixel-first，fine.token_embed 查表
           6. 丢掉第一个 token 做 AR shift —— ctx[i] 与 fine 被预测位置 i 对齐
              （PixelCNN++ conditional / VAR multi-scale 标准语义）
 
@@ -116,10 +107,6 @@ class CCIGPT(nn.Module):
         跑此函数才能 bit-exact。bilinear interp + round + token_embed 在 bf16/fp16
         下结果会跟 fp32 差 ±1 token，导致 bitstream 不可解。
         """
-        assert self.coarse.use_subpixel_ar == self.fine.use_subpixel_ar, (
-            "_compute_coarse_ctx 要求 coarse/fine 共享相同 use_subpixel_ar 开关，"
-            f"got coarse={self.coarse.use_subpixel_ar} vs fine={self.fine.use_subpixel_ar}"
-        )
         device_type = "cuda" if coarse_tokens.is_cuda else "cpu"
         with torch.amp.autocast(device_type=device_type, enabled=False):
             B = coarse_tokens.size(0)
@@ -127,10 +114,7 @@ class CCIGPT(nn.Module):
             C_coarse = self.coarse.in_channels
             C_fine = self.in_channels
 
-            if self.coarse.use_subpixel_ar:
-                coarse_chw = coarse_tokens.view(B, S, S, C_coarse).permute(0, 3, 1, 2).contiguous()
-            else:
-                coarse_chw = coarse_tokens.view(B, C_coarse, S, S)
+            coarse_chw = coarse_tokens.view(B, S, S, C_coarse).permute(0, 3, 1, 2).contiguous()
 
             rec = coarse_chw.float() / 255.0                     # (B, C_coarse, S, S)
 
@@ -140,16 +124,13 @@ class CCIGPT(nn.Module):
             )
             # R-only / 部分通道 coarse 的"灰度先验"：把 C_coarse 通道复制扩展到
             # fine 的 C_fine 通道，每个像素 R/G/B 三个位置看到同一 coarse 值；fine
-            # 通过 sub-pixel AR 自学 G/B 相对 R 的偏色。expand 共享 stride=0 让下游
-            # reshape 报错，必须 .contiguous()。
+            # 自学 G/B 相对 R 的偏色。expand 共享 stride=0 让下游 reshape 报错，
+            # 必须 .contiguous()。
             if C_coarse < C_fine:
                 x_up = x_up.expand(-1, C_fine, -1, -1).contiguous()
 
             x_up_tok = (x_up.clamp(0, 1) * 255).round().long()
-            if self.fine.use_subpixel_ar:
-                x_up_tok = x_up_tok.permute(0, 2, 3, 1).reshape(B, -1)
-            else:
-                x_up_tok = x_up_tok.reshape(B, -1)
+            x_up_tok = x_up_tok.permute(0, 2, 3, 1).reshape(B, -1)
             coarse_ctx = self.fine.token_embed(x_up_tok)         # (B, T, d_model)
             # AR 对齐：ctx[i] 与 fine 被预测位置 i 同位对齐（PixelCNN++ conditional /
             # VAR multi-scale 标准语义）。不作弊：coarse 走独立 bitstream，decoder 先

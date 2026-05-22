@@ -3,10 +3,10 @@
   "methods": [
     {"name": "PNG (lossless)", "bpd": 5.87, "std": 0.42, "note": "传统方法"},
     {"name": "WebP (lossless)", "bpd": 5.02, "std": 0.38, "note": "传统方法"},
-    {"name": "PixelCNN++", "bpd": 2.92, "std": null, "note": "Salimans 2017"},
-    {"name": "Image Transformer", "bpd": 2.90, "std": null, "note": "Parmar 2018"},
-    {"name": "PixelSNAIL", "bpd": 2.85, "std": null, "note": "Chen 2018"},
-    {"name": "iGPT-S (Ours)", "bpd": 2.9739, "std": 0.07, "note": "SWA, d=512, N=24, 200ep"},
-    {"name": "CC-iGPT (Ours)", "bpd": 2.8047, "std": 0.0747, "note": "early-stop @ epoch 20, ~81M params (fine 76M + coarse 4.8M)"}
+    {"name": "PixelCNN++", "bpd": 2.92, "std": null, "note": "Salimans 2017, 52M"},
+    {"name": "Image Transformer", "bpd": 2.90, "std": null, "note": "Parmar 2018, 95M"},
+    {"name": "PixelSNAIL", "bpd": 2.85, "std": null, "note": "Chen 2018, 380M"},
+    {"name": "Sparse Transformer", "bpd": 2.80, "std": null, "note": "Child 2019, 59M, N=128 strided sparse"},
+    {"name": "CC-iGPT (Ours)", "bpd": 2.9035, "std": 0.0854, "note": "R-only, ~81M, 100ep + RandomCrop + DropPath 0.1 + dropout 0.1 + EMA 0.9995 + TTA hflip"}
   ]
 }
