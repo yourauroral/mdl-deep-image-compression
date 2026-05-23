@@ -68,6 +68,13 @@ def _validate_config(config: dict):
         assert mcfg['d_ff'] > 0, f"model.d_ff 必须 > 0，got {mcfg['d_ff']}"
         assert 0.0 <= mcfg['dropout'] < 1.0, f"model.dropout 必须在 [0, 1)，got {mcfg['dropout']}"
         assert mcfg['vocab_size'] > 0, f"model.vocab_size 必须 > 0，got {mcfg['vocab_size']}"
+
+        # 输出头：拼写错误（如 "dmoll"）会沉默回退到 IGPT.__init__ 的 ValueError，
+        # 但那已是构造期；这里在配置阶段就 fail-fast，避免下游误读。
+        output_head = mcfg.get('output_head', 'softmax')
+        assert output_head in ('softmax', 'dmol'), (
+            f"model.output_head 必须是 'softmax' 或 'dmol'，got '{output_head}'"
+        )
     else:
         raise ValueError(f"未知 model.type: '{model_type}'，支持 igpt/ccigpt")
 
@@ -126,6 +133,19 @@ def _validate_config(config: dict):
                 f"[1, in_channels={mcfg['in_channels']}]"
             )
 
+    # ── DMoL 路径额外校验（仅 output_head=dmol 时生效） ──
+    # main() 里 `optim_head_cfg = tcfg.get("optimizer_dmol_head", {})` 在配置缺失时
+    # 会静默 fall through 到 head_lr=base_lr*0.4 默认值，掩盖 yaml 漏写 / 拼错。
+    # 这里 fail-fast 要求 dmol 路径必须显式给出 lr。
+    if mcfg.get('output_head', 'softmax') == 'dmol':
+        assert 'optimizer_dmol_head' in tcfg, (
+            "DMoL 路径必须显式配置 train.optimizer_dmol_head（含 lr/betas/eps/weight_decay）"
+        )
+        opt_head_cfg = tcfg['optimizer_dmol_head']
+        assert 'lr' in opt_head_cfg and float(opt_head_cfg['lr']) > 0, (
+            f"train.optimizer_dmol_head.lr 必须显式给出且 > 0，got {opt_head_cfg.get('lr')}"
+        )
+
 
 def _shared_igpt_kwargs(mcfg: dict) -> dict:
     """提取 iGPT / CC-iGPT 共用字段。"""
@@ -166,11 +186,14 @@ def _build_ccigpt_from_config(mcfg: dict, device) -> CCIGPT:
     ).to(device)
 
 
-def _get_param_groups(model, weight_decay=0.1):
-    """构建 AdamW 参数组：embedding / norm / bias / ctx_alpha 不做 weight decay。
+def _no_decay_param_names(model) -> set:
+    """识别不该 weight decay 的参数名集合（embedding / norm / bias / ctx_alpha 等）。
 
     用 isinstance(module, …) 识别 norm/embedding 层，避免子串 'norm' 误匹配（例如
     未来若把模块命名成 `normalizer` / `ln1` 都会静默改变 wd 行为）。
+
+    softmax 与 DMoL 两条路径都消费这个集合（softmax 路径只此一组；DMoL 路径再
+    叠一层"踢出 head 子树"逻辑防 head 被 AdamW + Adamax 双更新）。
     """
     from src.mdlic.models.layers import RMSNorm
     no_decay_modules = (nn.Embedding, RMSNorm, nn.LayerNorm)
@@ -182,6 +205,12 @@ def _get_param_groups(model, weight_decay=0.1):
     for name, _ in model.named_parameters():
         if name.endswith('bias') or name.endswith('ctx_alpha'):
             no_decay.add(name)
+    return no_decay
+
+
+def _get_param_groups(model, weight_decay=0.1):
+    """softmax 路径用：构建 AdamW 参数组（decayed + no-decay 两组）。"""
+    no_decay = _no_decay_param_names(model)
     return [
         {"params": [p for n, p in model.named_parameters() if n not in no_decay], "weight_decay": weight_decay},
         {"params": [p for n, p in model.named_parameters() if n in no_decay],     "weight_decay": 0.0},
@@ -595,18 +624,9 @@ def main():
             print(f"DMoL optimizer split: head={len(head_params)} params "
                   f"({list(head_param_names)}), other={len(other_params)} params")
 
-        # 主网 AdamW 参数组 — 与 _get_param_groups 同样的 no_decay 规则，
+        # 主网 AdamW 参数组 — 与 softmax 路径 _get_param_groups 同 no_decay 规则，
         # 但额外排除 head_param_names 防 head 同时被 AdamW + Adamax 双更新。
-        from src.mdlic.models.layers import RMSNorm
-        no_decay_modules = (nn.Embedding, RMSNorm, nn.LayerNorm)
-        no_decay = set()
-        for module_name, module in raw_for_split.named_modules():
-            if isinstance(module, no_decay_modules):
-                for pname, _ in module.named_parameters(recurse=False):
-                    no_decay.add(f"{module_name}.{pname}" if module_name else pname)
-        for name, _ in raw_for_split.named_parameters():
-            if name.endswith('bias') or name.endswith('ctx_alpha'):
-                no_decay.add(name)
+        no_decay = _no_decay_param_names(raw_for_split)
         adamw_decay = [p for n, p in raw_for_split.named_parameters()
                        if n not in no_decay and n not in head_param_names]
         adamw_nodecay = [p for n, p in raw_for_split.named_parameters()
