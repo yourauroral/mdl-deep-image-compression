@@ -62,7 +62,7 @@ train:
   eps: 1e-8
   epochs: 100
   log_freq: 50
-  clip_max_norm: 0.5           # 保留 v3 紧约束（v1-v2 用 1.0 也未稳）
+  clip_max_norm: 1.0           # 与 softmax R-only 主表对齐（DMoL v6 已数值加固: log_scale clamp + bias=+2 + log_prob_floor=-30，不需 v3 时的 0.5 应急紧约束）
   z_loss_weight: 0.0           # ★ DMoL 路径 dispatch 跳过；显式置 0 防误读
   lr_schedule: "cosine"
   warmup_epochs: 1             # mini hilr 验证：warmup=1 + lr=3e-4 ep1 末 train_bpd=6.83，warmup=5 让 ep1 实际 lr~6e-6 DMoL narrow init 出不来
