@@ -155,6 +155,8 @@ def _shared_igpt_kwargs(mcfg: dict) -> dict:
         dropout=mcfg["dropout"],
         activation_checkpointing=mcfg.get("activation_checkpointing", False),
         drop_path=mcfg.get("drop_path", 0.0),
+        output_head=mcfg.get("output_head", "softmax"),
+        n_mixtures=mcfg.get("n_mixtures", 10),
     )
 
 
