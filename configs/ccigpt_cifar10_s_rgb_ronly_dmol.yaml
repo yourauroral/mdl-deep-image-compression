@@ -58,7 +58,7 @@ train:
   amp_dtype: null              # ★ fp32 强制（_validate_config 校验 + DMoL forward 包 autocast(enabled=False)）
   batch_size: 64
   grad_accum_steps: 2
-  lr: 5e-5                     # 主网 AdamW lr（与 v3 试过的 1e-4 比再降一档）
+  lr: 3e-4                     # 主网 AdamW lr（mini hilr 校准: 5e-5/2e-5 ep5 卡 5.27，3e-4/8e-5 ep5=4.36）
   eps: 1e-8
   epochs: 100
   log_freq: 50
@@ -68,10 +68,10 @@ train:
   warmup_epochs: 5
 
   # ★ DMoL head 专用 optimizer（Adamax）
-  # 主网仍走 AdamW (lr=5e-5, betas=(0.9, 0.95), wd=0.1 配 _get_param_groups)
+  # 主网仍走 AdamW (lr=3e-4, betas=(0.9, 0.95), wd=0.1 配 _get_param_groups)
   optimizer_dmol_head:
     type: adamax
-    lr: 2e-5                   # head 比主网小 2.5×，更慢更稳
+    lr: 8e-5                   # head 比主网小 ~4×，更慢更稳（mini hilr 验证比例）
     betas: [0.9, 0.999]        # PixelCNN++ 原版 Adamax 默认
     eps: 1e-7
     weight_decay: 0.0          # DMoL 输出语义不齐次（mean / log_scale / logit_w 量级不同），关 wd
