@@ -65,7 +65,7 @@ train:
   clip_max_norm: 0.5           # 保留 v3 紧约束（v1-v2 用 1.0 也未稳）
   z_loss_weight: 0.0           # ★ DMoL 路径 dispatch 跳过；显式置 0 防误读
   lr_schedule: "cosine"
-  warmup_epochs: 5
+  warmup_epochs: 1             # mini hilr 验证：warmup=1 + lr=3e-4 ep1 末 train_bpd=6.83，warmup=5 让 ep1 实际 lr~6e-6 DMoL narrow init 出不来
 
   # ★ DMoL head 专用 optimizer（Adamax）
   # 主网仍走 AdamW (lr=3e-4, betas=(0.9, 0.95), wd=0.1 配 _get_param_groups)
