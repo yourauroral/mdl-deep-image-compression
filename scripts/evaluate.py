@@ -165,9 +165,9 @@ def compute_traditional_bpd(dataset, method="png"):
     将每张图片编码为内存中的 PNG/WebP 字节流，
     bpd = 压缩后字节 × 8 / 子像素总数 (= H × W × C)。
 
-    口径说明: PixelCNN++ / Sparse Transformer 等基线在 CIFAR-10 上报告的
-    PNG≈5.87、WebP≈5.02 均为 bits/dim 单位（除以 H·W·C），与本仓库主指标
-    一致。若除以 H·W 则得到的是真 bits-per-pixel（bpd × 3），数值会高 3 倍。
+    口径说明: 文献 (Hoogeboom et al., NeurIPS 2019, Integer Discrete Flows)
+    报告 CIFAR-10 PNG≈5.87、WebP (lossless)≈4.61 bits/dim（除以 H·W·C），
+    与本仓库主指标一致。本脚本是用 PIL 实测；若除以 H·W 则得到的是真 bits-per-pixel（bpd × 3），数值会高 3 倍。
 
     参数:
       dataset: torchvision dataset（返回 (tensor, label)）

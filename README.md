@@ -11,15 +11,15 @@
 
 ## Baseline 对比
 
-| 方法 | Params | CIFAR-10 bits/dim ↓ | 域 | 来源 |
-|------|--------|---------------------|----|------|
-| PixelCNN++ | 52M | 2.92 | RGB-bit-exact | Salimans et al., ICLR 2017 |
-| Image Transformer | 95M | 2.90 | RGB-bit-exact | Parmar et al., ICML 2018 |
-| PixelSNAIL | 380M | 2.85 | RGB-bit-exact | Chen et al., ICML 2018 |
-| Sparse Transformer | 59M | 2.80 | RGB-bit-exact | Child et al., 2019 (128 层 strided sparse attention) |
-| **CC-iGPT (Ours, R-only)** | ~81M | **2.9035** | RGB-bit-exact | `coarse_in_channels=1`，coarse 仅压 R 8×8（64 token），fine 通过 sub-pixel AR 自学 G/B，**主表**（100ep + RandomCrop + DropPath 0.1 + dropout 0.1 + EMA 0.9995 + TTA hflip）|
-| PNG | — | ~5.87 | RGB-bit-exact | 传统方法 |
-| WebP (lossless mode) | — | ~5.02 | RGB-bit-exact | 传统方法 |
+| 方法 | 类别 | Params | CIFAR-10 bits/dim ↓ | 域 | 来源 |
+|------|------|--------|---------------------|----|------|
+| PixelCNN++ | Autoregressive | 52M | 2.92 | RGB-bit-exact | Salimans et al., ICLR 2017 |
+| Image Transformer | Autoregressive | 95M | 2.90 | RGB-bit-exact | Parmar et al., ICML 2018 |
+| PixelSNAIL | Autoregressive | 380M | 2.85 | RGB-bit-exact | Chen et al., ICML 2018 |
+| Sparse Transformer | Autoregressive | 59M | 2.80 | RGB-bit-exact | Child et al., 2019 (128 层 strided sparse attention) |
+| **CC-iGPT (Ours, R-only)** | Autoregressive | ~81M | **2.9035** | RGB-bit-exact | `coarse_in_channels=1`，coarse 仅压 R 8×8（64 token），fine 通过 sub-pixel AR 自学 G/B，**主表**（100ep + RandomCrop + DropPath 0.1 + dropout 0.1 + EMA 0.9995 + TTA hflip）|
+| PNG | Classical codec | — | 5.87 | RGB-bit-exact | Hoogeboom et al., NeurIPS 2019 报告 |
+| WebP (lossless) | Classical codec | — | 4.61 | RGB-bit-exact | Hoogeboom et al., NeurIPS 2019 报告 |
 
 CC-iGPT R-only **平 Image Transformer 95M (2.90)、胜 PixelCNN++ 52M (2.92)**，参数预算 ~81M。与 Sparse Transformer 2.80 的差距来自架构深度（24 层 dense vs 128 层 strided sparse attention）；softmax 256-way 是当前主表，DMoL 第 6 次实现（[future.md §8](future.md)）正在进行，目标 ≤ 2.85（成功 → 主表更新；失败 → 主表保持 2.9035）。**冲击 SOTA** 靠 ImageNet 64×64 < 3.44（Sparse Transformer 152M strided）路线支撑。
 
