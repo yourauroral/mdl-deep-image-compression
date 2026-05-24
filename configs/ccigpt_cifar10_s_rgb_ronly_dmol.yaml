@@ -56,8 +56,8 @@ data:
 
 train:
   amp_dtype: null              # ★ fp32 强制（_validate_config 校验 + DMoL forward 包 autocast(enabled=False)）
-  batch_size: 64
-  grad_accum_steps: 2
+  batch_size: 32               # ★ fp32 激活 ~2× bf16，bs 64→32 + accum 2→4 保 effective batch 128
+  grad_accum_steps: 4
   lr: 3e-4                     # 主网 AdamW lr（mini hilr 校准: 5e-5/2e-5 ep5 卡 5.27，3e-4/8e-5 ep5=4.36）
   eps: 1e-8
   epochs: 100
