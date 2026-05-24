@@ -1,0 +1,81 @@
+% CIFAR-10 R-only 主表 100ep 训练曲线 (train_bpd / val_bpd vs epoch)
+% 编译: pdflatex training_curves.tex   (或 latexmk -pdf)
+% 嵌入论文: \input{figures/training_curves.tex}
+%
+% 数据: figures/training_curves.csv （从 ccigpt_cifar10_s_rgb_ronly_train.log awk 抽取）
+%   100 epoch train_bpd（每 epoch 一行）
+%   50 val 点（eval.interval=2，ep 2,4,...,100）
+%   landmark: ep1 train=11.37, ep10 val=3.60, ep50 val=3.00, ep90 SWA start, ep100 val=2.9038
+%   主表数字：100ep best val 2.9038 → +TTA hflip → 2.9035 (best+TTA, README L20)
+
+\documentclass[tikz,border=8pt]{standalone}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\usepackage{pgfplotstable}
+\usepackage{amsmath,amssymb}
+\pgfplotsset{compat=1.18}
+
+\begin{document}
+\begin{tikzpicture}[font=\footnotesize]
+\begin{axis}[
+    width=12cm, height=7cm,
+    xlabel={\textbf{epoch}},
+    ylabel={\textbf{bits/dim}},
+    ylabel near ticks,
+    xlabel near ticks,
+    xmin=0, xmax=102,
+    ymin=2.5, ymax=12,
+    ytick={3,4,6,8,10,12},
+    xtick={1,20,40,60,80,90,100},
+    axis line style={gray!55},
+    tick style={gray!55},
+    grid=major,
+    grid style={dashed, gray!18, line width=0.3pt},
+    unbounded coords=jump,                   % 关键：CSV 空字段当 NaN 跳过，曲线自动断开
+    legend style={
+        font=\scriptsize,
+        draw=gray!35, fill=white,
+        at={(0.97,0.97)}, anchor=north east,
+        cells={anchor=west},
+        row sep=1pt,
+    },
+    clip=false,
+]
+
+% --- SWA 启动竖虚线 (ep 90) ---
+\draw[densely dashed, gray!55, line width=0.4pt]
+    (axis cs:90, 2.5) -- (axis cs:90, 12);
+
+% --- train_bpd 曲线 (每 epoch) ---
+\addplot+[
+    mark=none, line width=0.7pt, color=blue!55!black,
+] table[col sep=comma, x=epoch, y=train_bpd]
+    {training_curves.csv};
+\addlegendentry{train bpd}
+
+% --- val_bpd 曲线 (每 2 epoch，空字段由 unbounded coords=jump 自动跳过) ---
+\addplot+[
+    mark=*, mark size=0.9pt, line width=0.7pt, color=orange!70!black,
+] table[col sep=comma, x=epoch, y=val_bpd]
+    {training_curves.csv};
+\addlegendentry{val bpd (every 2 ep)}
+
+% --- 关键数字标注 (ep 100 收敛点) ---
+\node[font=\scriptsize, orange!60!black, anchor=west]
+    at (axis cs:100, 2.9038)
+    {\,best val \textbf{2.9038}\,$\to$\,+TTA $=$\,\textbf{2.9035}};
+
+\end{axis}
+
+% --- 标题 ---
+\node[font=\footnotesize\bfseries, anchor=south]
+    at (current bounding box.north)
+    {CC-iGPT R-only training curves (CIFAR-10, 100 epochs)};
+
+% --- 副标题（实验配置） ---
+\node[font=\scriptsize, gray!50!black, anchor=north, yshift=-2pt]
+    at (current bounding box.south)
+    {\textit{cosine LR + warmup 3ep $\cdot$ RandomCrop + hflip $\cdot$ DropPath 0.1 $\cdot$ EMA 0.9995 $\cdot$ SWA from ep 90}};
+
+\end{tikzpicture}
+\end{document}

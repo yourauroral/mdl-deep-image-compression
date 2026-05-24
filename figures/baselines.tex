@@ -1,0 +1,76 @@
+% CIFAR-10 RGB-bit-exact bpd baselines 对比柱状图
+% 编译: pdflatex baselines.tex   (或 latexmk -pdf)
+% 嵌入论文: \input{figures/baselines.tex}
+%
+% 数据来源: README.md L16-20 (RGB-bit-exact 同域可比)
+%   PixelCNN++          52M   2.92    Salimans et al., ICLR 2017
+%   Image Transformer   95M   2.90    Parmar et al., ICML 2018
+%   PixelSNAIL         380M   2.85    Chen et al., ICML 2018
+%   Sparse Transformer  59M   2.80    Child et al., 2019 (128 层 strided)
+%   CC-iGPT (Ours)     ~81M   2.90    本工作，R-only softmax 主表
+\documentclass[tikz,border=8pt]{standalone}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\usepackage{amsmath,amssymb}
+\pgfplotsset{compat=1.18}
+
+\begin{document}
+\begin{tikzpicture}[font=\footnotesize]
+\begin{axis}[
+    width=14cm, height=7cm,
+    ybar,
+    bar width=10pt,
+    enlarge x limits=0.18,
+    ymin=2.70, ymax=3.00,
+    ytick={2.70,2.75,2.80,2.85,2.90,2.95},
+    ylabel={\textbf{bits/dim}\ },
+    ylabel near ticks,
+    % 修复：明确指定所有5个x轴刻度，不再依赖xtick=data
+    xtick={SparseTrans, PixelSNAIL, ImgTrans, PixelCNNpp, Ours},
+    symbolic x coords={SparseTrans, PixelSNAIL, ImgTrans, PixelCNNpp, Ours},
+    xticklabels={Sparse Trans., PixelSNAIL, Img Trans., PixelCNN++, CC-iGPT(Ours)},
+    xticklabel style={font=\scriptsize, yshift=-1pt},
+    yticklabel style={font=\scriptsize},
+    axis line style={gray!55},
+    tick style={gray!55},
+    grid=major,
+    grid style={dashed, gray!18, line width=0.3pt},
+    major grid style={dashed, gray!18},
+    clip=false,
+]
+
+% 前4个蓝色柱子（单独绘制，确保颜色正确）
+\addplot[draw=blue!55!black, fill=blue!18, bar shift=0pt] coordinates {
+    (SparseTrans, 2.80)
+    (PixelSNAIL,  2.85)
+    (ImgTrans,    2.90)
+    (PixelCNNpp,  2.92)
+};
+
+% 第5个柔和橘黄色柱子（单独绘制，完全独立，不会被覆盖）
+\addplot[draw=orange!70!black, fill=orange!30!yellow!80, bar shift=0pt] coordinates {
+    (Ours, 2.90)
+};
+
+% --- 关键参考线：Image Transformer 2.90 ---
+\draw[densely dashed, gray!50, line width=0.4pt]
+    ({rel axis cs:0,0}|-{axis cs:SparseTrans,2.90})
+    -- ({rel axis cs:1,0}|-{axis cs:SparseTrans,2.90});
+\node[font=\scriptsize, gray!55!black, anchor=west]
+    at ({rel axis cs:1.005,0}|-{axis cs:SparseTrans,2.90}) {2.90};
+
+% --- 手动标注bpd和参数量 ---
+\node[font=\scriptsize, align=center, yshift=4pt] at (axis cs:SparseTrans, 2.80) {2.80 59M};
+\node[font=\scriptsize, align=center, yshift=4pt] at (axis cs:PixelSNAIL, 2.85) {2.85 380M};
+\node[font=\scriptsize, align=center, yshift=4pt] at (axis cs:ImgTrans, 2.90) {2.90 95M};
+\node[font=\scriptsize, align=center, yshift=4pt] at (axis cs:PixelCNNpp, 2.92) {2.92 52M};
+\node[font=\scriptsize, align=center, orange!70!black, yshift=4pt] at (axis cs:Ours, 2.90) {2.90 \textbf{$\sim$81M}};
+
+\end{axis}
+
+% --- 标题 ---
+\node[font=\footnotesize\bfseries, anchor=south, yshift=3pt]
+    at (current bounding box.north) {CIFAR-10 RGB-bit-exact};
+
+\end{tikzpicture}
+\end{document}
