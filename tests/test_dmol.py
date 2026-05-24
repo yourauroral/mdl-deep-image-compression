@@ -23,7 +23,7 @@ from src.mdlic.losses.dmol import (
     dmol_loss_1d,
     _LOG_SCALE_MIN,
     _LOG_SCALE_MAX,
-    _HEAD_BIAS_INIT_LOG_SCALE,
+    _HALF_BIN,
 )
 from src.mdlic.models.cc_igpt import CCIGPT
 
@@ -40,11 +40,10 @@ def device():
 def test_dmol_loss_finite_at_init(device):
     """random init head + random uniform target → NLL ∈ [5.0, 15.0] nat/sub-pixel。
 
-    注意阈值口径：本 test 用 `torch.randint(0,256)` 均匀 target，但 head init 后
-    输出分布是窄高斯样形（mean≈127.5, std≈7.4 from inv_s=exp(-2)），~77% 的
-    target 落在分布尾部命中 _CDF_DIFF_FLOOR=1e-12，单 token NLL ≈ 27.6 nat。
-    加权平均到 10+ 完全合理。真实图像 sub-pixel 高度相关，训练 1 epoch 内
-    就会降到 < 7。这里只保 fallback 不全军覆没（< -log(1e-12) ≈ 27.6）。
+    head init: weight std=0.005, bias=0 → params 接近 0 → mean=tanh(0)=0, log_scale=0 → inv_s=1。
+    [-1,1] 域下 bin·inv_s = 1/255 ≈ 0.0039（线性区），boundary (±1-0)·inv_s = ±1（线性区）。
+    随机 target 在 [-1,1] 上均匀 → log_prob 量级 ~-ln(255) ≈ -5.5，NLL 落在 5-7 区间。
+    > 15 通常意味着大量 token 命中 _CDF_DIFF_FLOOR fallback 风暴。
     """
     torch.manual_seed(42)
     K = 10
@@ -59,7 +58,7 @@ def test_dmol_loss_finite_at_init(device):
     assert torch.isfinite(nll).item(), f"NLL = {nll.item()} not finite"
     assert 5.0 <= nll.item() <= 15.0, (
         f"random init NLL = {nll.item():.4f} 超出 [5.0, 15.0]，"
-        f"head init / log_scale bias 可能配错（>15 通常意味着大量 token "
+        f"head init / domain ([-1,1]) 可能配错（>15 通常意味着大量 token "
         f"命中 _CDF_DIFF_FLOOR fallback 风暴）"
     )
 
@@ -149,37 +148,44 @@ def test_dmol_boundary_targets(device):
 
 
 # ──────────────────────────────────────────────────────────────
-# 5. head bias init 让 inv_s 落在 sigmoid 线性区
+# 5. head init 让 bin·inv_s 落在 sigmoid 线性区
 # ──────────────────────────────────────────────────────────────
 
 def test_dmol_initial_log_scale_active(device):
-    """init 后 head bias 中 log_scale 通道 = +2.0，inv_s = exp(-2) ≈ 0.135。
+    """init 后 head bias 为 0，inv_s = exp(0) = 1。[-1, 1] 域下 bin·inv_s = 1/255 ≈ 0.0039
+    与 boundary (±1)·inv_s = ±1 都在 sigmoid 线性区。
 
-    这是 v6 vs v1-v5 最关键的修复（v1-v5 全部 bias=0 起步导致 inv_s=1，bin·inv_s
-    极窄，CDF 差分 ~1e-4 量级触发 fallback 风暴）。
+    v6 第 1 次实现用 [0,255] 域 + bias=+2.0 (inv_s=0.135) 试图补偿 bin=0.5；但 boundary
+    (t-mean)·inv_s 量级 ~127·0.135=17 仍在 sigmoid 饱和区，Stage 2 80M 主网 step 650
+    CE_f 卡 6.5 不动。本次切回 PixelCNN++ 原版 [-1,1] 域 + bias=0。
     """
     torch.manual_seed(99)
     K = 10
     d_model = 32
     head = DMoLHead1D(d_model, n_mixtures=K)
 
-    # 直接检查 bias init
+    # bias 全 0 (PixelCNN++ 原版)
     bias = head.proj.bias.data
-    log_scale_bias = bias[2 * K : 3 * K]
-    assert torch.allclose(log_scale_bias, torch.tensor([_HEAD_BIAS_INIT_LOG_SCALE] * K)), (
-        f"log_scale bias init 错误：expected {_HEAD_BIAS_INIT_LOG_SCALE}, got {log_scale_bias.tolist()}"
+    assert torch.allclose(bias, torch.zeros_like(bias)), (
+        f"head bias init 应全 0 (PixelCNN++ 原版同款), got {bias.tolist()}"
     )
 
-    # forward 后验证 log_scale_raw 在 +2 附近 → inv_s ≈ 0.135
+    # forward zero hidden → log_scale_raw = 0 → inv_s = 1
     head = head.to(device)
-    hidden = torch.zeros(1, 1, d_model, device=device)  # zero hidden → 输出 = bias
+    hidden = torch.zeros(1, 1, d_model, device=device)
     params = head(hidden)
     _, _, log_scale_raw = params.split(K, dim=-1)
     log_scale = log_scale_raw.clamp(_LOG_SCALE_MIN, _LOG_SCALE_MAX)
     inv_s = torch.exp(-log_scale).mean().item()
-    assert 0.05 <= inv_s <= 0.5, (
-        f"init 后 inv_s = {inv_s:.4f} 不在线性区 [0.05, 0.5]，"
-        f"log_scale bias init 被破坏"
+    assert 0.5 <= inv_s <= 2.0, (
+        f"init 后 inv_s = {inv_s:.4f} 不在预期 1.0 附近 [0.5, 2.0]，"
+        f"head bias init 被破坏"
+    )
+
+    # bin·inv_s 应远小于 1（线性区），否则离散化退化
+    bin_in_init = _HALF_BIN * inv_s
+    assert bin_in_init < 0.05, (
+        f"bin·inv_s = {bin_in_init:.4f} 量级过大，sigmoid 离散化退化"
     )
 
 

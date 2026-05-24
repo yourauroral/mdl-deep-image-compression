@@ -4,10 +4,20 @@
 **无通道耦合**：与本仓库 sub-pixel AR pixel-first 序列布局对齐，通道依赖
 通过 attention 而非输出头建模。
 
+域：target ∈ [-1, 1] float (PixelCNN++ 原版同款)。
+  半 bin 宽 = 1/255 ≈ 0.0039；mean = tanh(mean_raw) ∈ [-1, 1]。
+  下游 IGPT 调用方负责把 long ∈ [0, 255] → float ∈ [-1, 1] 归一化 (t/127.5 - 1)。
+  历史 v6 第 1 次尝试用 [0, 255] long 域 (bin=0.5, mean ∈ [0,255], bias=+2)，
+  在 Stage 2 80M 主网上 step 650 后 CE_f 仍 6.5 不动；boundary token
+  (target-mean)·inv_s 量级 ~127·0.135 ≈ 17 在 sigmoid 完全饱和。
+
 Refs:
-  Salimans et al., "PixelCNN++," ICLR 2017 — 离散化 logistic 混合定义
+  Salimans et al., "PixelCNN++," ICLR 2017 — 离散化 logistic 混合定义 + [-1,1] 域 + 1/255 半 bin
+  Chen et al., "Generating Long Sequences with Sparse Transformers," 2019 — DMoL 用于 transformer 输出头
   Chen et al., "Generative Pretraining from Pixels (iGPT)," ICML 2020 — std=0.005 head init
 """
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -18,7 +28,11 @@ _LOG_SCALE_MIN = -7.0       # inv_s ≤ exp(7) ≈ 1097（防 sigmoid 完全饱�
 _LOG_SCALE_MAX = +5.0       # inv_s ≥ exp(-5) ≈ 0.0067（防 mean·inv_s 量级失控）
 _LOG_PROB_FLOOR = -30.0     # last-resort 单 token log_prob 下限
 _CDF_DIFF_FLOOR = 1e-12     # CDF 差分极小值兜底（v1 用 1e-5 太松，1e-12 仅 catch 真溢出）
-_HEAD_BIAS_INIT_LOG_SCALE = 2.0  # log_scale 通道初始 bias，使 inv_s ≈ 0.135 落在 sigmoid 线性区
+
+# 半 bin 宽：256 个离散 bin 均匀映到 [-1, 1] 区间 → bin 宽 = 2/255, 半 bin = 1/255
+_HALF_BIN = 1.0 / 255.0
+# fp32 中 log(255) 常量，用作 fallback 时的 Jacobian 补偿项 log(bin_width/2)/2 = -log(127.5)
+_LOG_BIN_HALF_WIDTH = -math.log(127.5)
 
 
 class DMoLHead1D(nn.Module):
@@ -39,13 +53,10 @@ class DMoLHead1D(nn.Module):
         # DMoL CDF 差分对此尤敏感（std=0.02 会让 sigmoid 起步即饱和）。
         nn.init.normal_(self.proj.weight, std=0.005)
         nn.init.zeros_(self.proj.bias)
-        # log_scale 通道（第 3 段 K 个 bias）置 +2.0 起步：
-        # inv_s = exp(-2) ≈ 0.135 → bin·inv_s ≈ 0.135 落在 sigmoid 线性区，
-        # CDF 差分非零，绕开 v1-v5 的 fallback 风暴（v1-v5 全部 bias=0 起步，
-        # inv_s=1, bin·inv_s=0.004 极窄，sigmoid 饱和致 CDF 差分 ~1e-4 量级）。
-        K = self.n_mixtures
-        with torch.no_grad():
-            self.proj.bias[2 * K : 3 * K].fill_(_HEAD_BIAS_INIT_LOG_SCALE)
+        # log_scale bias = 0 (PixelCNN++ 原版同款；inv_s = 1)。
+        # 在 [-1, 1] 域下 bin·inv_s = 1/255 ≈ 0.0039 与 boundary (t-mean)·inv_s ~ 2
+        # 都落在 sigmoid 线性区。v6 第 1 次 (旧版 [0,255] 域) bias=+2 是为补偿 bin=0.5
+        # 量级偏大；切到 [-1,1] 后 bias 不再需要预偏置。
 
     def forward(self, hidden: torch.Tensor) -> torch.Tensor:
         """hidden: (B, T, d_model) → params: (B, T, K*3)。"""
@@ -56,11 +67,12 @@ def dmol_loss_1d(params: torch.Tensor,
                  target_long: torch.Tensor,
                  n_mixtures: int,
                  reduction: str = "mean") -> torch.Tensor:
-    """1D 离散化 logistic 混合 NLL。
+    """1D 离散化 logistic 混合 NLL（[-1, 1] 域内部计算）。
 
     Args:
         params:       (B, T, K*3) float — DMoLHead1D 输出
         target_long:  (B, T) long ∈ [0, 255] — sub-pixel 整数 target
+                      （调用方传 long，内部归一化到 [-1, 1] float）
         n_mixtures:   K
         reduction:    "mean" 返回标量；"none" 返回 (B, T) per-token NLL
 
@@ -75,32 +87,33 @@ def dmol_loss_1d(params: torch.Tensor,
     # split: (B, T, K) × 3
     logit_w, mean_raw, log_scale_raw = params.split(K, dim=-1)
 
-    # mean ∈ [0, 255]（无通道耦合，pixel-first AR 已通过 attention 建模 R/G/B 依赖）
-    mean = 127.5 * (1.0 + torch.tanh(mean_raw))
+    # mean ∈ [-1, 1]（PixelCNN++ 原版；无通道耦合，pixel-first AR 已通过 attention 建模 R/G/B 依赖）
+    mean = torch.tanh(mean_raw)
 
     # log_scale 双向 clamp，inv_s 范围 [0.0067, 1097]
     log_scale = log_scale_raw.clamp(_LOG_SCALE_MIN, _LOG_SCALE_MAX)
     inv_s = torch.exp(-log_scale)
 
-    # target 广播到 mixture 维: (B, T) → (B, T, 1)，与 (B, T, K) 广播
-    target = target_long.unsqueeze(-1).to(mean.dtype)
+    # target long ∈ [0, 255] → float ∈ [-1, 1]，PixelCNN++ 原版同款归一化：
+    #   t_float = t_long / 127.5 - 1
+    # 广播到 mixture 维: (B, T) → (B, T, 1)
+    target = (target_long.to(mean.dtype) / 127.5 - 1.0).unsqueeze(-1)
 
-    plus_in = (target + 0.5 - mean) * inv_s
-    minus_in = (target - 0.5 - mean) * inv_s
+    # 离散 bin 边界（[-1,1] 域，半 bin 宽 = 1/255）
+    plus_in = (target + _HALF_BIN - mean) * inv_s
+    minus_in = (target - _HALF_BIN - mean) * inv_s
 
     # 中间 bin: log(σ(plus_in) - σ(minus_in))
-    # 用 logsigmoid 数值稳定地表达 σ；clamp 防极小差分
     cdf_plus = torch.sigmoid(plus_in)
     cdf_minus = torch.sigmoid(minus_in)
     cdf_delta = (cdf_plus - cdf_minus).clamp(min=_CDF_DIFF_FLOOR)
     log_prob_mid = torch.log(cdf_delta)
 
-    # 边界 target=0:   log σ(plus_in)              （无下界，全部概率落在 (-inf, 0+0.5]）
-    # 边界 target=255: log σ(-minus_in) = log(1 - σ(minus_in)) （全部概率落在 [255-0.5, +inf)）
+    # 边界 target=0   (t_float=-1):    log σ(plus_in)        （概率全在 (-inf, -1+1/255]）
+    # 边界 target=255 (t_float=+1):    log σ(-minus_in)      （概率全在 [+1-1/255, +inf)）
     log_prob_low = F.logsigmoid(plus_in)
     log_prob_high = F.logsigmoid(-minus_in)
 
-    # 选择正确分支
     is_low = (target_long == 0).unsqueeze(-1)
     is_high = (target_long == 255).unsqueeze(-1)
     log_prob_per_mix = torch.where(
