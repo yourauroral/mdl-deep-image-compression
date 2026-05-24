@@ -26,8 +26,8 @@ model:
   N: 24
   h: 8
   d_ff: 1376
-  dropout: 0.1
-  drop_path: 0.1
+  dropout: 0.0                 # ★ DMoL raw linear head 对 hidden noise 敏感（dropout 0.1 让 ep1 step 300 CE_f flat 11.0 = 2× 均匀分布）
+  drop_path: 0.0               # 同上；softmax 路径有 weight tying+LayerNorm 规整 hidden，DMoL 无此缓冲
 
   # ★ DMoL 关键开关（仅 fine 生效；coarse 强制 softmax）
   output_head: "dmol"
