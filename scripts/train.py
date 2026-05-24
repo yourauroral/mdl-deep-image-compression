@@ -95,8 +95,8 @@ def _validate_config(config: dict):
     )
 
     lr_schedule = tcfg.get('lr_schedule', 'cosine')
-    assert lr_schedule in ('cosine', 'wsd', 'multistep'), (
-        f"train.lr_schedule 必须是 cosine/wsd/multistep，got '{lr_schedule}'"
+    assert lr_schedule in ('cosine', 'wsd', 'multistep', 'constant'), (
+        f"train.lr_schedule 必须是 cosine/wsd/multistep/constant，got '{lr_schedule}'"
     )
 
     # SWA 与 epochs 交叉校验：start_epoch > epochs 时训练不会触发任何 SWA 更新，
@@ -607,8 +607,28 @@ def main():
     #               DMoL 稀疏大梯度更鲁棒
     base_lr = float(config["train"]["lr"])
     is_dmol = mcfg.get("output_head", "softmax") == "dmol"
+    dmol_single_adamax = bool(config["train"].get("dmol_single_adamax", False))
 
-    if is_dmol:
+    if is_dmol and dmol_single_adamax:
+        amp_cfg_check = config["train"].get("amp_dtype", "fp16")
+        assert amp_cfg_check in (None, "none", "fp32"), (
+            f"DMoL 路径必须 amp_dtype=null/none/fp32（fp32 强制），got '{amp_cfg_check}'"
+        )
+        assert float(config["train"].get("z_loss_weight", 1e-4)) == 0.0, (
+            "DMoL 路径必须 z_loss_weight=0.0"
+        )
+        optim_head_cfg = config["train"].get("optimizer_dmol_head", {})
+        optimizer_main = optim.Adamax(
+            [p for _, p in (model.module if distributed else model).named_parameters()],
+            lr=base_lr,
+            betas=tuple(optim_head_cfg.get("betas", [0.9, 0.999])),
+            eps=float(optim_head_cfg.get("eps", 1e-7)),
+            weight_decay=float(optim_head_cfg.get("weight_decay", 0.0)),
+        )
+        optimizers = [optimizer_main]
+        if rank == 0:
+            print(f"Optimizers: Adamax(all params, lr={base_lr:.2e}, wd=0) — PixelCNN++ 原版单一 optimizer fallback")
+    elif is_dmol:
         # DMoL 路径专用 assert（plan §6.1 hard 约束）
         amp_cfg_check = config["train"].get("amp_dtype", "fp16")
         assert amp_cfg_check in (None, "none", "fp32"), (
