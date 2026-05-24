@@ -71,7 +71,7 @@ train:
   # 主网仍走 AdamW (lr=3e-4, betas=(0.9, 0.95), wd=0.1 配 _get_param_groups)
   optimizer_dmol_head:
     type: adamax
-    lr: 8e-5                   # head 比主网小 ~4×，更慢更稳（mini hilr 验证比例）
+    lr: 3e-4                   # 与主网齐平（mini hilr 8e-5 在 0.7M 模型成立，但 80M 主网梯度背景下 head 被淹没；step 150 CE_f 6.52 不动验证）
     betas: [0.9, 0.999]        # PixelCNN++ 原版 Adamax 默认
     eps: 1e-7
     weight_decay: 0.0          # DMoL 输出语义不齐次（mean / log_scale / logit_w 量级不同），关 wd
