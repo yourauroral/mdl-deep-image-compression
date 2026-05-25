@@ -118,12 +118,13 @@ def _validate_config(config: dict):
             f"coarse_d_model ({mcfg['coarse_d_model']}) 必须能被 coarse_h ({mcfg['coarse_h']}) 整除"
         )
 
-        # coarse_in_channels：R-only 灰度先验
+        # coarse_in_channels：R-only 灰度先验（仅 1 或 in_channels 合法，
+        # 中间值 expand 路径不可达，详见 cc_igpt.py:CCIGPT.__init__）
         coarse_ic = mcfg.get('coarse_in_channels')
         if coarse_ic is not None:
-            assert 1 <= coarse_ic <= mcfg['in_channels'], (
+            assert coarse_ic in (1, mcfg['in_channels']), (
                 f"model.coarse_in_channels ({coarse_ic}) 必须 ∈ "
-                f"[1, in_channels={mcfg['in_channels']}]"
+                f"{{1, in_channels={mcfg['in_channels']}}}"
             )
 
 
@@ -761,9 +762,17 @@ def main():
 
         ema_state 延迟初始化：第一次调用时按 raw_model 当前权重 clone 出 fp32 副本。
         非 rank 0 走空操作（ema_state 始终 None，由 finalize broadcast 同步）。
+
+        NaN 守卫：与 SWA 同款 batched 检查 — EMA 是累积平均，单步 NaN
+        会通过 (1-decay) 项渗入并永久污染；首次克隆时 NaN 也会让所有
+        后续 add_ 输出 NaN。检测到则跳过本 tick，下一步自动重试。
         """
         nonlocal ema_state
         if not ema_enabled or rank != 0:
+            return
+        has_nan = torch.stack([torch.isnan(p.data).any()
+                               for p in raw_model.parameters()]).any().item()
+        if has_nan:
             return
         if ema_state is None:
             ema_state = {name: p.data.detach().float().clone()

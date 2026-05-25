@@ -57,8 +57,12 @@ class CCIGPT(nn.Module):
 
         if coarse_in_channels is None:
             coarse_in_channels = in_channels
-        assert 1 <= coarse_in_channels <= in_channels, (
-            f"coarse_in_channels ({coarse_in_channels}) 必须 ∈ [1, in_channels={in_channels}]"
+        # expand 仅能从 size=1 扩展，因此中间值（如 in_channels=3 时传 2）
+        # 在 _compute_coarse_ctx 的 x_up.expand(-1, C_fine, -1, -1) 处会崩。
+        # 实际语义只有两种：1（灰度先验）或 in_channels（全通道）。
+        assert coarse_in_channels in (1, in_channels), (
+            f"coarse_in_channels ({coarse_in_channels}) 必须 ∈ {{1, in_channels={in_channels}}}; "
+            f"中间值 expand 不可达。"
         )
 
         shared = dict(
