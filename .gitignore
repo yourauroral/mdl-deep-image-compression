@@ -35,3 +35,6 @@ future.md
 *.pdf
 *.txt
 *.log
+
+# 论文草稿（local-only，markdown 草稿 → 复制到 Word）
+thesis/
