@@ -1,14 +1,13 @@
 {
   "model": "CC-iGPT (R-only)",
   "image_size": 32,
-  "fine_output_head": "softmax",
   "scales": [
-    {"scale": "Coarse (R-only)", "resolution": "8x8x1",   "tokens": 64,   "role": "灰度先验，独立编码进 bitstream",                                       "head": "softmax (256-way)",        "ce_nats": 4.3379, "bpd_share": 0.1304, "share_pct": 4.5},
-    {"scale": "Fine",            "resolution": "32x32x3", "tokens": 3072, "role": "条件 fine NTP（注入 α·coarse_ctx）+ pixel-first AR 自学 G/B 偏色", "head": "softmax (256-way) [TBD: DMoL v6 K=10]", "ce_nats": 1.9222, "bpd_share": 2.7731, "share_pct": 95.5}
+    {"scale": "Coarse (R-only)", "resolution": "8x8x1",   "tokens": 64,   "role": "灰度先验，独立编码进 bitstream",                                       "ce_nats": 4.3379, "bpd_share": 0.1304, "share_pct": 4.5},
+    {"scale": "Fine",            "resolution": "32x32x3", "tokens": 3072, "role": "条件 fine NTP（注入 α·coarse_ctx）+ pixel-first AR 自学 G/B 偏色", "ce_nats": 1.9222, "bpd_share": 2.7731, "share_pct": 95.5}
   ],
   "total_tokens": 3136,
   "bpd_total": 2.9035,
   "bpd_std": 0.0854,
   "ctx_alpha": 0.0982,
-  "note": "softmax head 主表 (2026-05-22, 100ep + RandomCrop + DropPath 0.1 + dropout 0.1 + EMA 0.9995 + TTA hflip)；DMoL 路径见 metrics.json TBD 行，coarse 强制 softmax，仅 fine 替换为 DMoL"
+  "note": "softmax head 主表 (2026-05-22, 100ep + RandomCrop + DropPath 0.1 + dropout 0.1 + EMA 0.9995 + TTA hflip)"
 }

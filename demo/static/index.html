@@ -43,10 +43,6 @@
           <span class="metric-label">模型</span>
           <span class="metric-value" id="result-model">—</span>
         </div>
-        <div class="metric-card">
-          <span class="metric-label">输出头</span>
-          <span class="metric-value" id="result-head">—</span>
-        </div>
       </div>
       <div id="result-extras" class="result-extras" hidden>
         <span class="extra-item">CE<sub>coarse</sub>: <b id="result-ce-coarse">—</b></span>
@@ -56,7 +52,7 @@
       <div class="heatmap-container">
         <p class="heatmap-title">Per-position BPP 热力图 (bits/pixel)</p>
         <img id="heatmap-img" class="heatmap-img" hidden>
-        <p id="heatmap-placeholder" class="hint">上传图片后生成（仅 softmax 输出头）</p>
+        <p id="heatmap-placeholder" class="hint">上传图片后生成（仅 iGPT 单尺度路径）</p>
       </div>
     </div>
   </div>
@@ -100,7 +96,7 @@
     <canvas id="chart-scales"></canvas>
   </div>
   <table id="table-scales" class="data-table">
-    <thead><tr><th>分支</th><th>分辨率</th><th>Token 数</th><th>占比</th><th>输出头</th></tr></thead>
+    <thead><tr><th>分支</th><th>分辨率</th><th>Token 数</th><th>占比</th></tr></thead>
     <tbody></tbody>
   </table>
 </section>

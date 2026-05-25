@@ -188,9 +188,6 @@ def evaluate_ensemble(models, loader, device, amp_dtype=None, tta_hflip: bool = 
     geometric mean，更接近真 ensemble 似然下界（Jensen 收紧）；prob 域算术平均
     会产生过自信误差，文献 (Hinton et al., "Distilling the Knowledge in a NN"
     2015) 已证 log-prob 域更稳。
-
-    DMoL 路径不支持：fine head 输出是 K-mix 参数 (B, T, K*3) 而非 logits，
-    log-softmax 不可直接套用；此处 assert 拦截。
     """
     for m in models:
         m.eval()
@@ -219,8 +216,7 @@ def evaluate_ensemble(models, loader, device, amp_dtype=None, tta_hflip: bool = 
             with amp_ctx:
                 out = m(x_in)
             assert out.get("logits") is not None, (
-                "ensemble 评测要求 forward 返回 logits（softmax 路径）；DMoL head "
-                "返回 logits=None，不支持 logit ensemble"
+                "ensemble 评测要求 forward 返回 logits（softmax 路径）"
             )
             log_probs_stack.append(F.log_softmax(out["logits"].float(), dim=-1))
             if "ce_loss_coarse" in out and out["ce_loss_coarse"] is not None:

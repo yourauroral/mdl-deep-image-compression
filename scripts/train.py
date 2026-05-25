@@ -68,13 +68,6 @@ def _validate_config(config: dict):
         assert mcfg['d_ff'] > 0, f"model.d_ff 必须 > 0，got {mcfg['d_ff']}"
         assert 0.0 <= mcfg['dropout'] < 1.0, f"model.dropout 必须在 [0, 1)，got {mcfg['dropout']}"
         assert mcfg['vocab_size'] > 0, f"model.vocab_size 必须 > 0，got {mcfg['vocab_size']}"
-
-        # 输出头：拼写错误（如 "dmoll"）会沉默回退到 IGPT.__init__ 的 ValueError，
-        # 但那已是构造期；这里在配置阶段就 fail-fast，避免下游误读。
-        output_head = mcfg.get('output_head', 'softmax')
-        assert output_head in ('softmax', 'dmol'), (
-            f"model.output_head 必须是 'softmax' 或 'dmol'，got '{output_head}'"
-        )
     else:
         raise ValueError(f"未知 model.type: '{model_type}'，支持 igpt/ccigpt")
 
@@ -133,19 +126,6 @@ def _validate_config(config: dict):
                 f"[1, in_channels={mcfg['in_channels']}]"
             )
 
-    # ── DMoL 路径额外校验（仅 output_head=dmol 时生效） ──
-    # main() 里 `optim_head_cfg = tcfg.get("optimizer_dmol_head", {})` 在配置缺失时
-    # 会静默 fall through 到 head_lr=base_lr*0.4 默认值，掩盖 yaml 漏写 / 拼错。
-    # 这里 fail-fast 要求 dmol 路径必须显式给出 lr。
-    if mcfg.get('output_head', 'softmax') == 'dmol':
-        assert 'optimizer_dmol_head' in tcfg, (
-            "DMoL 路径必须显式配置 train.optimizer_dmol_head（含 lr/betas/eps/weight_decay）"
-        )
-        opt_head_cfg = tcfg['optimizer_dmol_head']
-        assert 'lr' in opt_head_cfg and float(opt_head_cfg['lr']) > 0, (
-            f"train.optimizer_dmol_head.lr 必须显式给出且 > 0，got {opt_head_cfg.get('lr')}"
-        )
-
 
 def _shared_igpt_kwargs(mcfg: dict) -> dict:
     """提取 iGPT / CC-iGPT 共用字段。"""
@@ -155,8 +135,6 @@ def _shared_igpt_kwargs(mcfg: dict) -> dict:
         dropout=mcfg["dropout"],
         activation_checkpointing=mcfg.get("activation_checkpointing", False),
         drop_path=mcfg.get("drop_path", 0.0),
-        output_head=mcfg.get("output_head", "softmax"),
-        n_mixtures=mcfg.get("n_mixtures", 10),
     )
 
 
@@ -193,9 +171,6 @@ def _no_decay_param_names(model) -> set:
 
     用 isinstance(module, …) 识别 norm/embedding 层，避免子串 'norm' 误匹配（例如
     未来若把模块命名成 `normalizer` / `ln1` 都会静默改变 wd 行为）。
-
-    softmax 与 DMoL 两条路径都消费这个集合（softmax 路径只此一组；DMoL 路径再
-    叠一层"踢出 head 子树"逻辑防 head 被 AdamW + Adamax 双更新）。
     """
     from src.mdlic.models.layers import RMSNorm
     no_decay_modules = (nn.Embedding, RMSNorm, nn.LayerNorm)
@@ -211,35 +186,12 @@ def _no_decay_param_names(model) -> set:
 
 
 def _get_param_groups(model, weight_decay=0.1):
-    """softmax 路径用：构建 AdamW 参数组（decayed + no-decay 两组）。"""
+    """构建 AdamW 参数组（decayed + no-decay 两组）。"""
     no_decay = _no_decay_param_names(model)
     return [
         {"params": [p for n, p in model.named_parameters() if n not in no_decay], "weight_decay": weight_decay},
         {"params": [p for n, p in model.named_parameters() if n in no_decay],     "weight_decay": 0.0},
     ]
-
-
-def _split_dmol_head_params(model):
-    """DMoL 路径专用：把 fine.head (DMoLHead1D) 参数从主参数集中分离出来。
-
-    返回 (head_params, other_params)，两个列表的并集 = 全部参数，交集为空。
-    main() 用这两个列表分别建 Adamax (head) 和 AdamW (other) 两个独立 optimizer。
-
-    DMoL head 名前缀:
-      - CCIGPT: "fine.head.proj.weight" / "fine.head.proj.bias"
-      - 单尺度 IGPT: "head.proj.weight" / "head.proj.bias"
-    """
-    head_params = []
-    other_params = []
-    head_param_names = set()
-    for name, p in model.named_parameters():
-        # 匹配 .head.proj.* 即 DMoL head（softmax head 是 nn.Linear，参数名为 head.weight，不带 .proj）
-        if ".head.proj." in name or name.startswith("head.proj."):
-            head_params.append(p)
-            head_param_names.add(name)
-        else:
-            other_params.append(p)
-    return head_params, other_params, head_param_names
 
 
 # ==================== Training ====================
@@ -260,8 +212,8 @@ def train_one_epoch(model, loader, optimizers, scaler, device,
                     z_loss_weight=1e-4,
                     distributed=False, rank=0,
                     on_optimizer_step=None):
-    """optimizers: list[Optimizer] — 支持单 (AdamW) 或多 optimizer (DMoL 路径下
-    AdamW + Adamax 两个独立实例)。每个 step 都遍历列表分别 step/zero_grad。
+    """optimizers: list[Optimizer] — 单 AdamW 即可；保留 list 接口兼容历史 ckpt
+    格式 (optimizer_state_dicts list)。每个 step 都遍历列表分别 step/zero_grad。
     """
     model.train()
     total_loss = 0
@@ -600,92 +552,15 @@ def main():
             model, device_ids=[local_rank], output_device=local_rank
         )
 
-    # Optimizer 构造
-    # softmax 路径: 单 AdamW（与历史完全一致）
-    # dmol 路径:    AdamW (主网) + Adamax (DMoL head 单独，参考 PixelCNN++ 原版
-    #               用 Adamax 训 DMoL；本项目主网保持 AdamW)。L∞-norm 二阶矩对
-    #               DMoL 稀疏大梯度更鲁棒
+    # Optimizer: 单 AdamW
     base_lr = float(config["train"]["lr"])
-    is_dmol = mcfg.get("output_head", "softmax") == "dmol"
-    dmol_single_adamax = bool(config["train"].get("dmol_single_adamax", False))
-
-    if is_dmol and dmol_single_adamax:
-        amp_cfg_check = config["train"].get("amp_dtype", "fp16")
-        assert amp_cfg_check in (None, "none", "fp32"), (
-            f"DMoL 路径必须 amp_dtype=null/none/fp32（fp32 强制），got '{amp_cfg_check}'"
-        )
-        assert float(config["train"].get("z_loss_weight", 1e-4)) == 0.0, (
-            "DMoL 路径必须 z_loss_weight=0.0"
-        )
-        optim_head_cfg = config["train"].get("optimizer_dmol_head", {})
-        optimizer_main = optim.Adamax(
-            [p for _, p in (model.module if distributed else model).named_parameters()],
-            lr=base_lr,
-            betas=tuple(optim_head_cfg.get("betas", [0.9, 0.999])),
-            eps=float(optim_head_cfg.get("eps", 1e-7)),
-            weight_decay=float(optim_head_cfg.get("weight_decay", 0.0)),
-        )
-        optimizers = [optimizer_main]
-        if rank == 0:
-            print(f"Optimizers: Adamax(all params, lr={base_lr:.2e}, wd=0) — PixelCNN++ 原版单一 optimizer fallback")
-    elif is_dmol:
-        # DMoL 路径专用 assert（plan §6.1 hard 约束）
-        amp_cfg_check = config["train"].get("amp_dtype", "fp16")
-        assert amp_cfg_check in (None, "none", "fp32"), (
-            f"DMoL 路径必须 amp_dtype=null/none/fp32（fp32 强制），got '{amp_cfg_check}'"
-        )
-        assert float(config["train"].get("z_loss_weight", 1e-4)) == 0.0, (
-            "DMoL 路径必须 z_loss_weight=0.0（DMoL 输出无 logits 的 logsumexp 语义）"
-        )
-
-        # 拆 head / other 两组参数
-        raw_for_split = model.module if distributed else model
-        raw_for_split = getattr(raw_for_split, '_orig_mod', raw_for_split)
-        head_params, other_params, head_param_names = _split_dmol_head_params(raw_for_split)
-        if rank == 0:
-            print(f"DMoL optimizer split: head={len(head_params)} params "
-                  f"({list(head_param_names)}), other={len(other_params)} params")
-
-        # 主网 AdamW 参数组 — 与 softmax 路径 _get_param_groups 同 no_decay 规则，
-        # 但额外排除 head_param_names 防 head 同时被 AdamW + Adamax 双更新。
-        no_decay = _no_decay_param_names(raw_for_split)
-        adamw_decay = [p for n, p in raw_for_split.named_parameters()
-                       if n not in no_decay and n not in head_param_names]
-        adamw_nodecay = [p for n, p in raw_for_split.named_parameters()
-                         if n in no_decay and n not in head_param_names]
-        adamw_groups = [
-            {"params": adamw_decay,   "weight_decay": 0.1},
-            {"params": adamw_nodecay, "weight_decay": 0.0},
-        ]
-        optimizer_main = optim.AdamW(
-            adamw_groups, lr=base_lr,
-            betas=(0.9, 0.95),
-            eps=float(config["train"].get("eps", 1e-8)),
-        )
-
-        # DMoL head 用 Adamax（lr 更小，更稳）
-        optim_head_cfg = config["train"].get("optimizer_dmol_head", {})
-        head_lr = float(optim_head_cfg.get("lr", base_lr * 0.4))   # 默认 0.4× base_lr
-        optimizer_head = optim.Adamax(
-            head_params,
-            lr=head_lr,
-            betas=tuple(optim_head_cfg.get("betas", [0.9, 0.999])),
-            eps=float(optim_head_cfg.get("eps", 1e-7)),
-            weight_decay=float(optim_head_cfg.get("weight_decay", 0.0)),
-        )
-
-        optimizers = [optimizer_main, optimizer_head]
-        if rank == 0:
-            print(f"Optimizers: AdamW(main, lr={base_lr:.2e}) + Adamax(dmol_head, lr={head_lr:.2e}, wd=0)")
-    else:
-        # softmax 路径：保持单 AdamW，零行为变化
-        optimizer_main = optim.AdamW(
-            _get_param_groups(model, weight_decay=0.1),
-            lr=base_lr,
-            betas=(0.9, 0.95),
-            eps=float(config["train"].get("eps", 1e-8)),
-        )
-        optimizers = [optimizer_main]
+    optimizer_main = optim.AdamW(
+        _get_param_groups(model, weight_decay=0.1),
+        lr=base_lr,
+        betas=(0.9, 0.95),
+        eps=float(config["train"].get("eps", 1e-8)),
+    )
+    optimizers = [optimizer_main]
 
     # Learning rate scheduler
     #
@@ -842,21 +717,15 @@ def main():
             else:
                 raw_model.load_state_dict(sd)
             if 'optimizer_state_dicts' in ckpt:
-                # v6+ 多 optimizer 格式（list）
+                # 多 optimizer 格式（list）— 当前为单元素，保留 list 接口兼容
                 opt_states = ckpt['optimizer_state_dicts']
                 assert len(opt_states) == len(optimizers), (
-                    f"ckpt 含 {len(opt_states)} 个 optimizer state，当前模型用 {len(optimizers)} 个；"
-                    "config 是否切换了 output_head？"
+                    f"ckpt 含 {len(opt_states)} 个 optimizer state，当前模型用 {len(optimizers)} 个"
                 )
                 for opt, sd_opt in zip(optimizers, opt_states):
                     opt.load_state_dict(sd_opt)
             elif 'optimizer_state_dict' in ckpt:
-                # 历史单 optimizer 格式：softmax ckpt 仅含 AdamW 主网状态。
-                # DMoL 路径下 plan §6.2 明确"完全重训"，不支持跨 head 类型 resume。
-                assert len(optimizers) == 1, (
-                    "ckpt 是单 optimizer (softmax) 格式，但当前是 DMoL 路径 (2 optimizers)；"
-                    "plan §6.2 不支持跨 head 类型 resume，请删除 --resume 走全新训练"
-                )
+                # 历史单 optimizer 格式（标量 dict 而非 list）
                 optimizers[0].load_state_dict(ckpt['optimizer_state_dict'])
             start_epoch = ckpt.get('epoch', 0) + 1
             best_bpd = ckpt.get('best_bpd', float('inf'))
@@ -871,8 +740,6 @@ def main():
                 ema_state = ckpt['ema_state']
             # resume 后用 config 中的 lr 覆盖 checkpoint 里的旧值，
             # 使得修改 yaml lr 后 resume 能立即生效。
-            # 注意：仅覆盖主 optimizer (optimizers[0])，DMoL head 的 lr 由其自身的
-            # config 字段控制（optimizer_dmol_head.lr），不被 base_lr 覆盖。
             for pg in optimizers[0].param_groups:
                 pg['initial_lr'] = base_lr
                 pg['lr'] = base_lr
@@ -987,7 +854,7 @@ def main():
             ckpt_data = {
                 'epoch': epoch,
                 'model_state_dict': raw_model.state_dict(),
-                # v6+ 多 optimizer 格式：list of state_dicts（softmax 路径仍为单元素 list）
+                # 多 optimizer 格式：list of state_dicts（当前为单元素 list）
                 'optimizer_state_dicts': [opt.state_dict() for opt in optimizers],
                 'loss': avg_loss,
                 'best_bpd': best_bpd,

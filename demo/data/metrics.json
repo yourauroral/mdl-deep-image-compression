@@ -7,7 +7,6 @@
     {"name": "Image Transformer",       "category": "Autoregressive density models", "bpd": 2.90,   "std": null,   "note": "Parmar 2018, 95M"},
     {"name": "PixelSNAIL",              "category": "Autoregressive density models", "bpd": 2.85,   "std": null,   "note": "Chen 2018, 380M"},
     {"name": "Sparse Transformer",      "category": "Autoregressive density models", "bpd": 2.80,   "std": null,   "note": "Child 2019, 59M, N=128 strided sparse"},
-    {"name": "CC-iGPT R-only (Ours)",   "category": "Autoregressive density models", "bpd": 2.9035, "std": 0.0854, "note": "softmax head, ~81M, 100ep + RandomCrop + DropPath 0.1 + dropout 0.1 + EMA 0.9995 + TTA hflip"},
-    {"name": "CC-iGPT R-only + DMoL (Ours, TBD)", "category": "Autoregressive density models", "bpd": null, "std": null, "note": "DMoL v6: K=10 mix logistic sub-pixel 1D head + Adamax；待 Stage 3 评测后回填"}
+    {"name": "CC-iGPT R-only (Ours)",   "category": "Autoregressive density models", "bpd": 2.9035, "std": 0.0854, "note": "softmax head, ~81M, 100ep + RandomCrop + DropPath 0.1 + dropout 0.1 + EMA 0.9995 + TTA hflip"}
   ]
 }

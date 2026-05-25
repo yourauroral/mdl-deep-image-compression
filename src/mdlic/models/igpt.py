@@ -27,13 +27,8 @@ class IGPT(nn.Module):
   建模 p(x_t | x_{<t})，CE loss 直接对应 Shannon 最优编码长度。
 
   架构：RoPE base=500000、QK-Norm、RMSNorm Post-Norm（OLMo 2 风格）、
-  SwiGLU FFN、Weight Tying（softmax 路径）、z-loss 正则、深度缩放初始化、
+  SwiGLU FFN、Weight Tying（softmax）、z-loss 正则、深度缩放初始化、
   子像素自回归 (pixel-first)。
-
-  output_head：
-    "softmax"（默认）— 256-way categorical + weight tying with token_embed
-    "dmol"          — DMoLHead1D (K-mix 离散化 logistic), 输入端 token_embed 保留
-                      但断开 output tying；fp32 强制；z_loss 自动跳过
   """
   def __init__(
     self,
@@ -47,8 +42,6 @@ class IGPT(nn.Module):
     dropout=0.1,
     activation_checkpointing: bool = False,
     drop_path: float = 0.0,
-    output_head: str = "softmax",
-    n_mixtures: int = 10,
   ):
     super().__init__()
     self.seq_len = image_size * image_size * in_channels
@@ -57,7 +50,6 @@ class IGPT(nn.Module):
     self.vocab_size = vocab_size
     self.d_model = d_model
     self.N_layers = N
-    self.output_head_type = output_head
     self.token_embed = nn.Embedding(vocab_size, d_model)
 
     # 子像素自回归 (sub-pixel AR, Salimans et al., PixelCNN++ ICLR 2017):
@@ -77,22 +69,10 @@ class IGPT(nn.Module):
       for i in range(N)
     ])
 
-    # Output head：根据 output_head 分发
-    if output_head == "softmax":
-      # 256-way categorical + weight tying
-      # Ref: Press & Wolf, "Using the Output Embedding to Improve Language Models," EACL 2017.
-      self.head = nn.Linear(d_model, vocab_size, bias=False)
-      self.head.weight = self.token_embed.weight
-    elif output_head == "dmol":
-      # 断 output tying：DMoL head 输出 K*3 维（与 vocab_size 不兼容）。
-      # 输入端 token_embed 仍是 256-way categorical（cc_igpt._compute_coarse_ctx 复用）。
-      from ..losses import DMoLHead1D
-      self.head = DMoLHead1D(d_model, n_mixtures=n_mixtures)
-      self.n_mixtures = n_mixtures
-    else:
-      raise ValueError(
-        f"未知 output_head: '{output_head}'，支持 softmax/dmol"
-      )
+    # Output head: 256-way categorical + weight tying with token_embed
+    # Ref: Press & Wolf, "Using the Output Embedding to Improve Language Models," EACL 2017.
+    self.head = nn.Linear(d_model, vocab_size, bias=False)
+    self.head.weight = self.token_embed.weight
 
     self._init_weights()
 
@@ -100,9 +80,8 @@ class IGPT(nn.Module):
     """
     权重初始化：基础 std=0.02，残差通路输出投影用 1/√(2·N) 深度缩放。
 
-    Head 子树跳过：
-      - softmax 路径下 head.weight 与 token_embed 共享，跳过避免重复初始化
-      - dmol 路径下 head 是 DMoLHead1D，自身在 __init__ 已做 std=0.005 + log_scale bias=+2
+    Head 跳过：head.weight 与 token_embed 共享（weight tying），由 token_embed
+    路径统一初始化，跳过避免重复。
 
     参考:
       [1] Radford et al., "GPT-2," 2019 — 1/√(2·N) 深度缩放。
@@ -110,8 +89,7 @@ class IGPT(nn.Module):
     """
     N = self.N_layers
     for name, module in self.named_modules():
-      # 跳过 head 子树（含 head.proj 等所有后代）— softmax tying / dmol 自管
-      if name == 'head' or name.startswith('head.'):
+      if name == 'head':
         continue
       if isinstance(module, nn.Linear):
         if any(name.endswith(s) for s in ('w_o', 'w2')):
@@ -160,14 +138,12 @@ class IGPT(nn.Module):
     """
     参数:
       x:             (B, C, H, W) float [0,1]
-      z_loss_weight: z-loss 权重（仅 softmax 路径生效），默认 1e-4
+      z_loss_weight: z-loss 权重，默认 1e-4
                      Ref: PaLM arXiv:2204.02311; OLMo 2 arXiv:2501.00656
       coarse_ctx:    可选 (B, T-1, d_model) tensor，作为 additive 全局上下文
                      注入到 token embedding 之上。用于 CC-iGPT 的 fine 模型。
 
-    返回 dict:
-      softmax 路径: {loss, ce_loss, logits (B, T-1, V)}
-      dmol 路径:    {loss = ce_loss = NLL/N (nat/sub-pixel), logits = None}
+    返回 dict: {loss, ce_loss, logits (B, T-1, V)}
     """
     tokens = self._tokenize(x)
     # NTP：输入 x[0..T-1]，预测 x[1..T]
@@ -179,23 +155,6 @@ class IGPT(nn.Module):
     for block in self.blocks:
       hidden = block(hidden, position_ids=position_ids)
 
-    if self.output_head_type == "dmol":
-      # fp32 强制：DMoL CDF 差分 + logsumexp 在 fp16/bf16 下数值不稳。
-      # 复用 cc_igpt._compute_coarse_ctx 同款 autocast(enabled=False) pattern。
-      from ..losses import dmol_loss_1d
-      device_type = "cuda" if hidden.is_cuda else "cpu"
-      with torch.amp.autocast(device_type=device_type, enabled=False):
-        params = self.head(hidden.float())   # (B, T-1, K*3)
-        ce_loss = dmol_loss_1d(params, target_tokens, self.n_mixtures)
-        loss = ce_loss
-
-      return {
-        "loss": loss,
-        "ce_loss": ce_loss,
-        "logits": None,
-      }
-
-    # ── softmax 路径（原实现） ──
     z_w = float(z_loss_weight)
 
     logits = self.head(hidden).float()

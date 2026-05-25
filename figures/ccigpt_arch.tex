@@ -50,7 +50,7 @@
     {coarse tokens $(B,64)$\\\textit{$\sim$2\% bitstream}};
 
 \node[coarseblk, below=of ctokens] (coarse)
-    {\textbf{Coarse iGPT}\;(5M)\\\scriptsize$d{=}256,\ N{=}6,\ h{=}4$\\
+    {\textbf{Coarse iGPT}\\
      RoPE\,/\,QK-Norm\,/\,SwiGLU};
 
 \node[lossblk, below=of coarse] (cehead_c)
@@ -99,12 +99,11 @@
      (ctxlabel) {\textbf{Coarse $\to$ Fine ctx (bit-exact)}};
 
 \node[fineblk, below=of plus] (fine)
-    {\textbf{Fine iGPT}\;(76M)\\
-     \scriptsize$d{=}512,\ N{=}24,\ h{=}8$\\
+    {\textbf{Fine iGPT}\\
      RoPE\,/\,QK-Norm\,/\,SwiGLU\\\textit{OLMo 2 Reordered Norm}};
 
 \node[lossblk, below=of fine] (cehead_f)
-    {Softmax (tied) \,$|$\, DMoL\,$K{=}10$\\
+    {Softmax (tied)\\
      $\mathcal{L}_{\text{fine}}$, $N_f{=}3{,}072$\\\textit{Phase B / Phase D}};
 
 % ============================================================
@@ -169,19 +168,6 @@
         label={[blue!55!black]above:\textbf{Fine branch}\;(RGB, 32$\times$32, sub-pixel AR)}]
         (finebox) {};
 \end{pgfonlayer}
-
-% ============================================================
-% LEGEND (bottom-right)
-% ============================================================
-\node[draw, rounded corners=2pt, align=left, font=\scriptsize,
-      fill=white, draw=gray!35, text opacity=0.9, inner sep=4pt,
-      right=45mm of bpd, anchor=west] (legend)
-{\textbf{Legend}\\[2pt]
- {\color{orange!70!black}\rule[0.5ex]{8mm}{0.7pt}}\,\, bit-exact invariant ctx flow\\
- {\color{green!45!black} $\to$}\, additive embedding injection\\
- $\boldsymbol{+}$\, element-wise addition\\
- $\alpha$\, learnable scalar (shared across positions)\\
- \textit{italic} = key technical features};
 
 \end{tikzpicture}
 \end{document}

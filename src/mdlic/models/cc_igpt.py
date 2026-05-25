@@ -44,10 +44,6 @@ class CCIGPT(nn.Module):
         coarse_in_channels: int = None,
         # DropPath 仅作用于 fine（深 24 层），coarse 浅层 6 层不需要
         drop_path: float = 0.0,
-        # fine 输出头："softmax"（默认）或 "dmol"；coarse 强制 softmax
-        # （容量太小 bitstream 占比 ~4.5%，DMoL 收益微乎其微）
-        output_head: str = "softmax",
-        n_mixtures: int = 10,
     ):
         super().__init__()
         assert image_size % pool_factor == 0, (
@@ -70,19 +66,16 @@ class CCIGPT(nn.Module):
             activation_checkpointing=activation_checkpointing,
         )
 
-        # coarse 强制 softmax —— bitstream 仅 ~4.5%，DMoL 收益微乎其微
-        # 且 _compute_coarse_ctx 仍用 coarse._tokenize（categorical 量化语义）
         self.coarse = IGPT(image_size=self.coarse_size,
                            in_channels=coarse_in_channels,
                            d_model=coarse_d_model, N=coarse_N,
                            h=coarse_h, d_ff=coarse_d_ff,
-                           drop_path=0.0, output_head="softmax", **shared)
+                           drop_path=0.0, **shared)
         self.fine = IGPT(image_size=image_size,
                          in_channels=in_channels,
                          d_model=fine_d_model, N=fine_N,
                          h=fine_h, d_ff=fine_d_ff,
                          drop_path=drop_path,
-                         output_head=output_head, n_mixtures=n_mixtures,
                          **shared)
 
         # 可学习注入强度 α，初始 1.0。允许模型自适应 ctx 贡献度，

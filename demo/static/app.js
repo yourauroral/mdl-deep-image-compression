@@ -22,7 +22,6 @@ Chart.defaults.borderColor = "#2a2d3a";
   const bpdEl = $("result-bpd");
   const ceEl = $("result-ce");
   const modelEl = $("result-model");
-  const headEl = $("result-head");
   const extrasEl = $("result-extras");
   const ceCoarseEl = $("result-ce-coarse");
   const ceFineEl = $("result-ce-fine");
@@ -49,7 +48,7 @@ Chart.defaults.borderColor = "#2a2d3a";
     };
     reader.readAsDataURL(file);
 
-    bpdEl.textContent = ceEl.textContent = modelEl.textContent = headEl.textContent = "...";
+    bpdEl.textContent = ceEl.textContent = modelEl.textContent = "...";
     extrasEl.hidden = true;
 
     const form = new FormData();
@@ -60,14 +59,12 @@ Chart.defaults.borderColor = "#2a2d3a";
         const err = await res.json().catch(() => ({}));
         bpdEl.textContent = "N/A";
         modelEl.textContent = err.detail || "错误";
-        headEl.textContent = "—";
         return;
       }
       const data = await res.json();
       bpdEl.textContent = data.bpd;
       ceEl.textContent = data.ce_loss;
       modelEl.textContent = data.model_type.toUpperCase();
-      headEl.textContent = (data.output_head || "softmax").toUpperCase();
 
       // CC-iGPT: 显示双尺度 CE 分解 + α
       if (data.ce_coarse !== undefined) {
@@ -84,10 +81,7 @@ Chart.defaults.borderColor = "#2a2d3a";
       } else {
         hmImg.hidden = true;
         hmPlaceholder.hidden = false;
-        // 文案按 model_type / output_head 分别说明
-        if (data.output_head === "dmol") {
-          hmPlaceholder.textContent = "DMoL head 输出 K*3 维 mixture 参数，per-position 热力图待实现";
-        } else if (data.model_type === "ccigpt") {
+        if (data.model_type === "ccigpt") {
           hmPlaceholder.textContent = "CC-iGPT 含 coarse 子分支，per-position 热力图未实现";
         } else {
           hmPlaceholder.textContent = "热力图不可用";
@@ -96,7 +90,6 @@ Chart.defaults.borderColor = "#2a2d3a";
     } catch (e) {
       bpdEl.textContent = "离线";
       modelEl.textContent = "无法连接后端";
-      headEl.textContent = "—";
     }
   }
 })();
@@ -111,7 +104,7 @@ Chart.defaults.borderColor = "#2a2d3a";
 
   const isTraditional = (n) => n.includes("PNG") || n.includes("WebP");
   const isOurs = (n) => n.includes("(Ours)");
-  // 过滤掉 bpd=null 的占位行（如 DMoL TBD），lollipop 图只画已落地结果
+  // 过滤掉 bpd=null 的占位行，lollipop 图只画已落地结果
   const traditional = data.methods.filter(m => isTraditional(m.name) && m.bpd !== null);
   const neural = data.methods.filter(m => !isTraditional(m.name) && m.bpd !== null)
                              .sort((a, b) => a.bpd - b.bpd);
@@ -373,7 +366,7 @@ Chart.defaults.borderColor = "#2a2d3a";
   data.scales.forEach(s => {
     const pct = (s.tokens / total * 100).toFixed(1);
     const tr = document.createElement("tr");
-    tr.innerHTML = `<td>${s.scale}</td><td>${s.resolution}</td><td>${s.tokens}</td><td>${pct}%</td><td>${s.head || "—"}</td>`;
+    tr.innerHTML = `<td>${s.scale}</td><td>${s.resolution}</td><td>${s.tokens}</td><td>${pct}%</td>`;
     tbody.appendChild(tr);
   });
 })();
