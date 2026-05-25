@@ -39,6 +39,7 @@ import argparse
 import yaml
 import math
 import torch
+import torch.nn.functional as F
 import numpy as np
 from contextlib import nullcontext
 
@@ -155,6 +156,128 @@ def evaluate_model(model, loader, device, amp_dtype=None, tta_hflip: bool = Fals
         extras["ce_fine"] = ce_f_sum / n_total
         extras["ctx_alpha"] = alpha_sum / n_total
     return bpd_mean, bpd_std, bpd_per_batch, extras
+
+
+def _tokenize_targets(x: torch.Tensor) -> torch.Tensor:
+    """与 IGPT._tokenize 同口径：RGB float [0,1] → pixel-first long token (B, T-1)。
+
+    用于 ensemble 路径在外部独立 tokenize 一次（每个 model 拿到的 x 一样，token
+    序列必然相同），避免对 K 个 model 重复 .tokenize。返回的 target 已做 NTP 切片
+    `tokens[:, 1:]`，与 IGPT.forward 内部一致。
+    """
+    xt = x.clamp(0, 1)
+    xt = (xt * 255).round().long()
+    tokens = xt.permute(0, 2, 3, 1).reshape(x.size(0), -1)
+    return tokens[:, 1:]
+
+
+@torch.no_grad()
+def evaluate_ensemble(models, loader, device, amp_dtype=None, tta_hflip: bool = False):
+    """多 ckpt logit ensemble 评测（log-prob 域平均）。
+
+    每 batch：K 个 model 各 forward 拿 fine logits → log-softmax → K 档逐元素
+    平均 → gather target → fine NLL；coarse 走每档 ce_coarse 数值平均（每档 coarse
+    架构相同、训自同一轨迹的不同平滑，数值平均近似 coarse-ensemble bpd）。
+    bpd_total = (CE_c_avg·N_c + CE_f_ens·N_f) / ln2 / N_f，与 cc_igpt.forward 同口径。
+
+    与 --tta_hflip 正交：TTA 路径在 evaluate_model 上是"x 与 hflip(x) 各跑一次取
+    batch-mean CE 均值"；ensemble 路径同口径——hflip(x) 也跑 K 档 ensemble 取
+    fine NLL，再与原序 NLL 取均值。
+
+    Why log-prob 域而非 prob 域：log-prob 平均对应 ensemble likelihood 的
+    geometric mean，更接近真 ensemble 似然下界（Jensen 收紧）；prob 域算术平均
+    会产生过自信误差，文献 (Hinton et al., "Distilling the Knowledge in a NN"
+    2015) 已证 log-prob 域更稳。
+
+    DMoL 路径不支持：fine head 输出是 K-mix 参数 (B, T, K*3) 而非 logits，
+    log-softmax 不可直接套用；此处 assert 拦截。
+    """
+    for m in models:
+        m.eval()
+
+    bpd_per_batch = []
+    bpd_weighted_sum = 0.0
+    bpd_sq_weighted_sum = 0.0
+    n_total = 0
+    use_amp = amp_dtype is not None and device.type == 'cuda'
+    K = len(models)
+
+    is_ccigpt = False
+    ce_c_sum = ce_f_sum = alpha_sum = 0.0
+
+    def _ensemble_fine_nll(x_in, target):
+        """K 档 forward → log-softmax 平均 → gather target → mean NLL (scalar tensor)。
+
+        副作用：把每档 ce_coarse / ctx_alpha 通过 closure 写进 ce_c_local / alpha_local
+        以便外层做 batch-mean 累加。
+        """
+        log_probs_stack = []
+        ce_c_local = []
+        alpha_local = []
+        amp_ctx = autocast(device_type="cuda", dtype=amp_dtype) if use_amp else nullcontext()
+        for m in models:
+            with amp_ctx:
+                out = m(x_in)
+            assert out.get("logits") is not None, (
+                "ensemble 评测要求 forward 返回 logits（softmax 路径）；DMoL head "
+                "返回 logits=None，不支持 logit ensemble"
+            )
+            log_probs_stack.append(F.log_softmax(out["logits"].float(), dim=-1))
+            if "ce_loss_coarse" in out and out["ce_loss_coarse"] is not None:
+                ce_c_local.append(out["ce_loss_coarse"].item())
+                if "ctx_alpha" in out and out["ctx_alpha"] is not None:
+                    alpha_local.append(out["ctx_alpha"].item())
+        log_probs_avg = torch.stack(log_probs_stack, dim=0).mean(dim=0)   # (B, T-1, V)
+        nll_per_tok = -log_probs_avg.gather(-1, target.unsqueeze(-1)).squeeze(-1)
+        return nll_per_tok.mean(), ce_c_local, alpha_local
+
+    for batch in loader:
+        x = batch[0] if isinstance(batch, (list, tuple)) else batch
+        x = x.to(device)
+        B = x.size(0)
+
+        target = _tokenize_targets(x)
+        ce_fine, ce_c_x, alpha_x = _ensemble_fine_nll(x, target)
+
+        if tta_hflip:
+            x_flip = torch.flip(x, dims=[-1])
+            target_flip = _tokenize_targets(x_flip)
+            ce_fine_flip, ce_c_flip, _ = _ensemble_fine_nll(x_flip, target_flip)
+            ce_fine = (ce_fine + ce_fine_flip) * 0.5
+            if ce_c_x and ce_c_flip:
+                ce_c_x = [(a + b) * 0.5 for a, b in zip(ce_c_x, ce_c_flip)]
+
+        ce_fine_val = ce_fine.item()
+
+        if ce_c_x:
+            is_ccigpt = True
+            ce_coarse_val = sum(ce_c_x) / len(ce_c_x)
+            N_c = models[0].coarse.seq_len
+            N_f = models[0].fine.seq_len
+            bpd_val = (ce_coarse_val * N_c + ce_fine_val * N_f) / math.log(2.0) / N_f
+            ce_c_sum += ce_coarse_val * B
+            ce_f_sum += ce_fine_val * B
+            if alpha_x:
+                alpha_sum += (sum(alpha_x) / len(alpha_x)) * B
+        else:
+            bpd_val = ce_fine_val / math.log(2.0)
+
+        bpd_per_batch.append(bpd_val)
+        bpd_weighted_sum += bpd_val * B
+        bpd_sq_weighted_sum += (bpd_val ** 2) * B
+        n_total += B
+
+    bpd_mean = bpd_weighted_sum / n_total
+    bpd_var = max(bpd_sq_weighted_sum / n_total - bpd_mean ** 2, 0.0)
+    bpd_std = float(math.sqrt(bpd_var))
+
+    extras = {"K": K}
+    if is_ccigpt:
+        extras["ce_coarse"] = ce_c_sum / n_total
+        extras["ce_fine"] = ce_f_sum / n_total
+        extras["ctx_alpha"] = alpha_sum / n_total
+    return bpd_mean, bpd_std, bpd_per_batch, extras
+
 
 
 
@@ -397,6 +520,50 @@ def cmd_swa(args, config, device):
     print()
 
 
+def cmd_ensemble(args, config, device):
+    """多 ckpt logit ensemble 评测（log-prob 域平均，best/swa/ema 等同源平滑组合）。"""
+    test_dataset, dataset_name = _load_dataset(config)
+    test_loader = DataLoader(test_dataset, batch_size=args.batch_size,
+                             shuffle=False, num_workers=2, pin_memory=True)
+    print(f"Dataset: {dataset_name} test ({len(test_dataset)} images)")
+
+    ckpt_paths = [p.strip() for p in args.ensemble.split(',') if p.strip()]
+    assert len(ckpt_paths) >= 2, (
+        f"--ensemble 至少需要 2 个 ckpt，got {len(ckpt_paths)}"
+    )
+
+    mcfg = config["model"]
+    model_type = mcfg.get("type", "igpt")
+    amp_dtype, amp_dtype_str = _get_amp_dtype(config)
+
+    print(f"Loading {len(ckpt_paths)} ckpts for ensemble...")
+    models = []
+    for path in ckpt_paths:
+        m = _build_from_config(mcfg, device)
+        epoch = _load_checkpoint(m, path, device)
+        print(f"  {os.path.basename(path)} (epoch {epoch})")
+        models.append(m)
+
+    print(f"\n评测中... (AMP: {amp_dtype_str}, TTA hflip: {args.tta_hflip}, K={len(models)})")
+    bpd_mean, bpd_std, _, extras = evaluate_ensemble(
+        models, test_loader, device,
+        amp_dtype=amp_dtype, tta_hflip=args.tta_hflip,
+    )
+    print(f"{model_type.upper()} ensemble bits/dim: {bpd_mean:.4f} ± {bpd_std:.4f}")
+    if "ce_coarse" in extras:
+        ce_c, ce_f = extras["ce_coarse"], extras["ce_fine"]
+        N_c = models[0].coarse.seq_len
+        N_f = models[0].fine.seq_len
+        bpd_c_share = ce_c * N_c / math.log(2.0) / N_f
+        bpd_f_share = ce_f * N_f / math.log(2.0) / N_f
+        print(f"  CE_coarse = {ce_c:.4f}  → bpd_share = {bpd_c_share:.4f} ({100*bpd_c_share/bpd_mean:.1f}%)")
+        print(f"  CE_fine   = {ce_f:.4f}  → bpd_share = {bpd_f_share:.4f} ({100*bpd_f_share/bpd_mean:.1f}%)")
+        print(f"  ctx_alpha = {extras['ctx_alpha']:.4f}  (K-档平均)")
+
+    print_results_table(dataset_name, bpd_mean, bpd_std, None,
+                        model_label=f"{model_type.upper()} ensemble (K={len(models)}, Ours)")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="iGPT 无损压缩评测",
@@ -410,12 +577,22 @@ def main():
   # SWA 对比
   python scripts/evaluate.py --config configs/ccigpt_cifar10_s_rgb_ronly.yaml \\
       --checkpoint experiments/ccigpt_cifar10_s_rgb_ronly/checkpoints/best.pth --swa
+
+  # 多 ckpt logit ensemble (log-prob 域平均；best/swa/ema 三档同源平滑组合)
+  python scripts/evaluate.py --config configs/ccigpt_cifar10_s_rgb_ronly_v2.yaml \\
+      --ensemble experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/best.pth,\\
+experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/swa.pth,\\
+experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/ema.pth \\
+      --tta_hflip
         """
     )
     parser.add_argument('--config', type=str, required=True,
                         help='配置文件路径')
     parser.add_argument('--checkpoint', type=str, default=None,
                         help='模型 checkpoint 路径（best.pth）')
+    parser.add_argument('--ensemble', type=str, default=None,
+                        help='多 ckpt logit ensemble，逗号分隔 ckpt 路径列表 '
+                             '（与 --checkpoint 互斥；至少 2 个 ckpt）')
     parser.add_argument('--traditional', action='store_true',
                         help='同时计算 PNG/WebP 传统方法 bits/dim')
     parser.add_argument('--swa', action='store_true',
@@ -426,6 +603,11 @@ def main():
                         help='评测 batch size')
     args = parser.parse_args()
 
+    if args.ensemble and args.checkpoint:
+        parser.error("--ensemble 与 --checkpoint 互斥；ensemble 路径在 --ensemble 内逗号分隔")
+    if args.ensemble and args.swa:
+        parser.error("--ensemble 与 --swa 互斥；ensemble 已包含多档 ckpt 评测")
+
     with open(args.config, 'r') as f:
         config = yaml.safe_load(f)
 
@@ -433,12 +615,14 @@ def main():
     print(f"Device: {device}")
 
     # 根据模式分发
-    if args.swa and args.checkpoint:
+    if args.ensemble:
+        cmd_ensemble(args, config, device)
+    elif args.swa and args.checkpoint:
         cmd_swa(args, config, device)
     elif args.checkpoint:
         cmd_single(args, config, device)
     else:
-        parser.error("请指定 --checkpoint")
+        parser.error("请指定 --checkpoint 或 --ensemble")
 
 
 if __name__ == '__main__':
