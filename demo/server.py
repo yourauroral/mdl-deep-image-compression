@@ -219,10 +219,11 @@ def _get_cached_model(device):
             from scripts.train import _build_ccigpt_from_config
             model = _build_ccigpt_from_config(mcfg, device)
 
-            # weights_only=False 仅在 demo 加载本地受信 checkpoint 时使用（含 epoch/optimizer
-            # 等非 tensor 字段，weights_only=True 会失败）。若部署到公网或允许第三方上传
-            # checkpoint，必须切换到 weights_only=True 并改造为只接收 state_dict。
-            ckpt = torch.load(str(ckpt_path), map_location=device, weights_only=False)
+            # best.pth 是裸 state_dict（torch.save(model.state_dict())），不含
+            # optimizer/epoch 等 Python 对象，可安全使用 weights_only=True
+            # 杜绝 pickle RCE。若未来需加载 epoch_*.pth 这类含训练状态的 ckpt，
+            # 改回 False 并保证 ckpt 来源受信。
+            ckpt = torch.load(str(ckpt_path), map_location=device, weights_only=True)
             from src.mdlic.utils import clean_state_dict
             if "model_state_dict" in ckpt:
                 model.load_state_dict(clean_state_dict(ckpt["model_state_dict"]))
