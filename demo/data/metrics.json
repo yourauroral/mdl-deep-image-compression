@@ -1,8 +1,6 @@
 {
   "dataset": "CIFAR-10",
   "methods": [
-    {"name": "PNG (lossless)",          "category": "Classical codecs",              "bpd": 5.87,   "std": null,   "note": "Hoogeboom 2019 报告"},
-    {"name": "WebP (lossless)",         "category": "Classical codecs",              "bpd": 4.61,   "std": null,   "note": "Hoogeboom 2019 报告"},
     {"name": "PixelCNN++",              "category": "Autoregressive density models", "bpd": 2.92,   "std": null,   "note": "Salimans 2017, 52M"},
     {"name": "Image Transformer",       "category": "Autoregressive density models", "bpd": 2.90,   "std": null,   "note": "Parmar 2018, 95M"},
     {"name": "PixelSNAIL",              "category": "Autoregressive density models", "bpd": 2.85,   "std": null,   "note": "Chen 2018, 380M"},

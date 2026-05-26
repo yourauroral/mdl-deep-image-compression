@@ -91,18 +91,15 @@ Chart.defaults.borderColor = "#2a2d3a";
 })();
 
 // ── Panel 2: bits/dim 对比 ──
-// 设计：传统方法 (PNG ~5.87, WebP ~5.02) 与神经 AR (~2.81-2.97) 量级差异过大，
-// 同图柱状图会把神经方法间的差异挤成视觉噪声。改为聚焦神经 AR 的 lollipop 图，
-// 横轴聚焦 2.70-3.05，数值标签贴在点末端；传统方法放表格 / 副标题作为上下文。
+// 设计：聚焦神经 AR 方法之间的 bits/dim 差异（~2.81-2.97）。
+// 横轴聚焦 2.70-3.05，数值标签贴在点末端。
 (async function initMetrics() {
   const data = await fetchJSON("/api/metrics");
   if (!data) return;
 
-  const isTraditional = (n) => n.includes("PNG") || n.includes("WebP");
   const isOurs = (n) => n.includes("(Ours)");
   // 过滤掉 bpd=null 的占位行，lollipop 图只画已落地结果
-  const traditional = data.methods.filter(m => isTraditional(m.name) && m.bpd !== null);
-  const neural = data.methods.filter(m => !isTraditional(m.name) && m.bpd !== null)
+  const neural = data.methods.filter(m => m.bpd !== null)
                              .sort((a, b) => a.bpd - b.bpd);
 
   const labels = neural.map(m => m.name);
@@ -116,14 +113,13 @@ Chart.defaults.borderColor = "#2a2d3a";
 
   const ourBest = neural.find(m => isOurs(m.name));
 
-  // 副标题：传统方法上下文 + 主结果（取 Ours 中 bpd 最低的一行）
+  // 副标题：仅展示主结果（取 Ours 中 bpd 最低的一行）
   const desc = document.createElement("p");
   desc.className = "panel-desc";
   desc.innerHTML =
-    `聚焦神经自回归方法 (bits/dim ∈ [2.7, 3.0])。传统无损基线作为参照: ` +
-    traditional.map(m => `<b>${m.name.replace(" (lossless)", "")}</b> ${m.bpd.toFixed(2)}`).join(" · ") +
+    `聚焦神经自回归方法 (bits/dim ∈ [2.7, 3.0])。` +
     (ourBest
-      ? ` &nbsp;|&nbsp; <span style="color:#6c8cff">${ourBest.name} <b>${ourBest.bpd.toFixed(4)}</b> bits/dim</span>`
+      ? `<span style="color:#6c8cff">${ourBest.name} <b>${ourBest.bpd.toFixed(4)}</b> bits/dim</span>`
       : "");
   const panel = document.getElementById("panel-metrics");
   const chartCt = panel.querySelector(".chart-container");
@@ -223,7 +219,7 @@ Chart.defaults.borderColor = "#2a2d3a";
     plugins: [overlayPlugin]
   });
 
-  // 表格保留全部方法（含 PNG/WebP + 待回填的 TBD 行）作为完整数据展示
+  // 表格保留 TBD 占位行作为完整数据展示
   const tbody = document.querySelector("#table-metrics tbody");
   data.methods.forEach(m => {
     const tr = document.createElement("tr");
