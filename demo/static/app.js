@@ -81,11 +81,7 @@ Chart.defaults.borderColor = "#2a2d3a";
       } else {
         hmImg.hidden = true;
         hmPlaceholder.hidden = false;
-        if (data.model_type === "ccigpt") {
-          hmPlaceholder.textContent = "CC-iGPT 含 coarse 子分支，per-position 热力图未实现";
-        } else {
-          hmPlaceholder.textContent = "热力图不可用";
-        }
+        hmPlaceholder.textContent = "热力图不可用";
       }
     } catch (e) {
       bpdEl.textContent = "离线";

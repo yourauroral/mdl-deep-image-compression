@@ -102,7 +102,9 @@ def predict(file: UploadFile = File(...)):
     """
     上传一张图片，返回:
       - bpd: 整体 bits/dim（CC-iGPT 为 bpd_total，iGPT 由 CE 推算）
-      - heatmap: base64 编码的 BPP 热力图 PNG（仅 iGPT；单位 bits/pixel = bpd × C）
+      - heatmap: base64 编码的 fine 分支 BPP 热力图 PNG
+                 （单位 bits/pixel = bpd × C；CC-iGPT 仅画 fine 段，
+                 coarse 8×8 的 ~2% overhead 不在该图上）
 
     注：sync def 形式让 FastAPI 自动放进 threadpool，避免 GPU forward 阻塞
     event loop（async def 里直接调 model(x) 会卡住其它并发请求）。
@@ -154,9 +156,10 @@ def predict(file: UploadFile = File(...)):
         if "ctx_alpha" in out and out["ctx_alpha"] is not None:
             extras["ctx_alpha"] = round(out["ctx_alpha"].item(), 4)
 
-    # Per-position 热力图：仅 iGPT 单尺度（CC-iGPT 多尺度 NLL 拆分热力图未实现）
+    # Per-position 热力图：对 fine 分支（CC-iGPT）或单尺度 GPT（iGPT）的
+    # logits 计算 per-token CE，画 32×32 bits/pixel 热力图。
     heatmap_b64 = None
-    if model_type == "igpt" and out.get("logits") is not None:
+    if out.get("logits") is not None:
         heatmap_b64 = _make_heatmap_b64(model, x, out["logits"])
 
     return JSONResponse({
@@ -188,14 +191,14 @@ def _get_cached_model(device):
         import yaml
         import torch
 
-        # 按优先级尝试主路径 ckpt：v2 深窄主跑 → R-only softmax 主表 → iGPT-S baseline。
+        # 按优先级尝试主路径 ckpt：v2 深窄主跑 → R-only softmax 主表（v1）。
+        # iGPT 单尺度 baseline 已退出主线（Phase A 历史），不再作为 fallback。
         configs_dir = ROOT / "configs"
         experiments_dir = ROOT / "experiments"
 
         for cfg_name in [
             "ccigpt_cifar10_s_rgb_ronly_v2.yaml",
             "ccigpt_cifar10_s_rgb_ronly.yaml",
-            "igpt_cifar10_s_rgb.yaml",
         ]:
             cfg_path = configs_dir / cfg_name
             if not cfg_path.exists():
@@ -208,13 +211,13 @@ def _get_cached_model(device):
                 continue
 
             mcfg = config["model"]
-            model_type = mcfg.get("type", "igpt")
+            model_type = mcfg.get("type")
+            assert model_type == "ccigpt", (
+                f"demo 主线只支持 CC-iGPT，{cfg_name} 的 model.type={model_type!r} 不匹配"
+            )
 
-            from scripts.train import _build_model_from_config, _build_ccigpt_from_config
-            if model_type == "ccigpt":
-                model = _build_ccigpt_from_config(mcfg, device)
-            else:
-                model = _build_model_from_config(mcfg, device)
+            from scripts.train import _build_ccigpt_from_config
+            model = _build_ccigpt_from_config(mcfg, device)
 
             # weights_only=False 仅在 demo 加载本地受信 checkpoint 时使用（含 epoch/optimizer
             # 等非 tensor 字段，weights_only=True 会失败）。若部署到公网或允许第三方上传
@@ -235,20 +238,25 @@ def _get_cached_model(device):
 
 
 def _make_heatmap_b64(model, x, logits):
-    """根据已计算的 logits 生成 32×32 BPP 热力图 (bits/pixel)，返回 base64 PNG。
+    """根据已计算的 fine logits 生成 32×32 BPP 热力图 (bits/pixel)，返回 base64 PNG。
 
-    复用 predict() 中已经做过的 forward，避免重复计算。单位是 bits/pixel
-    （对 C 通道求和），与 /api/predict 主返回字段 bpd (bits/dim) 差 C 倍。
+    支持 iGPT 与 CC-iGPT 两种模型：iGPT 直接用自身 _tokenize；CC-iGPT 用
+    fine 子分支的 _tokenize（coarse 分支的 8×8 不贡献热力图，其 ~2% 比特
+    overhead 作为常数底色已隐含在 bpd_total 主指标中）。
+
+    单位 bits/pixel（沿 C 通道求和），与 /api/predict 主返回字段 bpd
+    (bits/dim) 差 C 倍。
     """
     import torch
     import torch.nn.functional as F
 
-    H = W = model.image_size
-    C = model.in_channels
+    # iGPT 自身就是 token model；CC-iGPT 把 token model 包在 .fine 下
+    token_model = getattr(model, "fine", model)
+    H = W = token_model.image_size
+    C = token_model.in_channels
 
     logits = logits.float()
-    # 复用模型自身的 tokenize 路径（RGB-bit-exact, pixel-first）
-    tokens = model._tokenize(x.clamp(0, 1))
+    tokens = token_model._tokenize(x.clamp(0, 1))
     target = tokens[:, 1:]
 
     per_token_ce = F.cross_entropy(
