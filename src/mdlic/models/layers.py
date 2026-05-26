@@ -83,6 +83,18 @@ except ImportError:
     _fused_attn_rope = None
     _USE_FUSED_ATTN_ROPE = False
 
+# Fused CE + z-loss Triton kernel（可选，仅用于状态汇报）：
+# 实际调用点在 igpt.py 的 forward 末段，将 softmax + cross-entropy + z-loss
+# 合并为单次 kernel launch，避免实例化 (B·T, V) logits/prob 矩阵。
+# 若 Triton 不可用，igpt.py 自动回退到 F.cross_entropy + logsumexp。
+# Ref: Liger-Kernel arXiv:2410.10989（手写实现）。
+try:
+    from ..ops.fused_ce_zloss import fused_cross_entropy_zloss as _fused_ce_zloss_status  # noqa: F401
+    _USE_FUSED_CE_ZLOSS = True
+except ImportError:
+    _fused_ce_zloss_status = None
+    _USE_FUSED_CE_ZLOSS = False
+
 
 def get_fused_kernel_status() -> dict:
     """
@@ -95,6 +107,7 @@ def get_fused_kernel_status() -> dict:
         "fused_rope": _USE_FUSED_ROPE,
         "fused_add_rms_norm": _USE_FUSED_ADD_RMSNORM,
         "fused_attn_rope": _USE_FUSED_ATTN_ROPE,
+        "fused_ce_zloss": _USE_FUSED_CE_ZLOSS,
     }
 
 class RotaryEmbedding(nn.Module):
