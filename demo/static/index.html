@@ -73,7 +73,7 @@
 <!-- Panel 3: Linear Probe -->
 <section class="panel" id="panel-probe">
   <h2>Linear Probe 各层分类准确率</h2>
-  <p class="panel-desc">冻结预训练模型，在各层 hidden state 上训练线性分类器，衡量表征质量 (Chen et al., 2020)</p>
+  <p class="panel-desc">冻结预训练模型，在各层 hidden state 上训练线性分类器，衡量表征质量 (Chen et al., 2020)。当前展示 iGPT-S baseline 占位数据，CC-iGPT v2 的 with/without α·coarse_ctx 消融对比待 v2 200ep 完跑后回填。</p>
   <div class="chart-container">
     <canvas id="chart-probe"></canvas>
   </div>
@@ -96,7 +96,7 @@
     <canvas id="chart-scales"></canvas>
   </div>
   <table id="table-scales" class="data-table">
-    <thead><tr><th>分支</th><th>分辨率</th><th>Token 数</th><th>占比</th></tr></thead>
+    <thead><tr><th>分支</th><th>分辨率</th><th>Token 数</th><th>Token 占比</th><th>bpd 占比</th></tr></thead>
     <tbody></tbody>
   </table>
 </section>

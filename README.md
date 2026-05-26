@@ -36,9 +36,8 @@ pip install torch torchvision pyyaml numpy pillow tensorboard triton
 ```
 
 ```bash
-# 单元测试 + 前向 dry-run
+# 单元测试（WSL CPU 即可）
 pytest tests/ -v
-python scripts/dryrun_forward.py
 
 # 训练 — 多卡 DDP (按 GPU 数调整 nproc_per_node)
 torchrun --nproc_per_node=2 scripts/train.py --config configs/igpt_cifar10_s_rgb.yaml

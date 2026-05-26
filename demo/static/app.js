@@ -349,16 +349,27 @@ Chart.defaults.borderColor = "#2a2d3a";
       maintainAspectRatio: false,
       plugins: {
         legend: { position: "right" },
-        title: { display: true, text: `总计 ${total} tokens (coarse + fine)`, color: "#e1e4ed" }
+        title: { display: true, text: `总计 ${total} tokens (coarse + fine)`, color: "#e1e4ed" },
+        tooltip: {
+          callbacks: {
+            label: (item) => {
+              const s = data.scales[item.dataIndex];
+              const tokenPct = (s.tokens / total * 100).toFixed(1);
+              const bpdPct = s.share_pct !== undefined ? `bpd 占比 ${s.share_pct}%` : null;
+              return [`tokens: ${s.tokens} (${tokenPct}%)`, bpdPct].filter(Boolean);
+            }
+          }
+        }
       }
     }
   });
 
   const tbody = document.querySelector("#table-scales tbody");
   data.scales.forEach(s => {
-    const pct = (s.tokens / total * 100).toFixed(1);
+    const tokenPct = (s.tokens / total * 100).toFixed(1);
+    const bpdPct = s.share_pct !== undefined ? `${s.share_pct}%` : "—";
     const tr = document.createElement("tr");
-    tr.innerHTML = `<td>${s.scale}</td><td>${s.resolution}</td><td>${s.tokens}</td><td>${pct}%</td>`;
+    tr.innerHTML = `<td>${s.scale}</td><td>${s.resolution}</td><td>${s.tokens}</td><td>${tokenPct}%</td><td>${bpdPct}</td>`;
     tbody.appendChild(tr);
   });
 })();
