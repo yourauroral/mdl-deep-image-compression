@@ -686,7 +686,9 @@ class TritonAttention(torch.autograd.Function):
 
         # ── Padding: seq_len 对齐到 BLOCK_MACRO 的倍数 ──
         # 避免 kernel grid 计算出 0 或者越界访问。
-        # Pad 区域填零，在 causal mask 下不影响非 pad 位置的结果。
+        # Pad 区域填零；在 causal=True 下，pad 的 key 仅被 pad 的 query 看到，
+        # 对非 pad 位置无影响。非 causal 路径需调用方自行屏蔽 pad key
+        # （当前训练栈所有调用点都是 causal=True）。
         ALIGN = BLOCK_MACRO  # 使用最大 block size 对齐
         PAD = (ALIGN - SEQ_LEN % ALIGN) % ALIGN
         if PAD > 0:
@@ -695,15 +697,6 @@ class TritonAttention(torch.autograd.Function):
             V = torch.nn.functional.pad(V, (0, 0, 0, PAD))
         SEQ_LEN_PADDED = SEQ_LEN + PAD
 
-        import os
-        if os.environ.get("DEBUG_MEM"):
-            free, total = torch.cuda.mem_get_info()
-            alloc = torch.cuda.memory_allocated() / 1024**3
-            reserved = torch.cuda.memory_reserved() / 1024**3
-            print(f"[flash_attn] Q.shape={tuple(Q.shape)} dtype={Q.dtype} "
-                  f"Q_size={Q.numel()*Q.element_size()/1024**2:.1f}MB | "
-                  f"alloc={alloc:.2f}GB reserved={reserved:.2f}GB "
-                  f"free={free/1024**3:.2f}GB/{total/1024**3:.2f}GB", flush=True)
         O = torch.empty_like(Q)
         stage = 3 if causal else 1
 

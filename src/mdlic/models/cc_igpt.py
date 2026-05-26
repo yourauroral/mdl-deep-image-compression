@@ -145,7 +145,7 @@ class CCIGPT(nn.Module):
           ce_loss_coarse / ce_loss_fine /
           bpd (bits/dim, 按 H·W·C 子像素数归一化；
                对应 BPD_total = (CE_c·N_c + CE_f·N_f) / ln2 / N_f) /
-          ctx_alpha (detached) / logits (fused path 下为 None)
+          ctx_alpha (detached) / logits (fine 分支 (B, T_f-1, V) fp32)
         """
         x = x.clamp(0, 1).to(torch.float32)              # encoder/decoder 一致性
         x_c_full = F.adaptive_avg_pool2d(x, self.coarse_size)

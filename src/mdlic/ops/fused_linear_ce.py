@@ -1,7 +1,21 @@
 """
-Fused Linear Cross-Entropy Triton Kernel — 将 output head 线性投影与 CE+z-loss 合并。
+Fused Linear Cross-Entropy Triton Kernel.
 
-=== 动机 ===
+╔══════════════════════════════════════════════════════════════════════╗
+║  ⚠ 反面案例 — 不要在训练栈中使用 ⚠                                  ║
+║                                                                      ║
+║  在本工作的 V=256 视觉 token 场景下经 roofline 分析判定为负收益：   ║
+║  fwd 慢 ~100×、fwd+bwd 慢 ~200× vs PyTorch (Linear + CE) 路径。     ║
+║  保留本文件仅作:                                                     ║
+║    1) 论文 §3.2 反面案例的可复现代码                                ║
+║    2) `scripts/profile_kernels.py` 的 roofline 对照基准              ║
+║                                                                      ║
+║  详见 `experiments/kernel_negative_finding.md`。                     ║
+║                                                                      ║
+║  训练栈实际使用 `PyTorch Linear + fused_ce_zloss` 组合。            ║
+╚══════════════════════════════════════════════════════════════════════╝
+
+=== 动机（设计时假设） ===
 标准流程（2 步，O(B*T*V) 中间张量）:
   1. logits = hidden @ W^T          → (B*T, V) 中间 logits 张量
   2. loss = CE(logits, targets)      → 读 (B*T, V) logits

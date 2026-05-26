@@ -1,25 +1,23 @@
 """
-Fused Attention + RoPE — 将 RoPE 旋转与 Flash Attention 合并为单次 autograd 操作。
+Fused Attention + RoPE — RoPE 旋转 + Flash Attention 的便捷包装。
 
-标准流程（3 步 HBM IO）:
-  1. RoPE: 读 Q/K → 旋转 → 写 Q'/K'     (2 次 HBM 读写)
-  2. Attn:  读 Q'/K'/V → attention → 写 O  (3 次 HBM 读写)
-  总计 Q/K 被读写 2 次。
+实现方式:
+  1. fused_apply_rotary_emb(q, k, cos, sin)  → out-of-place 旋转后的 q', k'
+  2. TritonAttention.apply(q', k', v, ...)    → flash attention 输出 O
 
-Fused 流程（2 步 HBM IO）:
-  1. RoPE 就地旋转 Q/K（fused_rope kernel，1 次读写）
-  2. Flash Attention 直接使用旋转后的 Q'/K'（1 次读）
-  在单个 autograd Function 中完成，避免中间 Q'/K' 的额外存储。
+收益（相对手写 PyTorch 的 attention + apply_rotary_emb 路径）:
+  - RoPE 的 cos/sin 乘加 + half-permute 在 fused_rope kernel 内完成，
+    省去 PyTorch 路径上额外的 chunk/cat 中间张量
+  - Attention 直接走 flash_attn kernel，softmax + matmul 不物化 attention scores
 
-核心收益:
-  - 减少 1 次 Q/K 的 HBM 写（RoPE 就地修改后直接被 Attn 读取）
-  - autograd 图合并: 只有 1 个 autograd node（vs 原来 RoPE + Attn 各 1 个）
-  - backward 时 RoPE 的反旋转通过保存 cos/sin 用 -sin 实现，无需额外 kernel
+注:
+  - autograd 图上仍是两个 Function node（fused_rope + TritonAttention），
+    本函数只是把它们写在同一个 forward 里，不构成单个融合 op
+  - q/k 是 out-of-place 旋转，不就地修改输入
 
 参考:
   [1] Su et al., "RoFormer," arXiv:2104.09864, 2021. RoPE.
   [2] Dao, "FlashAttention-2," arXiv:2307.08691, 2023.
-  [3] Hsu et al., "Liger Kernel," arXiv:2410.10989, 2024. Fused pattern.
 """
 
 import math
