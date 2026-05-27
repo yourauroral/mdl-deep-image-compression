@@ -241,6 +241,10 @@ def evaluate_ensemble(models, loader, device, amp_dtype=None, tta_hflip: bool = 
             ce_fine_flip, ce_c_flip, _ = _ensemble_fine_nll(x_flip, target_flip)
             ce_fine = (ce_fine + ce_fine_flip) * 0.5
             if ce_c_x and ce_c_flip:
+                assert len(ce_c_x) == len(ce_c_flip), (
+                    f"TTA ensemble: coarse CE 列表长度不一致 "
+                    f"(原序 K={len(ce_c_x)} vs hflip K={len(ce_c_flip)})"
+                )
                 ce_c_x = [(a + b) * 0.5 for a, b in zip(ce_c_x, ce_c_flip)]
 
         ce_fine_val = ce_fine.item()

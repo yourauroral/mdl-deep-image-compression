@@ -54,6 +54,26 @@ def test_forward_shapes_and_finite(small_ccigpt, device):
     assert 0.0 < bpd < 50.0
 
 
+def test_coarse_ctx_ar_shift_alignment(small_ccigpt, device):
+    """ctx[:, 1:] AR shift：_compute_coarse_ctx 输出长度必须 = fine.seq_len - 1
+    （PixelCNN++ conditional 标准语义：ctx[i] 与 fine 被预测位置 i 对齐）。
+    若忘记 [:, 1:]，shape 会错位但 forward 仍能跑（fine.token_embed 内部会
+    把超长 ctx 与 input embedding 对齐失败 → assert 命中）。"""
+    m = small_ccigpt
+    x = torch.rand(2, 3, 32, 32, device=device)
+    x_c = F.adaptive_avg_pool2d(x.clamp(0, 1), m.coarse_size)
+    if m.coarse.in_channels < m.in_channels:
+        x_c = x_c[:, :m.coarse.in_channels]
+    coarse_tokens = m.coarse._tokenize(x_c)
+    ctx = m._compute_coarse_ctx(coarse_tokens)
+    expected_T = m.fine.seq_len - 1     # NTP shift: 输入 [0..T-1]，预测 [1..T]
+    assert ctx.shape[1] == expected_T, (
+        f"coarse_ctx 长度 {ctx.shape[1]} != fine.seq_len-1 ({expected_T})；"
+        f"AR shift [:, 1:] 可能丢失"
+    )
+    assert ctx.shape[2] == m.fine.d_model
+
+
 def test_bpd_formula_consistency(small_ccigpt, device):
     """bpd_total = (CE_c · N_c + CE_f · N_f) / ln2 / N_f, 手算对照。"""
     x = torch.rand(2, 3, 32, 32, device=device)

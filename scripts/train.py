@@ -661,8 +661,12 @@ def main():
     ema_enabled = ema_cfg.get("enabled", False)
     ema_decay = float(ema_cfg.get("decay", 0.999))
     ema_state = None
+    _ema_tick = 0
+    # NaN 检查降频：每 N 个 ema 更新一次。每步 .item() 会触发 GPU→CPU 同步
+    # （在 32 层 ~600 参数上）；NaN 极其罕见，间隔 100 步检测一次足够保险。
+    _ema_nan_check_interval = 100
     if ema_enabled and rank == 0:
-        print(f"EMA enabled: decay={ema_decay}")
+        print(f"EMA enabled: decay={ema_decay} (NaN check every {_ema_nan_check_interval} ticks)")
 
     best_bpd = float('inf')
     start_epoch = 1
@@ -765,15 +769,19 @@ def main():
 
         NaN 守卫：与 SWA 同款 batched 检查 — EMA 是累积平均，单步 NaN
         会通过 (1-decay) 项渗入并永久污染；首次克隆时 NaN 也会让所有
-        后续 add_ 输出 NaN。检测到则跳过本 tick，下一步自动重试。
+        后续 add_ 输出 NaN。每 _ema_nan_check_interval 个 tick 检查一次，
+        避免每步 .item() GPU→CPU 同步。
         """
-        nonlocal ema_state
+        nonlocal ema_state, _ema_tick
         if not ema_enabled or rank != 0:
             return
-        has_nan = torch.stack([torch.isnan(p.data).any()
-                               for p in raw_model.parameters()]).any().item()
-        if has_nan:
-            return
+        _ema_tick += 1
+        do_nan_check = (_ema_tick % _ema_nan_check_interval == 0) or (ema_state is None)
+        if do_nan_check:
+            has_nan = torch.stack([torch.isnan(p.data).any()
+                                   for p in raw_model.parameters()]).any().item()
+            if has_nan:
+                return
         if ema_state is None:
             ema_state = {name: p.data.detach().float().clone()
                          for name, p in raw_model.named_parameters()}

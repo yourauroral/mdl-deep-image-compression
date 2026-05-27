@@ -65,7 +65,7 @@ app.mount("/static", StaticFiles(directory=Path(__file__).resolve().parent / "st
 
 
 @app.get("/")
-async def index():
+def index():
     return FileResponse(Path(__file__).resolve().parent / "static" / "index.html")
 
 
@@ -77,23 +77,25 @@ def _load_json(name: str) -> dict:
         return json.load(f)
 
 
+# JSON 端点用 sync def：FastAPI 自动放进 threadpool，避免 open()/json.load()
+# 同步 IO 阻塞 event loop（前端 4 个端点并发拉取时尤为重要）。
 @app.get("/api/metrics")
-async def get_metrics():
+def get_metrics():
     return _load_json("metrics.json")
 
 
 @app.get("/api/probe")
-async def get_probe():
+def get_probe():
     return _load_json("probe.json")
 
 
 @app.get("/api/kernels")
-async def get_kernels():
+def get_kernels():
     return _load_json("kernels.json")
 
 
 @app.get("/api/scales")
-async def get_scales():
+def get_scales():
     return _load_json("scales.json")
 
 

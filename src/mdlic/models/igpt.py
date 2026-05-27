@@ -39,7 +39,7 @@ class IGPT(nn.Module):
     N=4,
     h=4,
     d_ff=1024,
-    dropout=0.1,
+    dropout=0.0,
     activation_checkpointing: bool = False,
     drop_path: float = 0.0,
   ):
@@ -73,6 +73,13 @@ class IGPT(nn.Module):
     # Ref: Press & Wolf, "Using the Output Embedding to Improve Language Models," EACL 2017.
     self.head = nn.Linear(d_model, vocab_size, bias=False)
     self.head.weight = self.token_embed.weight
+
+    # 子像素 AR 的 channel_indices 与 position_ids 在每次 forward 中长度恒为
+    # seq_len-1（NTP shift），与 batch / device 无关。注册 persistent=False buffer
+    # 让 model.to(device) 自动迁移，避免每步 torch.arange 重建。
+    pos_seq = torch.arange(self.seq_len - 1)
+    self.register_buffer('_channel_indices', pos_seq % in_channels, persistent=False)
+    self.register_buffer('_position_ids',    pos_seq // in_channels, persistent=False)
 
     self._init_weights()
 
@@ -126,13 +133,15 @@ class IGPT(nn.Module):
         )
         hidden = hidden + coarse_ctx
 
+    # 默认序列长度 = seq_len-1（NTP shift）；buffer 已在 __init__ 算好。
+    # encode 路径下 input_tokens 长度也恒为 seq_len-1，T 与 buffer 一致。
     T = input_tokens.shape[1]
-    C = self.in_channels
-    channel_indices = torch.arange(T, device=input_tokens.device) % C
-    hidden = hidden + self.channel_embed(channel_indices).unsqueeze(0)
-    position_ids = torch.arange(T, device=input_tokens.device) // C
-
-    return hidden, position_ids
+    assert T == self._channel_indices.shape[0], (
+        f"input_tokens 长度 {T} 与缓存 channel_indices 长度 "
+        f"{self._channel_indices.shape[0]} 不匹配"
+    )
+    hidden = hidden + self.channel_embed(self._channel_indices).unsqueeze(0)
+    return hidden, self._position_ids
 
   def forward(self, x, z_loss_weight: float = 1e-4, coarse_ctx: torch.Tensor = None):
     """
@@ -157,12 +166,13 @@ class IGPT(nn.Module):
 
     z_w = float(z_loss_weight)
 
-    logits = self.head(hidden).float()
+    logits = self.head(hidden)
 
     # Fused CE + z-loss: 一次 kernel launch 完成 softmax → CE → z-loss
     # （V=256 下 Fused Linear+CE kernel 经 roofline 证伪、未采用，详见
     #  experiments/kernel_negative_finding.md）
     if _USE_FUSED_CE and logits.is_cuda and z_w > 0:
+        # kernel 内 .to(tl.float32) 完成所有累加，无需在外层再 cast
         ce_loss, z_loss = _fused_ce_zloss(
             logits.reshape(-1, self.vocab_size),
             target_tokens.reshape(-1),
@@ -170,7 +180,8 @@ class IGPT(nn.Module):
         )
         loss = ce_loss + z_w * z_loss
     else:
-        # PyTorch fallback
+        # PyTorch fallback：bf16 下 logsumexp 精度不足，cast 到 fp32 再算
+        logits = logits.float()
         ce_loss = F.cross_entropy(
           logits.reshape(-1, self.vocab_size),
           target_tokens.reshape(-1),

@@ -2,6 +2,11 @@
 """
 Quick forward pass sanity check — 验证模型构建和 forward 是否正常。
 
+⚠️ DO NOT RUN ON WSL — 历史上 dryrun_forward.py 在 WSL 上会触发
+   死机（Triton kernel 编译 + GPU 访问通路在 WSL 下不稳定）。
+   本脚本仅供 AutoDL 等真实 CUDA 环境使用；WSL 端的代码改动用 pytest
+   + 静态分析验证。
+
 包含:
   1. 默认配置 forward + weight tying / post-norm 验证
   2. CC-iGPT smoke (coarse + fine + ctx_alpha 梯度检查)
