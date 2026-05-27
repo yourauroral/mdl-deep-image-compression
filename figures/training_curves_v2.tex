@@ -1,16 +1,12 @@
-% CIFAR-10 R-only 训练曲线对比 (v1 100ep vs v2 200ep 深窄)
-% 编译: pdflatex training_curves.tex   (或 latexmk -pdf)
-% 嵌入论文: \input{figures/training_curves.tex}
+% CIFAR-10 R-only 训练曲线 — CC-iGPT v2 (深窄 200ep, 主表)
+% 编译: pdflatex training_curves_v2.tex   (或 latexmk -pdf)
+% 嵌入论文: \input{figures/training_curves_v2.tex}
 %
 % 数据:
-%   figures/training_curves.csv     —— v1 (N=24/d=512, 100ep, EMA 0.9995, SWA from ep90, warmup 3ep)
-%                                      100 epoch train_bpd + 50 val 点 (eval.interval=2)
 %   figures/training_curves_v2.csv  —— v2 (N=32/d=448, 200ep, EMA 0.9998, SWA from ep170, warmup 5ep)
 %                                      198 epoch train_bpd (ep135-136 缺, pgfplots 自动跳过) + 99 val 点
-%   landmark v1: ep1 train=11.37, ep10 val=3.60, ep50 val=3.00, ep90 SWA start, ep100 val=2.9038
 %   landmark v2: ep1 train=12.07, ep10 val=3.34, ep90 val=2.879, ep170 SWA start, ep200 val=2.8322,
 %                ep196 best val=2.8312 (in-training, 无 TTA/SWA/EMA/ensemble)
-%   主表数字 v1：100ep best val 2.9038 → +TTA hflip → 2.9035 (best+TTA, README L20)
 %   主表数字 v2：ensemble (best+SWA+EMA) + TTA hflip = 2.8296 ± 0.0854 (2026-05-27 实测)
 
 \documentclass[tikz,border=8pt]{standalone}
@@ -31,7 +27,7 @@
     xmin=0, xmax=205,
     ymin=2.5, ymax=12,
     ytick={3,4,6,8,10,12},
-    xtick={1,20,40,60,80,90,100,140,170,200},
+    xtick={1,20,40,60,80,100,140,170,200},
     x tick label style={font=\scriptsize},
     axis line style={gray!55},
     tick style={gray!55},
@@ -48,68 +44,51 @@
     clip=false,
 ]
 
-% --- SWA 启动竖虚线 ---
-\draw[densely dashed, gray!55, line width=0.4pt]
-    (axis cs:90, 2.5) -- (axis cs:90, 12);
-\node[font=\scriptsize, gray!55!black, anchor=south west, rotate=90]
-    at (axis cs:90, 2.5) {\,v1 SWA start};
+% --- SWA 启动竖虚线 (ep170) ---
 \draw[densely dashed, gray!35!orange, line width=0.4pt]
     (axis cs:170, 2.5) -- (axis cs:170, 12);
 \node[font=\scriptsize, orange!55!black, anchor=south west, rotate=90]
-    at (axis cs:170, 2.5) {\,v2 SWA start};
-
-% --- v1 train_bpd 曲线 ---
-\addplot+[
-    mark=none, line width=0.6pt, color=blue!40!black, densely dashed,
-] table[col sep=comma, x=epoch, y=train_bpd]
-    {training_curves.csv};
-\addlegendentry{v1 train bpd (100ep)}
-
-% --- v1 val_bpd 曲线 ---
-\addplot+[
-    mark=*, mark size=0.7pt, line width=0.6pt, color=orange!55!black, densely dashed,
-] table[col sep=comma, x=epoch, y=val_bpd]
-    {training_curves.csv};
-\addlegendentry{v1 val bpd (every 2 ep)}
+    at (axis cs:170, 2.5) {\,SWA start (last 31 ckpts)};
 
 % --- v2 train_bpd 曲线 ---
 \addplot+[
     mark=none, line width=0.8pt, color=blue!70!black,
 ] table[col sep=comma, x=epoch, y=train_bpd]
     {training_curves_v2.csv};
-\addlegendentry{v2 train bpd (200ep)}
+\addlegendentry{train bpd}
 
 % --- v2 val_bpd 曲线 ---
 \addplot+[
     mark=*, mark size=0.9pt, line width=0.8pt, color=orange!80!black,
 ] table[col sep=comma, x=epoch, y=val_bpd]
     {training_curves_v2.csv};
-\addlegendentry{v2 val bpd (every 2 ep)}
+\addlegendentry{val bpd (every 2 ep)}
 
-% --- v1 ep100 标注 ---
-\node[font=\scriptsize, orange!55!black, anchor=west]
-    at (axis cs:100, 2.9038)
-    {\,v1 ep100 best val \textbf{2.9038}\,$\to$\,+TTA $=$\,\textbf{2.9035}};
+% --- ep196 / ep200 末段标注（右端对齐到图内右上空白区，竖向拉开避免重叠）---
+\node[font=\scriptsize, orange!80!black, anchor=east] (annA)
+    at (axis cs:200, 4.5)
+    {ep196 best val \textbf{2.8312}\,$\to$\,ensemble$+$TTA $=$\,\textbf{2.8296}};
+\node[font=\scriptsize, orange!80!black, anchor=east] (annB)
+    at (axis cs:200, 3.8)
+    {ep200 in-training: SWA \textbf{2.8276} / EMA \textbf{2.8301}};
 
-% --- v2 ep200 标注 ---
-\node[font=\scriptsize, orange!80!black, anchor=west]
-    at (axis cs:200, 2.6)
-    {\,v2 ep200: SWA \textbf{2.8276} / EMA \textbf{2.8301} (in-training)};
-\node[font=\scriptsize, orange!80!black, anchor=west]
-    at (axis cs:200, 2.72)
-    {\,v2 ep196 best val \textbf{2.8312}\,$\to$\,ensemble+TTA $=$\,\textbf{2.8296}};
+% 引导虚线: 从标注指向 ep200 曲线末点 (~2.83)
+\draw[densely dotted, orange!60!black, line width=0.3pt]
+    (annA.south east) -- (axis cs:200, 2.83);
+\draw[densely dotted, orange!60!black, line width=0.3pt]
+    (annB.south east) -- (axis cs:200, 2.83);
 
 \end{axis}
 
 % --- 标题 ---
 \node[font=\footnotesize\bfseries, anchor=south]
     at (current bounding box.north)
-    {CC-iGPT R-only training curves (CIFAR-10, 100 vs 200 epochs, v1 vs v2)};
+    {CC-iGPT v2 R-only training curve};
 
 % --- 副标题（实验配置） ---
 \node[font=\scriptsize, gray!50!black, anchor=north, yshift=-2pt]
     at (current bounding box.south)
-    {\textit{v1: N=24/d=512 (76M) $\cdot$ warmup 3ep $\cdot$ EMA 0.9995 $\cdot$ SWA from ep 90 \quad|\quad v2: N=32/d=448 (82.95M) $\cdot$ warmup 5ep $\cdot$ EMA 0.9998 $\cdot$ SWA last 31 ckpts (start ep 170)}};
+    {\textit{N=32/d=448 (82.95M) $\cdot$ warmup 5ep $\cdot$ EMA 0.9998 $\cdot$ SWA last 31 ckpts (start ep 170) $\cdot$ ensemble (best+SWA+EMA) $+$ TTA hflip $=$ 2.8296 $\pm$ 0.0854}};
 
 \end{tikzpicture}
 \end{document}
