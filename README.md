@@ -67,9 +67,14 @@ python scripts/linear_probe.py --config configs/ccigpt_cifar10_s_rgb_ronly_v2.ya
 python scripts/profile_kernels.py --roofline
 
 # Demo 前端 (5 面板可视化：上传 → bpd 热力图 / baseline 对比 / Linear Probe / Kernel 性能 / coarse+fine 双尺度)
-# ckpt 优先级: v2 (2.8296 主表) → v1 历史 (2.9035)；启动后访问 http://localhost:8000
+# ckpt 优先级: v2 (2.8296 主表) → v1 历史 (2.9035)
 pip install fastapi uvicorn python-multipart
-uvicorn demo.server:app --reload --port 8000
+
+# 本地 / WSL: localhost 默认 8000
+uvicorn demo.server:app --reload --port 8000      # http://localhost:8000
+
+# AutoDL: 仅 6006 / 6008 端口可被公网映射，必须 --host 0.0.0.0
+uvicorn demo.server:app --host 0.0.0.0 --port 6006 --reload   # 见实例详情公网映射地址
 ```
 
 ### AutoDL 训练流程

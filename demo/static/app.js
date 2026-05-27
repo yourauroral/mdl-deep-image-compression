@@ -146,7 +146,8 @@ Chart.defaults.borderColor = "#2a2d3a";
       meta.data.forEach((bar, i) => {
         const name = neural[i].name;
         ctx.fillStyle = isOursMain(name) ? "#6c8cff" : (isOurs(name) ? "#8a9bd0" : "#cfd3e0");
-        ctx.fillText(values[i].toFixed(2), bar.x + 10, bar.y);
+        const truncated = (Math.trunc(values[i] * 100) / 100).toFixed(2);
+        ctx.fillText(truncated, bar.x + 10, bar.y);
       });
       ctx.restore();
     }
@@ -191,7 +192,8 @@ Chart.defaults.borderColor = "#2a2d3a";
             label: (item) => {
               const m = neural[item.dataIndex];
               const std = m.std ? ` ± ${m.std.toFixed(2)}` : "";
-              return [`bits/dim: ${m.bpd.toFixed(2)}${std}`, m.note];
+              const truncated = (Math.trunc(m.bpd * 100) / 100).toFixed(2);
+              return [`bits/dim: ${truncated}${std}`, m.note];
             }
           }
         }
