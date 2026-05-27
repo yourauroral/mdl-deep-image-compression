@@ -2,23 +2,30 @@ exp_name: "ccigpt_cifar10_s_rgb_ronly_v2"
 
 # CC-iGPT RGB-bit-exact + sub-pixel AR + R-only coarse — 深窄 200ep 版（v2）
 #
-# 与 v1 (ccigpt_cifar10_s_rgb_ronly.yaml, best+TTA 2.9035 主表) 的差异：
+# 与 v1 (ccigpt_cifar10_s_rgb_ronly.yaml, best+TTA 2.9035 v1 历史主表) 的差异：
 #   架构：N=24 → 32（深 33%），d_model=512 → 448（窄 12.5%），d_ff=1376 → 1216，
-#         h=8 → 7（保 d_k=64）；fine 参数 76M → 78M（净持平 +2.7%），coarse 不动。
+#         h=8 → 7（保 d_k=64）；fine 参数 76M → 78.14M（净持平 +2.8%），coarse 不动。
 #         深窄哲学参考 Sparse Transformer (Child 2019, N=128/d=256) / iGPT-XL，
 #         NLL 任务实证增益 -20~-50 mbpd。
 #   训练：epochs=100 → 200（吃欠拟合，token/param 1.3 → 2.6）；
 #         min_lr_ratio 0.0 → 0.05（cosine 末段 LR ≥ 5%·peak，避免 SWA 平均
 #         几乎相同的快照，Hagele §4.2）；
-#         swa.start_epoch 90 → 170（last 30ep 平均，与 200ep 同比例）；
+#         swa.start_epoch 90 → 170（last 31 ckpts 平均，start ep170 + interval 1）；
 #         ema.decay 0.9995 → 0.9998（200ep 长训需更长半衰期）；
 #         warmup 3 → 5（200ep + 深窄初期更平稳）；
 #         batch 64×2 → 48×3（32 层显存压力 +33%，bs ↓25% + accum ↑50%
 #         保 effective batch=144）。
 #
 # 其他字段 (lr/wd/dropout/drop_path/hflip/RandomCrop/clip/z_loss/coarse_*) 严格
-# 对齐 v1，控制变量。预期 best+TTA hflip → 2.84-2.87；叠 evaluate.py --ensemble
-# → 2.83-2.85。
+# 对齐 v1，控制变量。
+#
+# 训练前预测 (2026-05-25, 见 future.md §7.4)：best+TTA hflip → 2.84-2.87；
+#   叠 evaluate.py --ensemble → 2.83-2.85。
+# 训练后实测 (2026-05-27, 200ep 完成)：
+#   in-training (无 TTA / ensemble)：best val ep196 = 2.8312 ± 0.0909；
+#                                    SWA last 31 = 2.8276；EMA = 2.8301。
+#   主表 (ensemble best+SWA+EMA + TTA hflip): 2.8296 ± 0.0854 bpd
+#                       (超越 PixelSNAIL 380M 2.85, 逼近 Sparse Trans 59M 2.80)。
 
 model:
   type: ccigpt
@@ -27,7 +34,7 @@ model:
   vocab_size: 256
   pool_factor: 4
 
-  # fine 模型（深窄 ~78M）
+  # fine 模型（深窄 ~78.14M）
   d_model: 448                  # 512 → 448
   N: 32                         # 24 → 32
   h: 7                          # 8 → 7（d_k=64 不变）
@@ -71,7 +78,7 @@ train:
   min_lr_ratio: 0.05            # 新增：cosine 末段 LR 下限
   swa:
     enabled: true
-    start_epoch: 170            # 90 → 170（last 30ep）
+    start_epoch: 170            # 90 → 170（last 31 ckpts，ep170..200）
     update_interval: 1
   ema:
     enabled: true

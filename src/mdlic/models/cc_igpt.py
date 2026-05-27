@@ -34,15 +34,15 @@ class CCIGPT(nn.Module):
         in_channels=3,
         vocab_size=256,
         pool_factor=4,
-        # fine 模型（与 iGPT-S 一致）
+        # fine 模型（默认 v1 = iGPT-S, 76M；v2 通过 YAML 覆盖为 N=32/d=448, 78.14M）
         fine_d_model=512, fine_N=24, fine_h=8, fine_d_ff=1376,
-        # coarse 模型（小且浅）
+        # coarse 模型（小且浅，v1=v2 完全一致）
         coarse_d_model=256, coarse_N=6, coarse_h=4, coarse_d_ff=688,
         dropout=0.1,
         activation_checkpointing: bool = False,
         # coarse 通道数；None → 与 in_channels 一致。R-only 灰度先验传 1。
         coarse_in_channels: int = None,
-        # DropPath 仅作用于 fine（深 24 层），coarse 浅层 6 层不需要
+        # DropPath 仅作用于 fine（v1 24 层 / v2 32 层），coarse 浅层 6 层不需要
         drop_path: float = 0.0,
     ):
         super().__init__()

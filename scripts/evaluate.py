@@ -17,12 +17,12 @@ PixelCNN++ / Sparse Transformer 等基线原文口径一致；
 
 Usage:
     # 单模型评测 (主表数字)
-    python scripts/evaluate.py --config configs/ccigpt_cifar10_s_rgb_ronly.yaml \
-        --checkpoint experiments/ccigpt_cifar10_s_rgb_ronly/checkpoints/best.pth --tta_hflip
+    python scripts/evaluate.py --config configs/ccigpt_cifar10_s_rgb_ronly_v2.yaml \
+        --checkpoint experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/best.pth --tta_hflip
 
-    # SWA vs best 对比
-    python scripts/evaluate.py --config configs/ccigpt_cifar10_s_rgb_ronly.yaml \
-        --checkpoint experiments/ccigpt_cifar10_s_rgb_ronly/checkpoints/best.pth --swa
+    # SWA vs best 对比 (v2 配置启用了 SWA last 31 ckpts, start ep170)
+    python scripts/evaluate.py --config configs/ccigpt_cifar10_s_rgb_ronly_v2.yaml \
+        --checkpoint experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/best.pth --swa
 
 参考:
   [1] Shannon, "A Mathematical Theory of Communication," 1948.
@@ -567,12 +567,12 @@ def main():
         epilog="""
 示例:
   # 单模型 (主表数字 best + TTA hflip)
-  python scripts/evaluate.py --config configs/ccigpt_cifar10_s_rgb_ronly.yaml \\
-      --checkpoint experiments/ccigpt_cifar10_s_rgb_ronly/checkpoints/best.pth --tta_hflip
+  python scripts/evaluate.py --config configs/ccigpt_cifar10_s_rgb_ronly_v2.yaml \\
+      --checkpoint experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/best.pth --tta_hflip
 
-  # SWA 对比
-  python scripts/evaluate.py --config configs/ccigpt_cifar10_s_rgb_ronly.yaml \\
-      --checkpoint experiments/ccigpt_cifar10_s_rgb_ronly/checkpoints/best.pth --swa
+  # SWA 对比 (v2 配置启用了 SWA last 31 ckpts, start ep170)
+  python scripts/evaluate.py --config configs/ccigpt_cifar10_s_rgb_ronly_v2.yaml \\
+      --checkpoint experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/best.pth --swa
 
   # 多 ckpt logit ensemble (log-prob 域平均；best/swa/ema 三档同源平滑组合)
   python scripts/evaluate.py --config configs/ccigpt_cifar10_s_rgb_ronly_v2.yaml \\

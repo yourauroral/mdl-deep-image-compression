@@ -7,7 +7,7 @@
 %   Image Transformer   95M   2.90    Parmar et al., ICML 2018
 %   PixelSNAIL         380M   2.85    Chen et al., ICML 2018
 %   Sparse Transformer  59M   2.80    Child et al., 2019 (128 层 strided)
-%   CC-iGPT (Ours)     ~81M   2.90    本工作，R-only softmax 主表
+%   CC-iGPT v2 (Ours)  82.95M 2.8296  本工作，R-only ensemble (best+SWA+EMA) + TTA hflip (2026-05-27)
 \documentclass[tikz,border=8pt]{standalone}
 \usepackage{tikz}
 \usepackage{pgfplots}
@@ -22,7 +22,7 @@
     bar width=10pt,
     enlarge x limits=0.18,
     ymin=2.70, ymax=3.00,
-    ytick={2.70,2.75,2.80,2.85,2.90,2.95},
+    ytick={2.70,2.75,2.80,2.83,2.85,2.90,2.95},
     ylabel={\textbf{bits/dim}\ },
     ylabel near ticks,
     % 修复：明确指定所有5个x轴刻度，不再依赖xtick=data
@@ -49,28 +49,35 @@
 
 % 第5个柔和橘黄色柱子（单独绘制，完全独立，不会被覆盖）
 \addplot[draw=orange!70!black, fill=orange!30!yellow!80, bar shift=0pt] coordinates {
-    (Ours, 2.90)
+    (Ours, 2.8296)
 };
 
-% --- 关键参考线：Image Transformer 2.90 ---
+% --- 关键参考线 1：PixelSNAIL 2.85（Ours 超越的 baseline）---
 \draw[densely dashed, gray!50, line width=0.4pt]
-    ({rel axis cs:0,0}|-{axis cs:SparseTrans,2.90})
-    -- ({rel axis cs:1,0}|-{axis cs:SparseTrans,2.90});
+    ({rel axis cs:0,0}|-{axis cs:SparseTrans,2.85})
+    -- ({rel axis cs:1,0}|-{axis cs:SparseTrans,2.85});
 \node[font=\scriptsize, gray!55!black, anchor=west]
-    at ({rel axis cs:1.005,0}|-{axis cs:SparseTrans,2.90}) {2.90};
+    at ({rel axis cs:1.005,0}|-{axis cs:SparseTrans,2.85}) {2.85};
+
+% --- 关键参考线 2：Sparse Transformer 2.80（Ours 逼近的目标）---
+\draw[densely dashed, purple!40, line width=0.4pt]
+    ({rel axis cs:0,0}|-{axis cs:SparseTrans,2.80})
+    -- ({rel axis cs:1,0}|-{axis cs:SparseTrans,2.80});
+\node[font=\scriptsize, purple!55!black, anchor=west]
+    at ({rel axis cs:1.005,0}|-{axis cs:SparseTrans,2.80}) {2.80};
 
 % --- 手动标注bpd和参数量 ---
 \node[font=\scriptsize, align=center, yshift=4pt] at (axis cs:SparseTrans, 2.80) {2.80 59M};
 \node[font=\scriptsize, align=center, yshift=4pt] at (axis cs:PixelSNAIL, 2.85) {2.85 380M};
 \node[font=\scriptsize, align=center, yshift=4pt] at (axis cs:ImgTrans, 2.90) {2.90 95M};
 \node[font=\scriptsize, align=center, yshift=4pt] at (axis cs:PixelCNNpp, 2.92) {2.92 52M};
-\node[font=\scriptsize, align=center, orange!70!black, yshift=4pt] at (axis cs:Ours, 2.90) {2.90 \textbf{$\sim$81M}};
+\node[font=\scriptsize, align=center, orange!70!black, yshift=4pt] at (axis cs:Ours, 2.8296) {\textbf{2.83} \textbf{82.95M}};
 
 \end{axis}
 
 % --- 标题 ---
 \node[font=\footnotesize\bfseries, anchor=south, yshift=3pt]
-    at (current bounding box.north) {CIFAR-10 RGB-bit-exact};
+    at (current bounding box.north) {CIFAR-10 RGB-bit-exact (CC-iGPT v2 ensemble + TTA = 2.8296)};
 
 \end{tikzpicture}
 \end{document}

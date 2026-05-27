@@ -98,6 +98,7 @@ Chart.defaults.borderColor = "#2a2d3a";
   if (!data) return;
 
   const isOurs = (n) => n.includes("(Ours)");
+  const isOursMain = (n) => n.includes("v2 (Ours)");   // 主表数字（突出 v2，v1 作历史对照）
   // 过滤掉 bpd=null 的占位行，lollipop 图只画已落地结果
   const neural = data.methods.filter(m => m.bpd !== null)
                              .sort((a, b) => a.bpd - b.bpd);
@@ -106,12 +107,13 @@ Chart.defaults.borderColor = "#2a2d3a";
   const values = neural.map(m => m.bpd);
 
   const colorFor = (m) => {
-    if (isOurs(m.name)) return "#6c8cff";
-    return "#5a5d72";
+    if (isOursMain(m.name)) return "#6c8cff";          // v2 主表：亮蓝
+    if (isOurs(m.name)) return "#8a9bd0";              // v1 历史 Ours：淡蓝
+    return "#5a5d72";                                   // baseline：灰
   };
   const colors = neural.map(colorFor);
 
-  const ourBest = neural.find(m => isOurs(m.name));
+  const ourBest = neural.find(m => isOursMain(m.name)) || neural.find(m => isOurs(m.name));
 
   // 副标题：仅展示主结果（取 Ours 中 bpd 最低的一行）
   const desc = document.createElement("p");
@@ -142,7 +144,8 @@ Chart.defaults.borderColor = "#2a2d3a";
       ctx.textAlign = "left";
       ctx.textBaseline = "middle";
       meta.data.forEach((bar, i) => {
-        ctx.fillStyle = isOurs(neural[i].name) ? "#6c8cff" : "#cfd3e0";
+        const name = neural[i].name;
+        ctx.fillStyle = isOursMain(name) ? "#6c8cff" : (isOurs(name) ? "#8a9bd0" : "#cfd3e0");
         ctx.fillText(values[i].toFixed(2), bar.x + 10, bar.y);
       });
       ctx.restore();
@@ -169,9 +172,9 @@ Chart.defaults.borderColor = "#2a2d3a";
         data: values.map((v, i) => ({ x: v, y: i })),
         backgroundColor: colors,
         borderColor: colors.map(c => c === "#6c8cff" ? "#ffffff" : c),
-        borderWidth: neural.map(m => isOurs(m.name) ? 2 : 0),
-        pointRadius: neural.map(m => isOurs(m.name) ? 9 : 6),
-        pointHoverRadius: neural.map(m => isOurs(m.name) ? 11 : 8),
+        borderWidth: neural.map(m => isOursMain(m.name) ? 2 : 0),
+        pointRadius: neural.map(m => isOursMain(m.name) ? 9 : 6),
+        pointHoverRadius: neural.map(m => isOursMain(m.name) ? 11 : 8),
       }]
     },
     options: {
@@ -205,9 +208,12 @@ Chart.defaults.borderColor = "#2a2d3a";
           type: "category",
           labels,
           ticks: {
-            font: (ctx) => isOurs(labels[ctx.index] || "")
+            font: (ctx) => isOursMain(labels[ctx.index] || "")
               ? { size: 12, weight: "700" } : { size: 12 },
-            color: (ctx) => isOurs(labels[ctx.index] || "") ? "#6c8cff" : "#8b8fa3",
+            color: (ctx) => {
+              const n = labels[ctx.index] || "";
+              return isOursMain(n) ? "#6c8cff" : (isOurs(n) ? "#8a9bd0" : "#8b8fa3");
+            },
             autoSkip: false,
             padding: 8,
           },
@@ -223,11 +229,11 @@ Chart.defaults.borderColor = "#2a2d3a";
   const tbody = document.querySelector("#table-metrics tbody");
   data.methods.forEach(m => {
     const tr = document.createElement("tr");
-    const ours = isOurs(m.name);
+    const main = isOursMain(m.name);
     const bpdCell = m.bpd !== null ? m.bpd.toFixed(4) : "<i>TBD</i>";
     tr.innerHTML = `
-      <td class="${ours ? "highlight" : ""}">${m.name}</td>
-      <td class="${ours ? "highlight" : ""}">${bpdCell}</td>
+      <td class="${main ? "highlight" : ""}">${m.name}</td>
+      <td class="${main ? "highlight" : ""}">${bpdCell}</td>
       <td>${m.note}</td>`;
     tbody.appendChild(tr);
   });

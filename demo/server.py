@@ -191,7 +191,7 @@ def _get_cached_model(device):
         import yaml
         import torch
 
-        # 按优先级尝试主路径 ckpt：v2 深窄主跑 → R-only softmax 主表（v1）。
+        # 按优先级尝试主路径 ckpt：v2 深窄当前主表 (2.8296) → R-only softmax v1 历史主表 (2.9035)。
         # iGPT 单尺度 baseline 已退出主线（Phase A 历史），不再作为 fallback。
         configs_dir = ROOT / "configs"
         experiments_dir = ROOT / "experiments"

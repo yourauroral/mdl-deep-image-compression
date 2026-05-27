@@ -73,7 +73,7 @@
 <!-- Panel 3: Linear Probe -->
 <section class="panel" id="panel-probe">
   <h2>Linear Probe 各层分类准确率</h2>
-  <p class="panel-desc">冻结预训练模型，在各层 hidden state 上训练线性分类器，衡量表征质量 (Chen et al., 2020)。当前展示 iGPT-S baseline 占位数据，CC-iGPT v2 的 with/without α·coarse_ctx 消融对比待 v2 200ep 完跑后回填。</p>
+  <p class="panel-desc">冻结预训练模型，在各层 hidden state 上训练线性分类器，衡量表征质量 (Chen et al., 2020)。CC-iGPT v2 fine 分支（32 层，with α·coarse_ctx 注入）逐层 top-1 acc：L0→L19 单调上升至峰值 79.33%，末段缓降是 AR 模型典型表征曲线（末层过拟合到 token-level NLL 目标，丢弃部分语义信息）。</p>
   <div class="chart-container">
     <canvas id="chart-probe"></canvas>
   </div>

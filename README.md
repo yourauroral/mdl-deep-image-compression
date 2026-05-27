@@ -5,9 +5,9 @@
 > **无损口径**：本系统所有主结果都在 **RGB-bit-exact** 域报告 — 直接在 RGB uint8 上建模，与 PixelCNN++ / Sparse Transformer 等基线同域可比。
 
 - **Phase A (完成)**: iGPT token-level 自回归压缩 + 8 个手写 Triton Kernel（7 个进入训练栈，1 个 `fused_linear_ce` 在 V=256 下经 roofline 分析证伪、保留作反面案例）
-- **Phase B (主表完成)**: CC-iGPT（Coarse-Conditioned iGPT）双尺度条件自回归 — 浅层 coarse iGPT (R-only 配置 8×8×1, 64 token, ~2% overhead) 独立编码进 bitstream，UP + 量化后通过 additive embedding（可学习标量 α）注入 fine iGPT (32×32×3, 3072 token)。CIFAR-10 RGB-bit-exact R-only 主表 **2.9035 bpd**（softmax head, 100ep + 全套正则 + TTA hflip）
+- **Phase B (v1 历史主表完成)**: CC-iGPT（Coarse-Conditioned iGPT）双尺度条件自回归 — 浅层 coarse iGPT (R-only 配置 8×8×1, 64 token, ~2% overhead) 独立编码进 bitstream，UP + 量化后通过 additive embedding（可学习标量 α）注入 fine iGPT (32×32×3, 3072 token)。CIFAR-10 RGB-bit-exact R-only v1 历史主表 **2.9035 bpd**（softmax head, 100ep + 全套正则 + TTA hflip，已被 v2 替代）
 - **Phase C (完成)**: Demo 前端可视化系统 (FastAPI + Chart.js, 5 个展示面板)
-- **Phase D (进行中, 2026-05-25)**: 深窄 + ensemble — fine N=24/d=512 → N=32/d=448、epoch 100→200、`min_lr_ratio=0.05` + SWA last 30ep + EMA 0.9998；`evaluate.py --ensemble` 多 ckpt logit 平均。目标 best+TTA ≤ 2.85（PixelSNAIL 档）。详见 [future.md §7](future.md)
+- **Phase D (完成, 2026-05-27)**: 深窄 + ensemble — fine N=24/d=512 → N=32/d=448 (82.95M)、epoch 100→200、`min_lr_ratio=0.05` + SWA last 31 ckpts (start ep170) + EMA 0.9998；`evaluate.py --ensemble` 多 ckpt logit 平均 (best+SWA+EMA)。**主表 ensemble + TTA hflip = 2.8296 ± 0.0854**（超越 PixelSNAIL 380M 2.85，逼近 Sparse Transformer 59M 2.80）。详见 [future.md §7](future.md)
 
 ## Baseline 对比
 
@@ -17,17 +17,18 @@
 | Image Transformer | Autoregressive | 95M | 2.90 | RGB-bit-exact | Parmar et al., ICML 2018 |
 | PixelSNAIL | Autoregressive | 380M | 2.85 | RGB-bit-exact | Chen et al., ICML 2018 |
 | Sparse Transformer | Autoregressive | 59M | 2.80 | RGB-bit-exact | Child et al., 2019 (128 层 strided sparse attention) |
-| **CC-iGPT (Ours, R-only)** | Autoregressive | ~81M | **2.9035** | RGB-bit-exact | `coarse_in_channels=1`，coarse 仅压 R 8×8（64 token），fine 通过 sub-pixel AR 自学 G/B，**主表**（100ep + RandomCrop + DropPath 0.1 + dropout 0.1 + EMA 0.9995 + TTA hflip）|
+| **CC-iGPT v2 (Ours, R-only)** | Autoregressive | 82.95M | **2.8296** ± 0.0854 | RGB-bit-exact | `coarse_in_channels=1`，coarse 仅压 R 8×8（64 token），fine 通过 sub-pixel AR 自学 G/B，**主表**（200ep + RandomCrop + DropPath 0.1 + EMA 0.9998 + SWA last 31 ckpts + ensemble best/SWA/EMA + TTA hflip）|
+| CC-iGPT v1 (Ours, R-only) | Autoregressive | ~81M | 2.9035 ± 0.0854 | RGB-bit-exact | v1 历史主表（100ep + EMA 0.9995 + TTA hflip）|
 | PNG | Classical codec | — | 5.87 | RGB-bit-exact | Hoogeboom et al., NeurIPS 2019 报告 |
 | WebP (lossless) | Classical codec | — | 4.61 | RGB-bit-exact | Hoogeboom et al., NeurIPS 2019 报告 |
 
-CC-iGPT R-only **平 Image Transformer 95M (2.90)、胜 PixelCNN++ 52M (2.92)**，参数预算 ~81M。当前主表 softmax 256-way 2.9035，**深窄 + ensemble**（[future.md §7](future.md)）正在进行，目标 best+TTA ≤ 2.85（PixelSNAIL 档）。SOTA 路线靠 ImageNet 64×64 < 3.44（Sparse Transformer 152M strided）跨数据集验证支撑。
+CC-iGPT v2 R-only **超越 PixelSNAIL 380M (2.85)、逼近 Sparse Transformer 59M (2.80)**，参数预算 82.95M。主表 ensemble (best+SWA+EMA) + TTA hflip = **2.8296 ± 0.0854**（vs PixelSNAIL gap -0.020 / vs Sparse Trans gap +0.030）。SOTA 路线靠 ImageNet 64×64 < 3.44（Sparse Transformer 152M strided）跨数据集验证支撑。
 
 ### 创新点定位
 
 1. **方法 — 零新参数的双尺度条件注入**：coarse iGPT 量化 token 经 bit-exact 反量化/上采样/重 tokenize 后，复用 `fine.token_embed` 得到 `coarse_ctx`，再以可学习标量 α 做 additive 注入。整个 ctx 通路只引入 1 个标量参数；encoder/decoder 共用同一函数，bitstream 真实可解码。回避了多尺度联合 AR 的 loss 平衡难题。
 2. **工程 — 8 个手写 Triton kernel + 1 个 roofline 证伪的反面案例**：7 个进入训练栈，1 个 `fused_linear_ce` 在 V=256 下经 roofline 分析判定为负收益（compute-bound + 三重循环失去 cuBLAS GEMM 利用率），保留作工程严谨性的反向证据，详见 [`experiments/kernel_negative_finding.md`](experiments/kernel_negative_finding.md)。
-3. **分析 — RGB-bit-exact 主表 + 跨数据集 SOTA 对比**：CIFAR-10 R-only 主表 **2.9035 bpd**；ImageNet 64×64 跨数据集（目标 < 3.44）；Linear Probe 逐层表征曲线；roofline forward 与 fwd+bwd 双视角。
+3. **分析 — RGB-bit-exact 主表 + 跨数据集 SOTA 对比**：CIFAR-10 R-only v2 主表 **2.8296 bpd**（超越 PixelSNAIL 380M 2.85）；ImageNet 64×64 跨数据集（目标 < 3.44）；Linear Probe 逐层表征曲线；roofline forward 与 fwd+bwd 双视角。
 
 ## 快速开始
 
@@ -42,30 +43,31 @@ pytest tests/ -v
 # 训练 — 多卡 DDP (按 GPU 数调整 nproc_per_node)
 torchrun --nproc_per_node=2 scripts/train.py --config configs/igpt_cifar10_s_rgb.yaml
 
-# CC-iGPT RGB-bit-exact (R-only 主表 — softmax head, 2.9035 bpd, 100ep)
+# CC-iGPT RGB-bit-exact v1 (R-only 历史主表 — softmax head, 2.9035 bpd, 100ep, 已被 v2 替代)
 torchrun --nproc_per_node=2 scripts/train.py --config configs/ccigpt_cifar10_s_rgb_ronly.yaml
 
-# CC-iGPT v2 — 深窄 N=32/d=448 + 200ep (目标 ≤ 2.85, 详见 future.md §7)
+# CC-iGPT v2 — 深窄 N=32/d=448 + 200ep (当前主表 ensemble+TTA = 2.8296, 详见 future.md §7)
 torchrun --nproc_per_node=2 scripts/train.py --config configs/ccigpt_cifar10_s_rgb_ronly_v2.yaml
 
-# 评测 — CC-iGPT (含 coarse / fine CE 分解 + bpd_total)，主表数字用 best + TTA hflip
-python scripts/evaluate.py --config configs/ccigpt_cifar10_s_rgb_ronly.yaml \
-    --checkpoint experiments/ccigpt_cifar10_s_rgb_ronly/checkpoints/best.pth --tta_hflip
-
-# 评测 — 多 ckpt logit ensemble (log-prob 域平均, best/swa/ema 三档)
+# 评测 — CC-iGPT v2 主表数字 (ensemble best+SWA+EMA + TTA hflip)
 python scripts/evaluate.py --config configs/ccigpt_cifar10_s_rgb_ronly_v2.yaml \
     --ensemble experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/best.pth,\
 experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/swa.pth,\
 experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/ema.pth --tta_hflip
 
-# Linear Probe (各层表征分类准确率)
-python scripts/linear_probe.py --config configs/igpt_cifar10_s_rgb.yaml \
-    --checkpoint experiments/igpt_cifar10_s_rgb/checkpoints/best.pth --layers all
+# 评测 — CC-iGPT 单 ckpt (含 coarse / fine CE 分解 + bpd_total)
+python scripts/evaluate.py --config configs/ccigpt_cifar10_s_rgb_ronly_v2.yaml \
+    --checkpoint experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/best.pth --tta_hflip
+
+# Linear Probe (各层表征分类准确率 — CC-iGPT v2 fine + α·coarse_ctx，32 层 L19 best 79.33%)
+python scripts/linear_probe.py --config configs/ccigpt_cifar10_s_rgb_ronly_v2.yaml \
+    --checkpoint experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/best.pth --layers all
 
 # Kernel Profiling
 python scripts/profile_kernels.py --roofline
 
-# Demo 前端
+# Demo 前端 (5 面板可视化：上传 → bpd 热力图 / baseline 对比 / Linear Probe / Kernel 性能 / coarse+fine 双尺度)
+# ckpt 优先级: v2 (2.8296 主表) → v1 历史 (2.9035)；启动后访问 http://localhost:8000
 pip install fastapi uvicorn python-multipart
 uvicorn demo.server:app --reload --port 8000
 ```
@@ -98,7 +100,7 @@ scp -P <port> root@<autodl-host>:/root/autodl-tmp/mdl-deep-image-compression/exp
                               |
           +-------------------+-------------------+
           |                                       |
-    iGPT (Phase A)                       CC-iGPT (Phase B / D)
+    iGPT (Phase A)                       CC-iGPT (Phase B / D 完成)
           |                                       |
   +-------v--------+                  +-----------v-----------+
   | Flatten: 3072  |                  | DOWN avg_pool 8×8     |
@@ -253,12 +255,12 @@ src/mdlic/
 └── utils/     seed, bpd, clean_state_dict
 scripts/       train.py, evaluate.py, linear_probe.py, dryrun_forward.py, profile_kernels.py, prepare_imagenet32.py
 configs/       igpt_cifar10_s_rgb,
-               ccigpt_cifar10_s_rgb_ronly      (R-only B1, softmax 主表 2.9035 bpd, 100ep),
-               ccigpt_cifar10_s_rgb_ronly_v2   (深窄 N=32/d=448 + 200ep, 目标 ≤ 2.85)
+               ccigpt_cifar10_s_rgb_ronly      (R-only v1 历史主表 2.9035 bpd, 100ep, 已被 v2 替代),
+               ccigpt_cifar10_s_rgb_ronly_v2   (深窄 N=32/d=448 + 200ep, 当前主表 ensemble+TTA 2.8296 bpd)
 tests/         单元测试（含 test_ccigpt_smoke）
 demo/
 ├── server.py          FastAPI 后端 (predict / metrics / probe / kernels / scales)
-│                      ckpt 加载优先级: v2 → ronly softmax → igpt-s baseline
+│                      ckpt 加载优先级: v2 → ronly softmax
 ├── static/            HTML + JS (Chart.js) + CSS 前端，5 个面板
 └── data/              预计算 JSON 数据
 ```

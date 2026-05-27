@@ -4,6 +4,13 @@ Linear Probe 评估：加载预训练 iGPT checkpoint，提取各层特征，
 训练线性分类器，报告每层分类准确率。
 
 用法:
+  # CC-iGPT v2 主表配置 (32 层 fine + α·coarse_ctx 注入)
+  python scripts/linear_probe.py \
+    --config configs/ccigpt_cifar10_s_rgb_ronly_v2.yaml \
+    --checkpoint experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/best.pth \
+    --layers all --epochs 100 --lr 0.1 --batch_size 256
+
+  # iGPT baseline (Phase A 单尺度对照)
   python scripts/linear_probe.py \
     --config configs/igpt_cifar10_s_rgb.yaml \
     --checkpoint experiments/igpt_cifar10_s_rgb/checkpoints/best.pth \

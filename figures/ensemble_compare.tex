@@ -1,0 +1,97 @@
+% CC-iGPT v2 主表四档对比 (4 柱版, 答辩简化)
+% 编译: pdflatex ensemble_compare.tex   (或 latexmk -pdf)
+% 嵌入论文: \input{figures/ensemble_compare.tex}
+%
+% 数据源:
+%   best / SWA / EMA: 200ep 训练日志末尾 in-training val (无 TTA, 无 ensemble)
+%       best ep196 = 2.8312 ± 0.0909   (训练曲线最低点)
+%       SWA last 31 = 2.8276 ± 0.0909  (Polyak 平均)
+%       EMA decay 0.9998 = 2.8301 ± 0.0909
+%   Ensemble + TTA: scripts/evaluate.py --ensemble best,swa,ema --tta_hflip 实测 (2026-05-27)
+%       2.8296 ± 0.0854
+%
+% 设计意图: 答辩前时间紧，砍消融端 (best/SWA/EMA × ±TTA = 6 runs)，仅保留主表 1 run。
+%   前三档 in-training 数字作为 ensemble 收益的视觉参照 — 灰色显示，强调 ensemble+TTA 是主表数字。
+% 参考线:
+%   v1 best+TTA 2.9035        — Phase B 主表
+%   PixelSNAIL 2.85           — v2 原目标 (已超越)
+%   Sparse Transformer 2.80   — v2 上调后目标 (gap 0.030, 逼近未持平)
+
+\documentclass[tikz,border=8pt]{standalone}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\usepackage{amsmath,amssymb}
+\pgfplotsset{compat=1.18}
+
+\begin{document}
+\begin{tikzpicture}[font=\footnotesize]
+\begin{axis}[
+    width=12cm, height=7cm,
+    ybar,
+    bar width=22pt,
+    enlarge x limits=0.20,
+    ylabel={\textbf{bits/dim (CIFAR-10 val)}},
+    ylabel near ticks,
+    symbolic x coords={best, SWA, EMA, Ensemble+TTA},
+    xtick=data,
+    x tick label style={font=\footnotesize},
+    ymin=2.78, ymax=2.92,
+    ytick={2.80,2.8276,2.8296,2.85,2.88,2.90,2.9035},
+    yticklabel style={/pgf/number format/.cd, fixed, precision=4, zerofill, font=\scriptsize},
+    axis line style={gray!55},
+    tick style={gray!55},
+    grid=major,
+    grid style={dashed, gray!18, line width=0.3pt},
+    nodes near coords,
+    nodes near coords style={font=\scriptsize, /pgf/number format/.cd, fixed, precision=4, zerofill, anchor=south, yshift=2pt},
+    clip=false,
+]
+
+% --- 三档 in-training (灰色, 视觉参照) ---
+\addplot[draw=gray!55!black, fill=gray!25, bar shift=0pt] coordinates {
+    (best,    2.8312)
+    (SWA,     2.8276)
+    (EMA,     2.8301)
+};
+
+% --- ensemble + TTA (橙色, 主表数字) ---
+\addplot[draw=orange!70!black, fill=orange!30!yellow!80, bar shift=0pt] coordinates {
+    (Ensemble+TTA, 2.8296)
+};
+
+% --- 参考线 1: v1 主表 2.9035 ---
+\draw[densely dashed, gray!50, line width=0.4pt]
+    ({rel axis cs:0,0}|-{axis cs:best,2.9035})
+    -- ({rel axis cs:1,0}|-{axis cs:best,2.9035});
+\node[font=\scriptsize, gray!55!black, anchor=west]
+    at ({rel axis cs:1.005,0}|-{axis cs:best,2.9035}) {v1=2.9035};
+
+% --- 参考线 2: PixelSNAIL 2.85 (Ours 超越) ---
+\draw[densely dashed, red!40, line width=0.4pt]
+    ({rel axis cs:0,0}|-{axis cs:best,2.85})
+    -- ({rel axis cs:1,0}|-{axis cs:best,2.85});
+\node[font=\scriptsize, red!55!black, anchor=west]
+    at ({rel axis cs:1.005,0}|-{axis cs:best,2.85}) {PixelSNAIL=2.85};
+
+% --- 参考线 3: Sparse Transformer 2.80 (Ours 逼近未持平) ---
+\draw[densely dashed, purple!40, line width=0.4pt]
+    ({rel axis cs:0,0}|-{axis cs:best,2.80})
+    -- ({rel axis cs:1,0}|-{axis cs:best,2.80});
+\node[font=\scriptsize, purple!55!black, anchor=west]
+    at ({rel axis cs:1.005,0}|-{axis cs:best,2.80}) {Sparse Trans=2.80};
+
+\end{axis}
+
+% --- 标题 ---
+\node[font=\footnotesize\bfseries, anchor=south]
+    at (current bounding box.north)
+    {CC-iGPT v2 主表数字溯源 — 三档 in-training 单档 vs Ensemble+TTA};
+
+% --- 副标题 ---
+\node[font=\scriptsize, gray!50!black, anchor=north, yshift=-2pt, text width=12cm, align=center]
+    at (current bounding box.south)
+    {\textit{N=32/d=448 (82.95M) $\cdot$ EMA 0.9998 $\cdot$ SWA last 31 ckpts (start ep170) $\cdot$ ensemble = log-softmax 平均(best, SWA, EMA) $\cdot$ TTA = hflip 双 forward 取均\\
+    灰色三档为 200ep 训练日志末尾 in-training val（无 TTA），橙色为最终主表数字（ensemble + TTA hflip）}};
+
+\end{tikzpicture}
+\end{document}

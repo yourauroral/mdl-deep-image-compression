@@ -199,7 +199,7 @@
 
 \node[callout, right=20mm of s4, anchor=west, text width=46mm]
      (caBlk) {\textbf{deep-narrow (v2)}\\[1pt]
-              v2: $N{=}32$, $d{=}448$, $h{=}7$ ($d_k{=}64$), 78M params.\\
+              v2: $N{=}32$, $d{=}448$, $h{=}7$ ($d_k{=}64$), 78.14M params.\\
               v1: $N{=}24$, $d{=}512$, $h{=}8$, 76M params.\\
               \textit{depth-over-width helps NLL by 20--50 mbpd}};
 \draw[blue!60!black, dashed, line width=0.35pt]
@@ -260,7 +260,7 @@
         fit=(topspacer)(s1)(s6)(t1)(out)(caTok)(caInj)(caBlk)(caHead)(ctxIn)(n1)(n6),
         label={[blue!60!black, font=\small\bfseries]above:%
               \textbf{Fine branch (RGB $32{\times}32$ sub-pixel AR)} \;
-              --- 78M params (v2) / 76M (v1), $N_f{=}3072$ tokens}]
+              --- 78.14M params (v2) / 76M (v1), $N_f{=}3072$ tokens}]
         (fbox) {};
 \end{pgfonlayer}
 
