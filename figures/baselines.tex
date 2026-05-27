@@ -22,7 +22,7 @@
     bar width=10pt,
     enlarge x limits=0.18,
     ymin=2.70, ymax=3.00,
-    ytick={2.70,2.75,2.80,2.83,2.85,2.90,2.95},
+    ytick={2.70,2.75,2.80,2.82,2.85,2.90,2.95},
     ylabel={\textbf{bits/dim}\ },
     ylabel near ticks,
     % 修复：明确指定所有5个x轴刻度，不再依赖xtick=data
@@ -71,13 +71,13 @@
 \node[font=\scriptsize, align=center, yshift=4pt] at (axis cs:PixelSNAIL, 2.85) {2.85 380M};
 \node[font=\scriptsize, align=center, yshift=4pt] at (axis cs:ImgTrans, 2.90) {2.90 95M};
 \node[font=\scriptsize, align=center, yshift=4pt] at (axis cs:PixelCNNpp, 2.92) {2.92 52M};
-\node[font=\scriptsize, align=center, orange!70!black, yshift=4pt] at (axis cs:Ours, 2.8296) {\textbf{2.83} \textbf{82.95M}};
+\node[font=\scriptsize, align=center, orange!70!black, yshift=4pt] at (axis cs:Ours, 2.8296) {\textbf{2.82} \textbf{82M}};
 
 \end{axis}
 
 % --- 标题 ---
 \node[font=\footnotesize\bfseries, anchor=south, yshift=3pt]
-    at (current bounding box.north) {CIFAR-10 RGB-bit-exact (CC-iGPT v2 ensemble + TTA = 2.8296)};
+    at (current bounding box.north) {CIFAR-10 RGB-bit-exact};
 
 \end{tikzpicture}
 \end{document}
