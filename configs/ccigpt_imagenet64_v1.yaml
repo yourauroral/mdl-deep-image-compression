@@ -73,7 +73,7 @@ data:
 train:
   amp_dtype: "bf16"
   batch_size: 12                # 48 → 12 (seq ×4 → attention mem ×16)
-  grad_accum_steps: 12          # 3 → 12 (effective batch=288 不变)
+  grad_accum_steps: 6           # 4 GPU × bs12 × accum6 = effective 288 不变（2→4 卡升级，2026-05-28）
   lr: 3e-4
   eps: 1e-8
   epochs: 12                    # 200 → 12 (1.2s/step × 53k step/ep = 17.8h/ep；12ep ≈ 8.9 天)
