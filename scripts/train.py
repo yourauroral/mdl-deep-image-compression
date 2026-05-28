@@ -491,10 +491,11 @@ def main():
         valid_dataset = DatasetClass(root=config["data"]["valid"], train=False, download=False, transform=valid_transform)
     elif dataset_name == "imagenet64_npy":
         from src.mdlic.data.imagenet64_npy import ImageNet64Npy
-        if rank == 0 and (aug_cfg.get("hflip", False) or crop_cfg):
-            print("WARNING: data.augment (hflip/random_crop) 在 imagenet64_npy 路径上当前未实现，已忽略")
-        train_dataset = ImageNet64Npy(root=config["data"]["train"], split="train")
-        valid_dataset = ImageNet64Npy(root=config["data"]["valid"], split="val")
+        if rank == 0 and crop_cfg:
+            print("WARNING: data.augment.random_crop 在 imagenet64_npy 路径上当前未实现，已忽略")
+        hflip_flag = bool(aug_cfg.get("hflip", False))
+        train_dataset = ImageNet64Npy(root=config["data"]["train"], split="train", hflip=hflip_flag)
+        valid_dataset = ImageNet64Npy(root=config["data"]["valid"], split="val", hflip=False)
     else:
         raise ValueError(f"未知 dataset: '{dataset_name}'，支持 cifar10/cifar100/imagenet64_npy")
     if rank == 0:
