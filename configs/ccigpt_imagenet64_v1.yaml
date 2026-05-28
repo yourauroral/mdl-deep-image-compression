@@ -1,0 +1,89 @@
+exp_name: "ccigpt_imagenet64_v1"
+
+# CC-iGPT RGB-bit-exact + sub-pixel AR + R-only coarse — ImageNet64 跨数据集首版
+#
+# 与 CIFAR-10 v2 (ccigpt_cifar10_s_rgb_ronly_v2.yaml, 主表 2.8296 bpd) 的差异：
+#   数据：cifar10 (32×32×3, 50k train) → imagenet64_npy (64×64×3, 1.28M train)
+#   image_size: 32 → 64，pool_factor=4 不变
+#       → coarse  8×8 → 16×16   = 64 → 256 token  (R-only)
+#       → fine   32×32×3 → 64×64×3 = 3072 → 12288 token  (×4)
+#   显存：fine attention O(L²) 内存 ×16，必须降 batch
+#       batch_size 48×3 → 12×12  (effective batch 仍 144)
+#   epochs: 200 → 30 (ImageNet 1.28M / CIFAR 50k = 25.6×；30ep token 量 ≈ CIFAR 200ep × 3.8)
+#   SWA: start_epoch 170/200 → 26/30 (按 ratio 85%；last 5 ckpts，update_interval=1)
+#   EMA: decay 0.9998 → 0.9999 (30ep 长 step 数 ≈ 270k，更长半衰期)
+#   warmup_epochs: 5 → 2 (绝对 step 已多，按 1k step ≈ 0.4 epoch 起，2 epoch 够)
+#
+# 架构：fine N=32/d=448/h=7 (d_k=64), coarse 4.81M (256d×6L) — 与 v2 完全一致
+#       (控制变量：纯换数据集；如 OOM 再考虑降 N/d 或 sparse-attn)
+#
+# 目标：bpd_total < 3.44 (Sparse Transformer 152M strided ImageNet64 = 3.44)
+#       逼近 < 3.40 (Sparse Transformer 152M full)
+#
+# 风险：seq_len=12288 在 fp32 attention 下 batch=12 仍可能 OOM；
+#       fallback: (a) batch 6 + accum 24 (b) activation_checkpointing 已开
+#       (c) 降 N 32→24 + d 448→384 起步 (d) sparse-attn (future.md §6)
+#
+# 训练前预测 (2026-05-28, 待训): 30ep best+TTA → 3.50-3.65；ensemble → 3.40-3.55。
+
+model:
+  type: ccigpt
+  image_size: 64
+  in_channels: 3
+  vocab_size: 256
+  pool_factor: 4
+
+  # fine 模型（沿用 v2，~78.14M）
+  d_model: 448
+  N: 32
+  h: 7
+  d_ff: 1216
+  dropout: 0.1
+  drop_path: 0.1
+
+  # coarse 模型（沿用 v2，~4.81M）
+  coarse_d_model: 256
+  coarse_N: 6
+  coarse_h: 4
+  coarse_d_ff: 688
+
+  coarse_in_channels: 1         # R-only 灰度先验
+  activation_checkpointing: true
+
+data:
+  dataset: "imagenet64_npy"
+  train: datasets/imagenet64_png
+  valid: datasets/imagenet64_png
+  num_workers: 8
+  valid_batch_size: 8
+  valid_num_workers: 2
+  augment:
+    hflip: false                # imagenet64_npy 路径未实现 augment, 显式关
+    random_crop: null
+
+train:
+  amp_dtype: "bf16"
+  batch_size: 12                # 48 → 12 (seq ×4 → attention mem ×16)
+  grad_accum_steps: 12          # 3 → 12 (effective batch=144 不变)
+  lr: 3e-4
+  eps: 1e-8
+  epochs: 30                    # 200 → 30 (1.28M vs 50k → 25.6× 数据)
+  log_freq: 50
+  clip_max_norm: 1.0
+  z_loss_weight: 1e-4
+  lr_schedule: "cosine"
+  warmup_epochs: 2              # 5 → 2 (step 数充裕)
+  min_lr_ratio: 0.05
+  swa:
+    enabled: true
+    start_epoch: 26             # last 5 ckpts (ep26..30, interval=1)
+    update_interval: 1
+  ema:
+    enabled: true
+    decay: 0.9999               # 0.9998 → 0.9999 (270k steps 长训)
+
+eval:
+  interval: 1                   # 1ep 评一次（30ep 总共评 30 次）
+
+checkpoint:
+  save_interval: 1              # 200ep 5/ep → 30ep 1/ep
