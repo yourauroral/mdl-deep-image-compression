@@ -18,6 +18,6 @@ class ImageNet64Npy(Dataset):
         return self.data.shape[0]
 
     def __getitem__(self, idx: int):
-        img = np.ascontiguousarray(self.data[idx])
+        img = np.array(self.data[idx], dtype=np.uint8)
         tensor = torch.from_numpy(img).permute(2, 0, 1).contiguous().float().div_(255.0)
         return tensor, 0

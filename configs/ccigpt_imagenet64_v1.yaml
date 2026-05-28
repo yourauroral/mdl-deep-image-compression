@@ -52,8 +52,8 @@ model:
 
 data:
   dataset: "imagenet64_npy"
-  train: datasets/imagenet64_png
-  valid: datasets/imagenet64_png
+  train: /root/autodl-tmp/imagenet64_png
+  valid: /root/autodl-tmp/imagenet64_png
   num_workers: 8
   valid_batch_size: 8
   valid_num_workers: 2

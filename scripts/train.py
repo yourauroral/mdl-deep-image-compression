@@ -459,7 +459,7 @@ def main():
         csv_writer.writerow(['epoch', 'train_loss', 'train_bpd', 'val_loss',
                              'val_bpd', 'val_bpd_std', 'lr'])
 
-    # Dataset: 根据 config 选择 CIFAR-10 / CIFAR-100 / ImageNet32 npy
+    # Dataset: 根据 config 选择 CIFAR-10 / CIFAR-100 / ImageNet64 npy
     from torchvision.datasets import CIFAR10, CIFAR100
     aug_cfg = config["data"].get("augment", {}) or {}
     train_tf_list = []
@@ -489,12 +489,6 @@ def main():
         DatasetClass = CIFAR10 if dataset_name == "cifar10" else CIFAR100
         train_dataset = DatasetClass(root=config["data"]["train"], train=True,  download=False, transform=train_transform)
         valid_dataset = DatasetClass(root=config["data"]["valid"], train=False, download=False, transform=valid_transform)
-    elif dataset_name == "imagenet32_npy":
-        from src.mdlic.data.imagenet32_npy import ImageNet32Npy
-        if rank == 0 and (aug_cfg.get("hflip", False) or crop_cfg):
-            print("WARNING: data.augment (hflip/random_crop) 在 imagenet32_npy 路径上当前未实现，已忽略")
-        train_dataset = ImageNet32Npy(root=config["data"]["train"], split="train")
-        valid_dataset = ImageNet32Npy(root=config["data"]["valid"], split="val")
     elif dataset_name == "imagenet64_npy":
         from src.mdlic.data.imagenet64_npy import ImageNet64Npy
         if rank == 0 and (aug_cfg.get("hflip", False) or crop_cfg):
@@ -502,7 +496,7 @@ def main():
         train_dataset = ImageNet64Npy(root=config["data"]["train"], split="train")
         valid_dataset = ImageNet64Npy(root=config["data"]["valid"], split="val")
     else:
-        raise ValueError(f"未知 dataset: '{dataset_name}'，支持 cifar10/cifar100/imagenet32_npy/imagenet64_npy")
+        raise ValueError(f"未知 dataset: '{dataset_name}'，支持 cifar10/cifar100/imagenet64_npy")
     if rank == 0:
         print(f"Dataset: {dataset_name} | Train: {len(train_dataset)} | Valid: {len(valid_dataset)}")
 
@@ -521,8 +515,8 @@ def main():
     valid_num_workers = config['data'].get('valid_num_workers', 2)
     # drop_last=True: 避免 DistributedSampler 默认 padding（重复 dataset 头部样本
     # 让每个 rank 拿到整除分片）造成验证集统计偏差。代价是最多丢 world_size-1
-    # 个样本（CIFAR-10/100 val=10000、ImageNet32 val=50000 在 world=2 下整除，
-    # 不丢；world=3 时丢 1 个，不影响 bpd 数值精度）。
+    # 个样本（CIFAR-10/100 val=10000、ImageNet64 val=49999 在 world=2 下分别整除/丢 1 个，
+    # 不影响 bpd 数值精度）。
     valid_sampler = (DistributedSampler(valid_dataset, shuffle=False, drop_last=True)
                      if distributed else None)
     valid_loader = DataLoader(valid_dataset, batch_size=valid_batch_size, shuffle=False,

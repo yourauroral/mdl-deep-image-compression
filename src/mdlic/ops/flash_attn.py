@@ -748,7 +748,7 @@ class TritonAttention(torch.autograd.Function):
         # 保存 padded 版本供 backward 使用（避免重复 padding）。
         # 取舍：当 PAD/SEQ_LEN_PADDED 较大时（如 SEQ_LEN=193 → PAD=63 → ~25%
         # 显存浪费），重新 pad 在 backward 入口可省下保存成本；但当前所有训练
-        # 形状（CIFAR seq_len=3071, ImageNet32 同）PAD ≤ BLOCK_MACRO=64 → ≤2%，
+        # 形状（CIFAR seq_len=3071）PAD ≤ BLOCK_MACRO=64 → ≤2%，
         # 不值得为这个边角形状增加 backward 入口的复杂度。
         ctx.save_for_backward(Q, K, V, O, M)
         ctx.softmax_scale = softmax_scale

@@ -256,9 +256,9 @@ GPTBlock, MultiHeadAttentionBlock (RoPE + QK-Norm + Flash Attention + attn_mask)
 src/mdlic/
 ├── models/    igpt.py, cc_igpt.py, layers.py
 ├── ops/       7 个 Triton kernels + 1 反面案例 (fused_linear_ce)
-├── data/      imagenet32_npy.py (mmap-backed Dataset)
+├── data/      imagenet64_npy.py (mmap-backed Dataset)
 └── utils/     seed, bpd, clean_state_dict
-scripts/       train.py, evaluate.py, linear_probe.py, dryrun_forward.py, profile_kernels.py, prepare_imagenet32.py
+scripts/       train.py, evaluate.py, linear_probe.py, dryrun_forward.py, profile_kernels.py, prepare_imagenet64_png.py
 configs/       igpt_cifar10_s_rgb,
                ccigpt_cifar10_s_rgb_ronly      (R-only v1 历史主表 2.9035 bpd, 100ep, 已被 v2 替代),
                ccigpt_cifar10_s_rgb_ronly_v2   (深窄 N=32/d=448 + 200ep, 当前主表 ensemble+TTA 2.8296 bpd)
