@@ -8,13 +8,16 @@ exp_name: "ccigpt_imagenet64_v1"
 #       → coarse  8×8 → 16×16   = 64 → 256 token  (R-only)
 #       → fine   32×32×3 → 64×64×3 = 3072 → 12288 token  (×4)
 #   显存：fine attention O(L²) 内存 ×16，必须降 batch
-#       batch_size 48×3 → 12×12  (effective batch 仍 144)
-#   epochs: 200 → 40 (ImageNet 1.28M / CIFAR 50k = 25.6×；40ep token 量 ≈ CIFAR 200ep × 5.1)
-#       —— 目标"稳超 3.44"，比保底 30ep 多约 33% 训练时间换 -0.05~-0.10 bpd
-#   SWA: start_epoch 170/200 → 34/40 (按 ratio 85%；last 7 ckpts，update_interval=1)
-#   EMA: decay 0.9998 → 0.9999 (40ep 长 step 数 ≈ 178k，更长半衰期)
-#   warmup_epochs: 5 → 2 (绝对 step 已多，按 1k step ≈ 0.4 epoch 起，2 epoch 够)
-#   hflip: True (ImageNet64Npy 已支持，对齐 v2 控制变量；预计 -0.01~-0.03 bpd "白送")
+#       batch_size 48×3 → 12×12  (effective batch 仍 288)
+#   epochs: 200 → 12 (ImageNet 1.28M / CIFAR 50k = 25.6×；12ep token 量 ≈ CIFAR 200ep × 1.5)
+#       —— 实测 1.2s/micro-step × 53381 step/ep = 17.8 h/ep；
+#       —— 12ep ≈ 8.9 天卡时（vs 40ep 30 天不可行）；
+#       —— 训练 token 量 7.7× v2 主表，预计 ensemble bpd 落 3.35-3.50（中位数 ~3.42）。
+#   SWA: start_epoch 170/200 → 11/12 (last 2 ckpts，update_interval=1，比例略低于 v2 85% 但 ImageNet 单 ep 信息量大)
+#   EMA: decay 0.9998 → 0.9998 (12ep step ≈ 53k，半衰期 3.5k step ≈ 6.6% 总训，与 v2 同档)
+#   warmup_epochs: 5 → 1 (12ep 太短，warmup 占比 < 1ep；step 数仍 4448 充裕)
+#   hflip: True (ImageNet64Npy 已支持 W 轴翻转，对齐 v2 控制变量；预计 -0.01~-0.03 bpd)
+#   ckpt save_start_epoch: 6 (ep1-5 不存；省 ~1.7GB 磁盘 + 加速早期 epoch end)
 #
 # 架构：fine N=32/d=448/h=7 (d_k=64), coarse 4.81M (256d×6L) — 与 v2 完全一致
 #       (控制变量：纯换数据集；如 OOM 再考虑降 N/d 或 sparse-attn)
@@ -26,7 +29,11 @@ exp_name: "ccigpt_imagenet64_v1"
 #       fallback: (a) batch 6 + accum 24 (b) activation_checkpointing 已开
 #       (c) 降 N 32→24 + d 448→384 起步 (d) sparse-attn (future.md §6)
 #
-# 训练前预测 (2026-05-28, 40ep + hflip): best+TTA → 3.42-3.55；ensemble → 3.35-3.48。
+# 训练前预测 (2026-05-28, 12ep + hflip): best+TTA → 3.40-3.55；ensemble → 3.35-3.50。
+# 决策点：ep12 ensemble bpd
+#   < 3.42 → 直接交，论文 §5 ImageNet64 主表
+#   3.42-3.50 → warm restart 续训 4 ep（卡时 +3 天）
+#   > 3.50 → debug（ctx α 是否收敛？lr 是否过低？）
 
 model:
   type: ccigpt
@@ -66,26 +73,27 @@ data:
 train:
   amp_dtype: "bf16"
   batch_size: 12                # 48 → 12 (seq ×4 → attention mem ×16)
-  grad_accum_steps: 12          # 3 → 12 (effective batch=144 不变)
+  grad_accum_steps: 12          # 3 → 12 (effective batch=288 不变)
   lr: 3e-4
   eps: 1e-8
-  epochs: 40                    # 200 → 40 (1.28M vs 50k → 25.6× 数据; +33% 时间换 -0.05~-0.10 bpd 安全余量)
+  epochs: 12                    # 200 → 12 (1.2s/step × 53k step/ep = 17.8h/ep；12ep ≈ 8.9 天)
   log_freq: 50
   clip_max_norm: 1.0
   z_loss_weight: 1e-4
   lr_schedule: "cosine"
-  warmup_epochs: 2              # 5 → 2 (step 数充裕)
+  warmup_epochs: 1              # 12ep 太短，warmup 占比保持 ~8%
   min_lr_ratio: 0.05
   swa:
     enabled: true
-    start_epoch: 34             # last 7 ckpts (ep34..40, ratio 85%, interval=1)
+    start_epoch: 11             # last 2 ckpts (ep11..12, interval=1)
     update_interval: 1
   ema:
     enabled: true
-    decay: 0.9999               # 0.9998 → 0.9999 (178k steps 长训)
+    decay: 0.9998               # 12ep step ≈ 53k，半衰期 3.5k 与 v2 同档
 
 eval:
-  interval: 2                   # 40ep × 1ep eval 太重；每 2ep 一次 = 20 次 eval
+  interval: 1                   # 12ep 数量少，每 ep 评一次（共 12 次）
 
 checkpoint:
-  save_interval: 1              # 每 ep 一存（SWA last 7 需 ep34..40 全部）
+  save_interval: 1              # ep6 起每 ep 一存
+  save_start_epoch: 6           # ep1-5 不存（warmup + 早期 cosine，ckpt 无价值）

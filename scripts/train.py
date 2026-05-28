@@ -867,7 +867,8 @@ def main():
             if not has_nan:
                 print(f"  SWA update #{swa_n} at epoch {epoch}")
 
-        if rank == 0 and epoch % config['checkpoint']['save_interval'] == 0:
+        if rank == 0 and epoch % config['checkpoint']['save_interval'] == 0 \
+                and epoch >= config['checkpoint'].get('save_start_epoch', 1):
             # 完整保存训练状态，确保 --resume 后所有组件正确恢复
             ckpt_data = {
                 'epoch': epoch,
