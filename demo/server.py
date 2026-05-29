@@ -41,6 +41,11 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+# 手写算术编解码器（纯 Python，无 torch 依赖）——/api/lossless 真实可解性 demo 用
+from src.mdlic.codec.arithmetic import (
+    ArithmeticEncoder, ArithmeticDecoder, build_cumfreq, FREQ_TOTAL,
+)
+
 DATA_DIR = Path(__file__).resolve().parent / "data"
 
 # 上传图片大小上限（10 MB）和允许的 MIME 类型，防止 /api/predict 被恶意大文件
@@ -99,20 +104,13 @@ def get_scales():
     return _load_json("scales.json")
 
 
-@app.post("/api/predict")
-def predict(file: UploadFile = File(...)):
-    """
-    上传一张图片，返回:
-      - bpd: 整体 bits/dim（CC-iGPT 为 bpd_total，iGPT 由 CE 推算）
-      - heatmap: base64 编码的 fine 分支 BPP 热力图 PNG
-                 （单位 bits/pixel = bpd × C；CC-iGPT 仅画 fine 段，
-                 coarse 8×8 的 ~2% overhead 不在该图上）
+def _read_upload_to_tensor(file: UploadFile, size: int = 32):
+    """上传图片 → 校验 → resize → (1,3,size,size) float[0,1] tensor + PIL Image。
 
-    注：sync def 形式让 FastAPI 自动放进 threadpool，避免 GPU forward 阻塞
-    event loop（async def 里直接调 model(x) 会卡住其它并发请求）。
+    /api/predict 与 /api/lossless 共用，保证两条路径对上传走完全一致的
+    校验 / 解码 / 缩放，避免 bpd 与可解性 demo 因预处理口径漂移而对不上。
     """
     try:
-        import torch
         from PIL import Image
         from torchvision import transforms
     except ImportError:
@@ -128,8 +126,29 @@ def predict(file: UploadFile = File(...)):
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid image file")
 
-    img = img.resize((32, 32), Image.Resampling.BILINEAR)
-    x = transforms.ToTensor()(img).unsqueeze(0)  # (1, 3, 32, 32)
+    img = img.resize((size, size), Image.Resampling.BILINEAR)
+    x = transforms.ToTensor()(img).unsqueeze(0)   # (1, 3, size, size)
+    return x, img
+
+
+@app.post("/api/predict")
+def predict(file: UploadFile = File(...)):
+    """
+    上传一张图片，返回:
+      - bpd: 整体 bits/dim（CC-iGPT 为 bpd_total，iGPT 由 CE 推算）
+      - heatmap: base64 编码的 fine 分支 BPP 热力图 PNG
+                 （单位 bits/pixel = bpd × C；CC-iGPT 仅画 fine 段，
+                 coarse 8×8 的 ~2% overhead 不在该图上）
+
+    注：sync def 形式让 FastAPI 自动放进 threadpool，避免 GPU forward 阻塞
+    event loop（async def 里直接调 model(x) 会卡住其它并发请求）。
+    """
+    try:
+        import torch
+    except ImportError:
+        raise HTTPException(status_code=500, detail="torch/torchvision not installed")
+
+    x, _ = _read_upload_to_tensor(file, size=32)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model, model_type = _get_cached_model(device)
@@ -170,6 +189,163 @@ def predict(file: UploadFile = File(...)):
         "model_type": model_type,
         "heatmap": heatmap_b64,
         **extras,
+    })
+
+
+# 均匀 256-way 先验（token 0 不被模型预测，用均匀分布编码 = 8 bit），
+# 与 scripts/verify_lossless.py 的 _UNIFORM_CUM 同口径。
+_UNIFORM_CUM = list(range(0, FREQ_TOTAL + 1, FREQ_TOTAL // 256))
+
+
+def _probs_from_logits(logits_seq):
+    """(1, T-1, V) logits → list[list[float]] 概率表（fp64 softmax，确定性）。"""
+    import torch
+    return torch.softmax(logits_seq.double(), dim=-1)[0].tolist()
+
+
+def _roundtrip_tokens(prob_table, tokens_list, first_cum):
+    """对一段 token 做真实算术编/解码 roundtrip。
+
+    prob_table: list[V] × (T-1)，位置 i 的分布预测 token[i+1]。
+    tokens_list: 长度 T 的真实 token。first_cum: token0 的累积频数表（均匀先验）。
+
+    返回 (bits:list[int], decoded:list[int])。encode 与 decode 用**同一张** cumfreq
+    表（先 build 一次缓存），保证逐位可逆 —— 这是真实可解性的核心。
+    """
+    cum_tables = [build_cumfreq(p) for p in prob_table]   # 每位置一张，复用
+
+    enc = ArithmeticEncoder()
+    enc.encode(tokens_list[0], first_cum)
+    for i, sym in enumerate(tokens_list[1:]):
+        enc.encode(sym, cum_tables[i])
+    bits = enc.finish()
+
+    dec = ArithmeticDecoder(bits)
+    decoded = [dec.decode(first_cum)]
+    for i in range(len(tokens_list) - 1):
+        decoded.append(dec.decode(cum_tables[i]))
+    return bits, decoded
+
+
+@app.post("/api/lossless")
+def lossless(file: UploadFile = File(...)):
+    """真实可解性 demo：上传图 → 算术编码出真实 bitstream → 解码 → 逐像素比对。
+
+    与 scripts/verify_lossless.py 同一套手写 WNC 算术编解码，但为了浏览器交互
+    （秒级响应、且不与 IN64 训练抢 GPU），用**一次 teacher-forced forward** 拿到
+    每个位置的条件分布，而非 decode 端逐 token 重跑 T 次完整 forward。
+
+    这不偷工：模型 causal，位置 i 的分布只依赖 token[0..i]，与真实 decoder 在已正确
+    解出前缀时算出的分布**逐位相同**（归纳法）。所以 bitstream 是真实可逆的，仅省了
+    decode 侧的 T 次 forward（纯加速）。严格逐步解码的版本在 verify_lossless.py。
+
+    返回 orig/recon 的 base64 PNG、是否 bit-identical、neural 码长 (byte/bpd)、
+    以及同图 PNG/WebP 无损字节数做对比。
+    """
+    try:
+        import torch
+        import torch.nn.functional as F
+        from PIL import Image
+    except ImportError:
+        raise HTTPException(status_code=500, detail="torch/torchvision not installed")
+
+    x, _ = _read_upload_to_tensor(file, size=32)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model, model_type = _get_cached_model(device)
+    if model is None:
+        raise HTTPException(status_code=503, detail="No checkpoint available. Place a checkpoint in experiments/*/checkpoints/best.pth")
+
+    x = x.to(device).clamp(0, 1).float()
+    model.eval()
+
+    # 全程关 autocast + fp32，与 verify_lossless / cc_igpt bit-exact ctx 路径一致
+    with torch.no_grad(), torch.amp.autocast(device_type=device.type, enabled=False):
+        if model_type == "ccigpt":
+            # ---- coarse（独立 bitstream）----
+            x_c = F.adaptive_avg_pool2d(x, model.coarse_size)[:, :model.coarse.in_channels]
+            coarse_tokens = model.coarse._tokenize(x_c)[0].tolist()
+            out_c = model.coarse(x_c)
+            c_probs = _probs_from_logits(out_c["logits"])
+            c_bits, c_dec = _roundtrip_tokens(c_probs, coarse_tokens, _UNIFORM_CUM)
+            coarse_ok = (c_dec == coarse_tokens)
+
+            # ---- 从 DECODED coarse token 重建 fine 条件 ctx（decoder 视角，不作弊）----
+            coarse_dec_t = torch.tensor(c_dec, dtype=torch.long, device=device).view(1, -1)
+            coarse_ctx = model.ctx_alpha * model._compute_coarse_ctx(coarse_dec_t)
+
+            # ---- fine（条件于 coarse_ctx）----
+            fine_tokens = model.fine._tokenize(x)[0].tolist()
+            out_f = model.fine(x, coarse_ctx=coarse_ctx)
+            f_probs = _probs_from_logits(out_f["logits"])
+            f_bits, f_dec = _roundtrip_tokens(f_probs, fine_tokens, _UNIFORM_CUM)
+            fine_ok = (f_dec == fine_tokens)
+
+            recon_tokens = f_dec
+            H = model.fine.image_size
+            C = model.fine.in_channels
+            N_f = model.fine.seq_len
+            # 两段独立 bitstream，各自字节对齐 → 真实落盘字节数
+            neural_bytes = math.ceil(len(c_bits) / 8) + math.ceil(len(f_bits) / 8)
+            total_bits = len(c_bits) + len(f_bits)
+            ok_decode = coarse_ok and fine_ok
+            parts = {"coarse_bits": len(c_bits), "fine_bits": len(f_bits)}
+        else:
+            tokens = model._tokenize(x)[0].tolist()
+            out = model(x)
+            probs = _probs_from_logits(out["logits"])
+            bits, dec = _roundtrip_tokens(probs, tokens, _UNIFORM_CUM)
+            ok_decode = (dec == tokens)
+            recon_tokens = dec
+            H = model.image_size
+            C = model.in_channels
+            N_f = model.seq_len
+            neural_bytes = math.ceil(len(bits) / 8)
+            total_bits = len(bits)
+            parts = {}
+
+    # ---- 重建图（从 DECODED token，pixel-first 逆 tokenize）----
+    recon = np.array(recon_tokens, dtype=np.uint8).reshape(H, H, C)      # (H,W,C)
+    orig = (x.clamp(0, 1) * 255).round().to(torch.uint8)[0].permute(1, 2, 0).cpu().numpy()
+    pixel_exact = bool(ok_decode and np.array_equal(recon, orig))
+
+    # ---- 传统无损对照（同一张 32×32 图）----
+    def _fmt_bytes(arr, fmt, **kw):
+        buf = io.BytesIO()
+        Image.fromarray(arr).save(buf, format=fmt, **kw)
+        return buf.tell()
+
+    png_bytes = _fmt_bytes(orig, "PNG", optimize=True)
+    try:
+        webp_bytes = _fmt_bytes(orig, "WEBP", lossless=True)
+    except Exception:
+        webp_bytes = None
+
+    def _b64_png(arr, scale=4):
+        # 放大 nearest 便于肉眼看清 32×32
+        im = Image.fromarray(arr).resize((arr.shape[1] * scale, arr.shape[0] * scale),
+                                         Image.Resampling.NEAREST)
+        buf = io.BytesIO()
+        im.save(buf, format="PNG")
+        return base64.b64encode(buf.getvalue()).decode("ascii")
+
+    achieved_bpd = total_bits / N_f
+    n_pixels = H * H * C
+
+    return JSONResponse({
+        "model_type": model_type,
+        "pixel_exact": pixel_exact,
+        "orig_png": _b64_png(orig),
+        "recon_png": _b64_png(recon),
+        "neural_bytes": neural_bytes,
+        "neural_bits": total_bits,
+        "achieved_bpd": round(achieved_bpd, 4),
+        "png_bytes": png_bytes,
+        "webp_bytes": webp_bytes,
+        "n_subpixels": n_pixels,
+        # 传统格式 bpd = bytes×8 / 子像素数，与 neural achieved_bpd 同口径可比
+        "png_bpd": round(png_bytes * 8 / n_pixels, 4),
+        "webp_bpd": round(webp_bytes * 8 / n_pixels, 4) if webp_bytes else None,
+        **parts,
     })
 
 

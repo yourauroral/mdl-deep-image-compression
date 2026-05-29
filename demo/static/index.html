@@ -58,7 +58,72 @@
   </div>
 </section>
 
-<!-- Panel 2: bits/dim 对比表 -->
+<!-- Panel 2: 真实可解性 — 无损 roundtrip -->
+<section class="panel" id="panel-lossless">
+  <h2>真实可解性验证 — 无损 roundtrip</h2>
+  <p class="panel-desc">
+    把模型当真实无损 codec：上传图 → 手写算术编码（Witten-Neal-Cleary）成<b>真实 bitstream</b>
+    → 解码 → 逐像素比对。<b>pixel diff = 0</b> 即证明这条 bitstream 严格可逆，报的 bpd 不是
+    proxy 而是真实可解码长。下方与同图 PNG / WebP 无损字节数对比。
+  </p>
+  <div class="predict-layout">
+    <div class="upload-area" id="ll-upload-area">
+      <input type="file" id="ll-file-input" accept="image/*" hidden>
+      <div class="upload-placeholder" id="ll-upload-placeholder">
+        <span class="upload-icon">+</span>
+        <p>点击或拖拽上传图片</p>
+        <p class="hint">缩放至 32×32 后做无损 roundtrip</p>
+      </div>
+      <img id="ll-preview-img" class="preview-img" hidden>
+    </div>
+    <div class="result-area">
+      <!-- roundtrip 流水线：原图 → codec → 重建图 -->
+      <div class="ll-pipeline">
+        <div class="ll-stage">
+          <span class="ll-stage-label">原图 32×32</span>
+          <img id="ll-orig" class="ll-img" hidden>
+          <span class="ll-img-ph" id="ll-orig-ph">—</span>
+        </div>
+        <div class="ll-arrow">
+          <span class="ll-arrow-glyph">→</span>
+          <span class="ll-arrow-sub" id="ll-codec-sub">neural codec</span>
+        </div>
+        <div class="ll-stage">
+          <span class="ll-stage-label">重建（解码后）</span>
+          <img id="ll-recon" class="ll-img" hidden>
+          <span class="ll-img-ph" id="ll-recon-ph">—</span>
+        </div>
+      </div>
+      <div id="ll-badge" class="ll-badge" hidden></div>
+      <!-- 字节数对比条 -->
+      <div class="ll-compare" id="ll-compare" hidden>
+        <div class="ll-bar-row">
+          <span class="ll-bar-name">本文 neural</span>
+          <div class="ll-bar-track"><div class="ll-bar-fill ll-bar-ours" id="ll-bar-neural"></div></div>
+          <span class="ll-bar-val" id="ll-val-neural">—</span>
+        </div>
+        <div class="ll-bar-row">
+          <span class="ll-bar-name">PNG 无损</span>
+          <div class="ll-bar-track"><div class="ll-bar-fill" id="ll-bar-png"></div></div>
+          <span class="ll-bar-val" id="ll-val-png">—</span>
+        </div>
+        <div class="ll-bar-row">
+          <span class="ll-bar-name">WebP 无损</span>
+          <div class="ll-bar-track"><div class="ll-bar-fill" id="ll-bar-webp"></div></div>
+          <span class="ll-bar-val" id="ll-val-webp">—</span>
+        </div>
+        <p class="hint ll-caveat">
+          字节数 = 真实落盘大小；bpd = bytes×8 / 子像素数，三者同口径。
+          注：32×32 上 PNG/WebP 固定文件头开销占比偏高，neural 优势被放大；
+          学术 bpd 主表用大图统计（见上方对比面板）。
+        </p>
+      </div>
+      <p id="ll-placeholder" class="hint">上传图片后执行 roundtrip（一次 forward + 真实算术编解码，约 1–2 秒）</p>
+    </div>
+  </div>
+</section>
+
+<!-- Panel 3: bits/dim 对比表 -->
 <section class="panel" id="panel-metrics">
   <h2>bits/dim 方法对比</h2>
   <div class="chart-container">
@@ -70,7 +135,7 @@
   </table>
 </section>
 
-<!-- Panel 3: Linear Probe -->
+<!-- Panel 4: Linear Probe -->
 <section class="panel" id="panel-probe">
   <h2>Linear Probe 各层分类准确率</h2>
   <p class="panel-desc">冻结预训练模型，在各层 hidden state 上训练线性分类器，衡量表征质量 (Chen et al., 2020)。CC-iGPT v2 fine 分支（32 层，with α·coarse_ctx 注入）逐层 top-1 acc：L0→L19 单调上升至峰值 79.33%，末段缓降是 AR 模型典型表征曲线（末层过拟合到 token-level NLL 目标，丢弃部分语义信息）。</p>
@@ -79,7 +144,7 @@
   </div>
 </section>
 
-<!-- Panel 4: Kernel 性能 -->
+<!-- Panel 5: Kernel 性能 -->
 <section class="panel" id="panel-kernels">
   <h2>Triton Kernel 性能对比</h2>
   <p class="panel-desc">7 个进入训练栈的手写 Triton Kernel vs PyTorch 原生实现</p>
@@ -88,7 +153,7 @@
   </div>
 </section>
 
-<!-- Panel 5: CC-iGPT coarse/fine token 分配 -->
+<!-- Panel 6: CC-iGPT coarse/fine token 分配 -->
 <section class="panel" id="panel-scales">
   <h2>CC-iGPT 双尺度 Token 分配</h2>
   <p class="panel-desc">浅层 coarse iGPT (R-only, 8×8×1, 64 token) 独立编码进 bitstream，UP+量化后注入 fine iGPT (32×32×3, 3072 token)</p>

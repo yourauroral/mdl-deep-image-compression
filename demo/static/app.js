@@ -90,7 +90,93 @@ Chart.defaults.borderColor = "#2a2d3a";
   }
 })();
 
-// ── Panel 2: bits/dim 对比 ──
+// ── Panel 2: 真实可解性 — 无损 roundtrip ──
+(function initLossless() {
+  const area = $("ll-upload-area");
+  const input = $("ll-file-input");
+  const preview = $("ll-preview-img");
+  const placeholder = $("ll-upload-placeholder");
+  const origImg = $("ll-orig"), origPh = $("ll-orig-ph");
+  const reconImg = $("ll-recon"), reconPh = $("ll-recon-ph");
+  const badge = $("ll-badge");
+  const compare = $("ll-compare");
+  const resultPh = $("ll-placeholder");
+  const codecSub = $("ll-codec-sub");
+
+  area.addEventListener("click", () => input.click());
+  area.addEventListener("dragover", e => { e.preventDefault(); area.classList.add("dragover"); });
+  area.addEventListener("dragleave", () => area.classList.remove("dragover"));
+  area.addEventListener("drop", e => {
+    e.preventDefault();
+    area.classList.remove("dragover");
+    if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
+  });
+  input.addEventListener("change", () => { if (input.files.length) handleFile(input.files[0]); });
+
+  function setBars(neural, png, webp) {
+    // 以三者最大字节数为满刻度，画相对长度
+    const vals = [neural, png, webp].filter(v => v != null);
+    const max = Math.max(...vals);
+    const pct = (v) => v == null ? 0 : (v / max * 100).toFixed(1);
+    $("ll-bar-neural").style.width = pct(neural) + "%";
+    $("ll-bar-png").style.width = pct(png) + "%";
+    $("ll-bar-webp").style.width = pct(webp) + "%";
+  }
+
+  async function handleFile(file) {
+    const reader = new FileReader();
+    reader.onload = () => { preview.src = reader.result; preview.hidden = false; placeholder.hidden = true; };
+    reader.readAsDataURL(file);
+
+    resultPh.hidden = false;
+    resultPh.textContent = "执行 roundtrip 中...（一次 forward + 真实算术编解码）";
+    badge.hidden = true; compare.hidden = true;
+    origImg.hidden = reconImg.hidden = true;
+    origPh.hidden = reconPh.hidden = false;
+    codecSub.textContent = "neural codec";
+
+    const form = new FormData();
+    form.append("file", file);
+    try {
+      const res = await fetch(API + "/api/lossless", { method: "POST", body: form });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        resultPh.textContent = err.detail || "错误";
+        return;
+      }
+      const d = await res.json();
+
+      origImg.src = "data:image/png;base64," + d.orig_png;
+      reconImg.src = "data:image/png;base64," + d.recon_png;
+      origImg.hidden = reconImg.hidden = false;
+      origPh.hidden = reconPh.hidden = true;
+      codecSub.textContent = d.neural_bytes + " B";
+
+      badge.hidden = false;
+      if (d.pixel_exact) {
+        badge.className = "ll-badge ll-badge-ok";
+        badge.innerHTML = `✅ bit-identical — 逐像素 diff = 0，bitstream 真实可逆`
+          + `　|　achieved <b>${d.achieved_bpd}</b> bpd`;
+      } else {
+        badge.className = "ll-badge ll-badge-fail";
+        badge.innerHTML = `❌ 重建不一致（不应发生 — 请检查 ckpt / 精度）`;
+      }
+
+      // 字节数对比
+      $("ll-val-neural").innerHTML = `${d.neural_bytes} B　<small>${d.achieved_bpd} bpd</small>`;
+      $("ll-val-png").innerHTML = `${d.png_bytes} B　<small>${d.png_bpd} bpd</small>`;
+      $("ll-val-webp").innerHTML = d.webp_bytes != null
+        ? `${d.webp_bytes} B　<small>${d.webp_bpd} bpd</small>` : "不可用";
+      setBars(d.neural_bytes, d.png_bytes, d.webp_bytes);
+      compare.hidden = false;
+      resultPh.hidden = true;
+    } catch (e) {
+      resultPh.textContent = "无法连接后端";
+    }
+  }
+})();
+
+// ── Panel 3: bits/dim 对比 ──
 // 设计：聚焦神经 AR 方法之间的 bits/dim 差异（~2.81-2.97）。
 // 横轴聚焦 2.70-3.05，数值标签贴在点末端。
 (async function initMetrics() {
@@ -239,7 +325,7 @@ Chart.defaults.borderColor = "#2a2d3a";
   });
 })();
 
-// ── Panel 3: Linear Probe ──
+// ── Panel 4: Linear Probe ──
 (async function initProbe() {
   const data = await fetchJSON("/api/probe");
   if (!data) return;
@@ -274,7 +360,7 @@ Chart.defaults.borderColor = "#2a2d3a";
   });
 })();
 
-// ── Panel 4: Kernel 性能 ──
+// ── Panel 5: Kernel 性能 ──
 // kernels.json schema：嵌套 `{forward_only: {kernels:[...]}, forward_backward: {kernels:[...]}}`。
 // Panel 4 默认渲染 forward_only；avg/max speedup 来自同一段。
 (async function initKernels() {
@@ -330,7 +416,7 @@ Chart.defaults.borderColor = "#2a2d3a";
   });
 })();
 
-// ── Panel 5: CC-iGPT 双尺度 ──
+// ── Panel 6: CC-iGPT 双尺度 ──
 (async function initScales() {
   const data = await fetchJSON("/api/scales");
   if (!data) return;
