@@ -21,8 +21,7 @@ from contextlib import nullcontext
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 import torch.distributed as dist
-from torch.amp import autocast
-from torch.cuda.amp import GradScaler
+from torch.amp import autocast, GradScaler
 from torch.utils.tensorboard import SummaryWriter
 import numpy as np
 from torchvision import transforms
@@ -634,7 +633,7 @@ def main():
         amp_dtype = torch.bfloat16
     else:
         amp_dtype = torch.float16
-    scaler = GradScaler() if amp_dtype == torch.float16 else None
+    scaler = GradScaler("cuda") if amp_dtype == torch.float16 else None
     grad_accum_steps = config["train"].get("grad_accum_steps", 1)
 
     # SWA (Stochastic Weight Averaging) 初始化
