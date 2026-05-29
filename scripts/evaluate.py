@@ -360,25 +360,60 @@ def print_results_table(dataset_name, model_bpd, model_std,
     print()
 
 
-def _load_dataset(config):
-    """加载测试数据集"""
+def _load_dataset(config, override: str = None):
+    """加载测试数据集。
+
+    override: 跨数据集泛化评测用（cifar100/svhn/stl10）。一个 CIFAR-10 训练的
+    模型直接在别的自然图像集上评 bpd，论证学到的是自然图像统计而非数据集记忆。
+    会 resize 到模型原生分辨率（model.image_size），并打印可比性 caveat：
+    分辨率/下采样改变 → bpd 与各集官方数字不可直接横比，仅看"同一模型相对值"。
+    """
     from torchvision import transforms
     from torchvision.datasets import CIFAR10, CIFAR100
 
     dataset_name = config["data"].get("dataset", "cifar100")
-    if dataset_name == "imagenet64_npy":
-        from src.mdlic.data.imagenet64_npy import ImageNet64Npy
-        test_dataset = ImageNet64Npy(root=config["data"]["valid"], split="val")
+
+    if override is None:
+        if dataset_name == "imagenet64_npy":
+            from src.mdlic.data.imagenet64_npy import ImageNet64Npy
+            test_dataset = ImageNet64Npy(root=config["data"]["valid"], split="val")
+            return test_dataset, dataset_name
+        if dataset_name not in ("cifar10", "cifar100"):
+            raise ValueError(
+                f"未知 dataset: '{dataset_name}'，支持 cifar10/cifar100/imagenet64_npy"
+            )
+        transform = transforms.ToTensor()
+        DatasetClass = CIFAR10 if dataset_name == "cifar10" else CIFAR100
+        test_dataset = DatasetClass(root=config["data"]["valid"], train=False,
+                                    download=False, transform=transform)
         return test_dataset, dataset_name
-    if dataset_name not in ("cifar10", "cifar100"):
-        raise ValueError(
-            f"未知 dataset: '{dataset_name}'，支持 cifar10/cifar100/imagenet64_npy"
-        )
-    transform = transforms.ToTensor()
-    DatasetClass = CIFAR10 if dataset_name == "cifar10" else CIFAR100
-    test_dataset = DatasetClass(root=config["data"]["valid"], train=False,
-                                download=False, transform=transform)
-    return test_dataset, dataset_name
+
+    # ---- 跨数据集 override 路径 ----
+    target = int(config["model"]["image_size"])           # 模型原生分辨率
+    root = config["data"].get("valid", "datasets/")
+    tf = []
+    note = ""
+    src_size = {"cifar100": 32, "svhn": 32, "stl10": 96}.get(override)
+    if src_size is not None and src_size != target:
+        tf.append(transforms.Resize(target,
+                                    interpolation=transforms.InterpolationMode.BILINEAR))
+        note = f"（resize {src_size}→{target}，bpd 含重采样，勿与官方横比）"
+    tf.append(transforms.ToTensor())
+    transform = transforms.Compose(tf)
+
+    if override == "cifar100":
+        ds = CIFAR100(root=root, train=False, download=True, transform=transform)
+    elif override == "svhn":
+        from torchvision.datasets import SVHN
+        ds = SVHN(root=root, split="test", download=True, transform=transform)
+    elif override == "stl10":
+        from torchvision.datasets import STL10
+        ds = STL10(root=root, split="test", download=True, transform=transform)
+    else:
+        raise ValueError(f"--dataset_override 仅支持 cifar100/svhn/stl10，收到 '{override}'")
+
+    print(f"[跨数据集] override → {override} {note}")
+    return ds, f"{override}(transfer)"
 
 
 def _load_checkpoint(model, ckpt_path, device):
@@ -419,7 +454,7 @@ def _get_amp_dtype(config):
 
 def cmd_single(args, config, device):
     """单模型评测"""
-    test_dataset, dataset_name = _load_dataset(config)
+    test_dataset, dataset_name = _load_dataset(config, getattr(args, "dataset_override", None))
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size,
                              shuffle=False, num_workers=2, pin_memory=True)
     print(f"Dataset: {dataset_name} test ({len(test_dataset)} images)")
@@ -474,7 +509,7 @@ def cmd_single(args, config, device):
 
 def cmd_swa(args, config, device):
     """SWA vs best checkpoint 对比评测"""
-    test_dataset, dataset_name = _load_dataset(config)
+    test_dataset, dataset_name = _load_dataset(config, getattr(args, "dataset_override", None))
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size,
                              shuffle=False, num_workers=2, pin_memory=True)
 
@@ -522,7 +557,7 @@ def cmd_swa(args, config, device):
 
 def cmd_ensemble(args, config, device):
     """多 ckpt logit ensemble 评测（log-prob 域平均，best/swa/ema 等同源平滑组合）。"""
-    test_dataset, dataset_name = _load_dataset(config)
+    test_dataset, dataset_name = _load_dataset(config, getattr(args, "dataset_override", None))
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size,
                              shuffle=False, num_workers=2, pin_memory=True)
     print(f"Dataset: {dataset_name} test ({len(test_dataset)} images)")
@@ -599,6 +634,11 @@ experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/ema.pth \\
                         help='同时评测 SWA checkpoint（swa.pth vs best.pth）')
     parser.add_argument('--tta_hflip', action='store_true',
                         help='Test-Time Augmentation：对每张图同时跑 x 与 hflip(x)，bpd 取均值')
+    parser.add_argument('--dataset_override', type=str, default=None,
+                        choices=['cifar100', 'svhn', 'stl10'],
+                        help='跨数据集泛化评测：用本 config 的模型在另一数据集上评 bpd '
+                             '（resize 到模型原生分辨率；bpd 含重采样，勿与官方横比，'
+                             '仅看同一模型相对值）')
     parser.add_argument('--batch_size', type=int, default=64,
                         help='评测 batch size')
     args = parser.parse_args()

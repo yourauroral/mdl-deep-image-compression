@@ -238,6 +238,13 @@ def main():
     parser.add_argument("--no_coarse_ctx", action="store_true",
                         help="仅 CC-iGPT 生效：跳过 α·coarse_ctx 注入，"
                              "测裸 fine 表征（消融对照组）")
+    parser.add_argument("--probe_dataset", type=str, default=None,
+                        choices=["cifar10", "cifar100"],
+                        help="覆盖探针数据集（用于跨数据集 transfer probe，如 IN64 预训权重"
+                             "探在 CIFAR-10 上）。默认沿用 config['data']['dataset']")
+    parser.add_argument("--probe_data_root", type=str, default=None,
+                        help="探针数据集根目录（默认沿用 config['data']['train']；"
+                             "IN64 config 的 data 路径不含 CIFAR 时需显式指定，如 datasets/）")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -271,12 +278,29 @@ def main():
                 sys.exit(1)
 
     # --- 加载数据集 ---
-    dataset_name = config["data"].get("dataset", "cifar100")
+    # 支持跨数据集 transfer probe：--probe_dataset 覆盖预训练 config 里的数据集，
+    # 让 IN64 预训练权重也能探在 CIFAR-10 上（与 66.93/79.33 同协议可比）。
+    dataset_name = args.probe_dataset or config["data"].get("dataset", "cifar100")
+    if dataset_name not in ("cifar10", "cifar100"):
+        print(f"[Error] linear probe 仅支持 cifar10/cifar100 探针集，收到 '{dataset_name}'。"
+              f"\n  IN64 1000-way probe 需 label-保留 prepare（见 future.md §6.1）。")
+        sys.exit(1)
     DatasetClass = CIFAR10 if dataset_name == "cifar10" else CIFAR100
     num_classes = 10 if dataset_name == "cifar10" else 100
-    data_root = config["data"]["train"]
+    data_root = args.probe_data_root or config["data"]["train"]
 
-    transform = transforms.ToTensor()
+    # 模型 tokenize / position buffer 锁定在 model.image_size（IN64=64, CIFAR 配置=32）。
+    # 探针图必须 resize 到该分辨率，否则 _embed_inputs 的定长断言命中。
+    model_img_size = model.image_size if model_type == "ccigpt" else model.image_size
+    tf_list = []
+    if model_img_size != 32:
+        # CIFAR 原生 32×32；模型若期望别的分辨率（如 IN64 的 64）则双线性放缩
+        tf_list.append(transforms.Resize(model_img_size,
+                                         interpolation=transforms.InterpolationMode.BILINEAR))
+        print(f"[probe] resize CIFAR 32→{model_img_size}（匹配预训练 image_size）")
+    tf_list.append(transforms.ToTensor())
+    transform = transforms.Compose(tf_list)
+
     train_dataset = DatasetClass(root=data_root, train=True,
                                  download=True, transform=transform)
     test_dataset = DatasetClass(root=data_root, train=False,
