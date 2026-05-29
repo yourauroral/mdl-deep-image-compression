@@ -279,7 +279,9 @@ def main():
 
     # --- 加载数据集 ---
     # 支持跨数据集 transfer probe：--probe_dataset 覆盖预训练 config 里的数据集，
-    # 让 IN64 预训练权重也能探在 CIFAR-10 上（与 66.93/79.33 同协议可比）。
+    # 让 IN64 预训练权重也能探在 CIFAR-10 上。注意：IN64 模型 image_size=64，CIFAR
+    # 图会被 resize 32→64（见下方 model_img_size 分支），与 32-native CIFAR 模型的
+    # 66.93/79.33 不是同协议数字（输入分辨率不同），只能作 transfer 趋势看，勿直接横比。
     dataset_name = args.probe_dataset or config["data"].get("dataset", "cifar100")
     if dataset_name not in ("cifar10", "cifar100"):
         print(f"[Error] linear probe 仅支持 cifar10/cifar100 探针集，收到 '{dataset_name}'。"
@@ -291,7 +293,7 @@ def main():
 
     # 模型 tokenize / position buffer 锁定在 model.image_size（IN64=64, CIFAR 配置=32）。
     # 探针图必须 resize 到该分辨率，否则 _embed_inputs 的定长断言命中。
-    model_img_size = model.image_size if model_type == "ccigpt" else model.image_size
+    model_img_size = model.image_size           # IGPT / CCIGPT 都暴露 image_size
     tf_list = []
     if model_img_size != 32:
         # CIFAR 原生 32×32；模型若期望别的分辨率（如 IN64 的 64）则双线性放缩

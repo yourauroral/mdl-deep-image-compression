@@ -124,9 +124,9 @@ def per_image_signals(model, model_type, x, device):
     with torch.no_grad(), torch.amp.autocast(device_type=device.type, enabled=False):
         if model_type == "ccigpt":
             x_c = F.adaptive_avg_pool2d(x, model.coarse_size)[:, :model.coarse.in_channels]
-            out_c = model.coarse(x_c)
-            ce_c = _per_image_ce(out_c["logits"], model.coarse._tokenize(x_c))
             coarse_tokens = model.coarse._tokenize(x_c)
+            out_c = model.coarse(x_c)
+            ce_c = _per_image_ce(out_c["logits"], coarse_tokens)
             coarse_ctx = model.ctx_alpha * model._compute_coarse_ctx(coarse_tokens)
             out_f = model.fine(x, coarse_ctx=coarse_ctx)
             ce_f = _per_image_ce(out_f["logits"], model.fine._tokenize(x))
