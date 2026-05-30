@@ -12,7 +12,11 @@ Demo 可视化后端 — FastAPI + 静态文件。
   GET  /api/probe       — Linear Probe 各层准确率
   GET  /api/kernels     — Triton Kernel 性能数据
   GET  /api/scales      — CC-iGPT coarse/fine token 分配
+  GET  /api/ood         — OOD typicality AUROC 表（下游 §6.2，AutoDL 回填）
+  GET  /api/transfer    — 跨数据集 bpd 泛化（下游 §6.3，AutoDL 回填）
   POST /api/predict     — 上传图片 → 返回 bpd / 双尺度 CE / 热力图
+  POST /api/lossless    — 上传图片 → 真实算术编解码 roundtrip（下游 §6.5/6.6）
+  POST /api/complete    — 上传图片 → AR 补全下半（下游 §6.4，实时采样，~20–40s）
 """
 
 import json
@@ -25,7 +29,7 @@ import threading
 
 import numpy as np
 from pathlib import Path
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -102,6 +106,29 @@ def get_kernels():
 @app.get("/api/scales")
 def get_scales():
     return _load_json("scales.json")
+
+
+# OOD / transfer 是下游任务结果，由 AutoDL 跑 scripts/ood_detect.py /
+# scripts/evaluate.py --dataset_override 时用 --json_out 回填到 demo/data/。
+# 未回填前文件里是 generated=null 的占位，前端据此显示"待 AutoDL 跑"。
+# 缺文件不报 404（与 metrics 等不同）：占位 JSON 已 checkin，正常情况恒存在；
+# 万一被删，回退一个 pending 壳让前端面板优雅留白而非整页报错。
+@app.get("/api/ood")
+def get_ood():
+    path = DATA_DIR / "ood.json"
+    if not path.exists():
+        return JSONResponse({"generated": None, "ood": []})
+    with open(path) as f:
+        return json.load(f)
+
+
+@app.get("/api/transfer")
+def get_transfer():
+    path = DATA_DIR / "transfer.json"
+    if not path.exists():
+        return JSONResponse({"generated": None, "datasets": []})
+    with open(path) as f:
+        return json.load(f)
 
 
 def _read_upload_to_tensor(file: UploadFile, size: int = 32):
@@ -227,6 +254,19 @@ def _roundtrip_tokens(prob_table, tokens_list, first_cum):
     return bits, decoded
 
 
+def _b64_png(arr, scale=4):
+    """(H,W,C) uint8 numpy → base64 PNG，nearest 放大 scale 倍便于肉眼看清 32×32。
+
+    /api/lossless 与 /api/complete 共用，保证两条路径出图口径一致。
+    """
+    from PIL import Image
+    im = Image.fromarray(arr).resize((arr.shape[1] * scale, arr.shape[0] * scale),
+                                     Image.Resampling.NEAREST)
+    buf = io.BytesIO()
+    im.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
 @app.post("/api/lossless")
 def lossless(file: UploadFile = File(...)):
     """真实可解性 demo：上传图 → 算术编码出真实 bitstream → 解码 → 逐像素比对。
@@ -320,14 +360,6 @@ def lossless(file: UploadFile = File(...)):
     except Exception:
         webp_bytes = None
 
-    def _b64_png(arr, scale=4):
-        # 放大 nearest 便于肉眼看清 32×32
-        im = Image.fromarray(arr).resize((arr.shape[1] * scale, arr.shape[0] * scale),
-                                         Image.Resampling.NEAREST)
-        buf = io.BytesIO()
-        im.save(buf, format="PNG")
-        return base64.b64encode(buf.getvalue()).decode("ascii")
-
     achieved_bpd = total_bits / N_f
     n_pixels = H * H * C
 
@@ -346,6 +378,82 @@ def lossless(file: UploadFile = File(...)):
         "png_bpd": round(png_bytes * 8 / n_pixels, 4),
         "webp_bpd": round(webp_bytes * 8 / n_pixels, 4) if webp_bytes else None,
         **parts,
+    })
+
+
+# 补全请求采样上限：keep_frac 决定要采样多少 token（越小越慢）。模型无 KV-cache，
+# 每 token 一次完整 forward；CIFAR 32×32×3=3072 token，keep_frac=0.6 → 采 ~1229 步
+# ≈ 20–40s（取决于 GPU）。设硬下限防止 keep_frac→0 把单请求拖到几分钟、长时间占住
+# 一个 threadpool worker（且与 IN64 训练抢算力）。
+_COMPLETE_MIN_KEEP_FRAC = 0.3
+
+
+@app.post("/api/complete")
+def complete(
+    file: UploadFile = File(...),
+    keep_frac: float = Form(0.6),
+    temperature: float = Form(1.0),
+    top_k: int = Form(100),
+):
+    """图像补全 demo（下游 §6.4）：上传图 → 保留前 keep_frac 的 raster token（≈上半）
+    → AR 续采样补全下半 → 返回 原图 / 已知上半(灰=待补) / 补全 三张图。
+
+    与 scripts/complete_image.py 同一套 per-step forward（无 KV-cache，causal mask
+    保证 0 后缀不泄漏）。CC-iGPT 的 coarse ctx 由**整图**缩略图算 —— 故语义是"低分
+    缩略图 + 上半真实像素 → 补下半"，coarse 是显式 side-channel（与压缩时独立 bitstream
+    同源），非偷看答案。详见 complete_image.py docstring 与 runbook §6.4。
+
+    sync def → FastAPI 放进 threadpool，GPU 采样不阻塞 event loop（但单请求会占住
+    一个 worker ~数十秒，且与 IN64 训练共享 GPU；属预期，demo 单用户场景可接受）。
+    """
+    try:
+        import torch
+    except ImportError:
+        raise HTTPException(status_code=500, detail="torch/torchvision not installed")
+
+    # 入参夹紧：keep_frac 下限防超长采样；temperature/top_k 限合理域
+    try:
+        keep_frac = float(keep_frac)
+        temperature = float(temperature)
+        top_k = int(top_k)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="keep_frac/temperature/top_k 需为数值")
+    if not (_COMPLETE_MIN_KEEP_FRAC <= keep_frac <= 0.95):
+        raise HTTPException(
+            status_code=400,
+            detail=f"keep_frac 需 ∈ [{_COMPLETE_MIN_KEEP_FRAC}, 0.95]（越小采样越久，下限防超时）",
+        )
+    if not (0.0 <= temperature <= 2.0):
+        raise HTTPException(status_code=400, detail="temperature 需 ∈ [0, 2]")
+    top_k = max(0, min(top_k, 256))
+
+    x, _ = _read_upload_to_tensor(file, size=32)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model, model_type = _get_cached_model(device)
+    if model is None:
+        raise HTTPException(status_code=503, detail="No checkpoint available. Place a checkpoint in experiments/*/checkpoints/best.pth")
+
+    # 复用 scripts/complete_image.py 的逐步采样实现（与 runbook §6.4 完全同源），
+    # 避免在 demo 侧重写一份采样逻辑导致两条路径漂移。
+    from scripts.complete_image import _complete_one
+
+    model.eval()
+    o, m, c = _complete_one(model, model_type, x, keep_frac, temperature, top_k, device)
+
+    # (C,H,W) uint8 → (H,W,C) numpy → base64 PNG
+    def _chw_to_png(t):
+        return _b64_png(t.permute(1, 2, 0).contiguous().numpy())
+
+    keep_pct = round(keep_frac * 100, 1)
+    return JSONResponse({
+        "model_type": model_type,
+        "orig_png": _chw_to_png(o),
+        "masked_png": _chw_to_png(m),
+        "completed_png": _chw_to_png(c),
+        "keep_frac": keep_frac,
+        "keep_pct": keep_pct,
+        "temperature": temperature,
+        "top_k": top_k,
     })
 
 

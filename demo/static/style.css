@@ -295,6 +295,118 @@ footer {
 
 .ll-caveat { margin-top: 0.5rem; line-height: 1.4; }
 
+/* ── 下游任务分隔条 ── */
+.section-divider {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin: 1rem 0 -0.3rem;
+  color: var(--accent);
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+.section-divider::before, .section-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(to right, transparent, var(--border), transparent);
+}
+
+/* ── pending（待 AutoDL 回填）提示 ── */
+.pending-note {
+  background: var(--bg);
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  padding: 0.9rem 1rem;
+  font-size: 0.82rem;
+  color: var(--text-dim);
+  line-height: 1.5;
+}
+.pending-note code {
+  background: rgba(108,140,255,0.12);
+  color: #9db2ff;
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+  font-size: 0.78rem;
+}
+
+/* ── Panel 7: OOD 表格 raw_bpd < 0.5 红字（复现 Nalisnick 失败）── */
+.data-table td.ood-low { color: #ff8f8f; font-weight: 600; }
+
+/* ── Panel 8: 跨数据集是水平条形图，4 行 ── */
+#panel-transfer .chart-container { max-height: none; height: 220px; }
+#panel-ood .chart-container { max-height: none; height: 300px; }
+
+/* ── Panel 9: 图像补全 ── */
+.cmp-left { display: flex; flex-direction: column; gap: 0.8rem; }
+
+.cmp-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.8rem;
+}
+.cmp-ctrl {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.8rem;
+  color: var(--text-dim);
+}
+.cmp-ctrl b { color: var(--accent); }
+.cmp-ctrl input[type="range"] { width: 100%; accent-color: var(--accent); }
+.cmp-ctrl .hint { font-size: 0.72rem; }
+
+.cmp-btn {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  padding: 0.65rem 1rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.2s, background 0.2s;
+}
+.cmp-btn:hover:not(:disabled) { background: #5878f0; }
+.cmp-btn:disabled { background: #3a3d4e; color: var(--text-dim); cursor: not-allowed; }
+
+.cmp-pipeline {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 1rem;
+  margin-bottom: 0.8rem;
+}
+.cmp-stage {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.35rem;
+  text-align: center;
+}
+.cmp-stage-label { font-size: 0.7rem; color: var(--text-dim); max-width: 96px; }
+.cmp-img {
+  width: 96px;
+  height: 96px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  image-rendering: pixelated;
+}
+.cmp-img-ph {
+  width: 96px;
+  height: 96px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  color: var(--text-dim);
+}
+
 @media (max-width: 640px) {
   .predict-layout { grid-template-columns: 1fr; }
   .metric-cards { flex-direction: column; }

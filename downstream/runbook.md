@@ -69,7 +69,8 @@ coder 对尾部符号最多花 16 bit。于是 `ideal`（按全精度 `p` 算）
 
 ```bash
 python scripts/ood_detect.py --config $CFG --checkpoint $BEST \
-    --ood svhn,cifar100 --ref_images 2000
+    --ood svhn,cifar100 --ref_images 2000 \
+    --json_out demo/data/ood.json
 ```
 
 **预期：** 一张三列 AUROC 表（`raw_bpd` / `typ_total` / `typ_dualscale`）。
@@ -77,21 +78,25 @@ python scripts/ood_detect.py --config $CFG --checkpoint $BEST \
   脚本会打印 `⚠ 复现 Nalisnick` 提示。
 - `typ_total`、`typ_dualscale` 把它救回 > 0.5；**`typ_dualscale`（双尺度联合）是本工作差异化**，
   单尺度模型给不出 coarse/fine 两个独立信号。
+- `--json_out` 回填前端 **Panel 7（/api/ood）** 的 AUROC 分组柱状图（含 0.5 随机基线虚线）。
 
 **论文用途：** 论证"密度估计"侧面，且顺带展示一个反直觉的文献坑 + 你的修正。
 
 ---
 
-## [2] 跨数据集泛化 bpd（各 ~1–2 min，跑三次）
+## [2] 跨数据集泛化 bpd（各 ~1–2 min，in-domain + 三个 override）
 
 ```bash
-python scripts/evaluate.py --config $CFG --checkpoint $BEST --dataset_override cifar100
-python scripts/evaluate.py --config $CFG --checkpoint $BEST --dataset_override svhn
-python scripts/evaluate.py --config $CFG --checkpoint $BEST --dataset_override stl10
+# in-domain 基线（单 ckpt 无 ensemble/TTA，与各 override 同协议可比，作前端参照柱）
+python scripts/evaluate.py --config $CFG --checkpoint $BEST --json_out demo/data/transfer.json
+python scripts/evaluate.py --config $CFG --checkpoint $BEST --dataset_override cifar100 --json_out demo/data/transfer.json
+python scripts/evaluate.py --config $CFG --checkpoint $BEST --dataset_override svhn     --json_out demo/data/transfer.json
+python scripts/evaluate.py --config $CFG --checkpoint $BEST --dataset_override stl10    --json_out demo/data/transfer.json
 ```
 
 **预期：** 每次一张 bpd 表 + `[跨数据集] override → …` 的可比性 caveat 行
-（SVHN `split='test'`；STL-10 96→32 下采样）。
+（SVHN `split='test'`；STL-10 96→32 下采样）。`--json_out` 按数据集 key upsert 到同一
+JSON，四次跑共同填满前端 **Panel 8（/api/transfer）** 的水平条形图（in-domain 蓝柱为参照）。
 
 ⚠ **可比性：** 含重采样，**勿与各集官方 bpd 横比**，只看"同一模型在不同集上的相对值"——
 CIFAR-10 训的模型在别的自然图像集上 bpd 仍合理，即学到的是自然图像统计而非记忆。
@@ -158,9 +163,33 @@ python scripts/linear_probe.py \
 
 ---
 
+## [6] Demo 前端面板（下游任务可视化，复用上面跑出的数字）
+
+下游任务的前端在 demo 里分两类（详见 `future.md §6.6`）：
+
+| Panel | 数据来源 | 类型 |
+|---|---|---|
+| 7 OOD typicality | `/api/ood` ← `demo/data/ood.json`（[1] `--json_out` 回填） | 静态 JSON |
+| 8 跨数据集 bpd | `/api/transfer` ← `demo/data/transfer.json`（[2] `--json_out` upsert） | 静态 JSON |
+| 9 图像补全 | `POST /api/complete`（实时采样，~20–40s/图） | 实时交互 |
+
+- **Panel 7 / 8**：跑完 [1][2] 后 `demo/data/{ood,transfer}.json` 的 `generated`
+  时间戳被填上、各行数值就位；前端自动从"待 AutoDL 跑"占位切到图表。**不跑也不报错**
+  （占位 JSON 已 checkin，面板显示 pending 提示）。
+- **Panel 9**：与 [3] 同源（复用 `complete_image._complete_one`），但上传任意图即时补全，
+  可调 keep%/温度。无 KV-cache → 单次 ~20–40s，**与 IN64 训练共享 GPU，挑空窗用**。
+
+启动（AutoDL，仅 6006/6008 端口可公网映射）：
+
+```bash
+uvicorn demo.server:app --host 0.0.0.0 --port 6006 --reload
+```
+
+---
+
 ## 结果归档建议
 
-- [1][2] 控制台表格 → 截图 / 复制进论文 §5 表。
-- [3] `experiments/completion_grid.png` → 论文定性面板 / 答辩 demo。
-- [4] 控制台 `✅ 2/2 bit-identical` + achieved bpd → §5 可解性硬证据。
+- [1][2] 控制台表格 → 截图 / 复制进论文 §5 表；`--json_out` 同时落 demo 前端 Panel 7/8。
+- [3] `experiments/completion_grid.png` → 论文定性面板 / 答辩 demo；Panel 9 是其交互版。
+- [4] 控制台 `✅ 2/2 bit-identical` + achieved bpd → §5 可解性硬证据（前端 Panel 2 交互版）。
 - 跑完把关键数字回填到论文 §5 与 `future.md §6`。

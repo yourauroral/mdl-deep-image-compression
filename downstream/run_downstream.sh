@@ -33,15 +33,21 @@ step_pre() {
 step_ood() {
     echo "== [1] OOD typicality（svhn,cifar100）=="
     "$PY" scripts/ood_detect.py --config "$CFG" --checkpoint "$BEST" \
-        --ood svhn,cifar100 --ref_images 2000
+        --ood svhn,cifar100 --ref_images 2000 \
+        --json_out demo/data/ood.json
 }
 
 step_cross() {
-    echo "== [2] 跨数据集泛化 bpd（cifar100 / svhn / stl10）=="
+    echo "== [2] 跨数据集泛化 bpd（cifar10 in-domain + cifar100 / svhn / stl10）=="
+    # cifar10 in-domain 单 ckpt 基线（无 ensemble/TTA），与各 override 同协议可比，
+    # 作前端 /api/transfer 面板的对照行
+    echo "-- in-domain → cifar10 --"
+    "$PY" scripts/evaluate.py --config "$CFG" --checkpoint "$BEST" \
+        --json_out demo/data/transfer.json
     for ds in cifar100 svhn stl10; do
         echo "-- override → $ds --"
         "$PY" scripts/evaluate.py --config "$CFG" --checkpoint "$BEST" \
-            --dataset_override "$ds"
+            --dataset_override "$ds" --json_out demo/data/transfer.json
     done
 }
 

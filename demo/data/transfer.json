@@ -1,0 +1,12 @@
+{
+  "generated": null,
+  "model": "CC-iGPT R-only v2 (CIFAR-10 train, best.pth, 单ckpt 无 ensemble/TTA)",
+  "train_dataset": "cifar10",
+  "datasets": [
+    {"name": "cifar10",  "label": "CIFAR-10 (in-domain)", "in_domain": true,  "bpd": null, "std": null, "note": "训练分布；单 ckpt 无 ensemble/TTA，与各 override 同协议可比"},
+    {"name": "cifar100", "label": "CIFAR-100",            "in_domain": false, "bpd": null, "std": null, "note": "32×32 原生，无 resize"},
+    {"name": "svhn",     "label": "SVHN",                 "in_domain": false, "bpd": null, "std": null, "note": "split=test，32×32 原生"},
+    {"name": "stl10",    "label": "STL-10",               "in_domain": false, "bpd": null, "std": null, "note": "96→32 下采样，含重采样"}
+  ],
+  "note": "跨数据集 bpd 泛化（论文 §5 / future.md §6.3）。同一 CIFAR-10 模型直接评别的自然图像集，论证学到的是自然图像统计而非数据集记忆。⚠ 含重采样，勿与各集官方数字横比，只看同一模型相对值。待 AutoDL 跑 `bash downstream/run_downstream.sh cross` 回填（脚本带 --json_out）。"
+}

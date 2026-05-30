@@ -166,6 +166,105 @@
   </table>
 </section>
 
+<!-- ────────── 下游任务（论文 §5 MDL 主线：压得好 → 学得好）────────── -->
+<div class="section-divider">
+  <span>下游任务 — MDL 主线：压得越好 ⇒ 学得越好</span>
+</div>
+
+<!-- Panel 7: OOD 检测 (typicality) -->
+<section class="panel" id="panel-ood">
+  <h2>OOD 检测 — typicality（密度估计侧面）</h2>
+  <p class="panel-desc">
+    把 CIFAR-10 训练的 CC-iGPT 当密度模型，用 per-image bpd 偏离做异常分，AUROC 衡量识别分布外的能力。
+    <b>raw bpd</b> 复现 Nalisnick 2019 失败（CIFAR 训的模型给 SVHN 更低 bpd，AUROC 常 &lt; 0.5）；
+    <b>typicality |z|</b> 修正之；<b>dual-scale</b>（sqrt(z<sub>coarse</sub>²+z<sub>fine</sub>²)）是本工作双尺度差异化，单尺度模型给不出。
+    虚线 0.5 = 随机基线。
+  </p>
+  <p id="ood-pending" class="pending-note" hidden></p>
+  <div class="chart-container" id="ood-chart-wrap" hidden>
+    <canvas id="chart-ood"></canvas>
+  </div>
+  <table id="table-ood" class="data-table" hidden>
+    <thead><tr><th>OOD 集</th><th>raw bpd</th><th>typicality |z|</th><th>dual-scale (Ours)</th></tr></thead>
+    <tbody></tbody>
+  </table>
+</section>
+
+<!-- Panel 8: 跨数据集 bpd 泛化 -->
+<section class="panel" id="panel-transfer">
+  <h2>跨数据集 bpd 泛化（泛化侧面）</h2>
+  <p class="panel-desc">
+    同一个 CIFAR-10 训练的模型直接评别的自然图像集 bpd（不重训）。论证学到的是自然图像统计而非数据集记忆。
+    <b>⚠ 含重采样，勿与各集官方数字横比，只看同一模型在不同集上的相对值</b>（in-domain 蓝柱为参照）。
+  </p>
+  <p id="transfer-pending" class="pending-note" hidden></p>
+  <div class="chart-container" id="transfer-chart-wrap" hidden>
+    <canvas id="chart-transfer"></canvas>
+  </div>
+  <table id="table-transfer" class="data-table" hidden>
+    <thead><tr><th>数据集</th><th>bits/dim ↓</th><th>vs in-domain</th><th>备注</th></tr></thead>
+    <tbody></tbody>
+  </table>
+</section>
+
+<!-- Panel 9: 图像补全 (AR inpainting) -->
+<section class="panel" id="panel-complete">
+  <h2>图像补全 — AR inpainting（生成侧面）</h2>
+  <p class="panel-desc">
+    给前 keep% 比例的 raster token（≈上半若干行），AR 续采样补全其余（Sparse Transformer 同款定性下游，AR 模型天然支持、不重训）。
+    <b>诚实声明</b>：CC-iGPT 的 coarse ctx 由<b>整图</b>缩略图算 → 语义是"低分缩略图 + 上半真实像素 → 补下半"，coarse 是显式 side-channel（与压缩时独立 bitstream 同源），非偷看答案。
+  </p>
+  <div class="predict-layout">
+    <div class="cmp-left">
+      <div class="upload-area" id="cmp-upload-area">
+        <input type="file" id="cmp-file-input" accept="image/*" hidden>
+        <div class="upload-placeholder" id="cmp-upload-placeholder">
+          <span class="upload-icon">+</span>
+          <p>点击或拖拽上传图片</p>
+          <p class="hint">缩放至 32×32 后 AR 补全</p>
+        </div>
+        <img id="cmp-preview-img" class="preview-img" hidden>
+      </div>
+      <div class="cmp-controls">
+        <label class="cmp-ctrl">
+          <span>保留上半 <b id="cmp-keep-val">60%</b></span>
+          <input type="range" id="cmp-keep" min="30" max="90" step="5" value="60">
+          <span class="hint">越小补越多、越慢</span>
+        </label>
+        <label class="cmp-ctrl">
+          <span>采样温度 <b id="cmp-temp-val">1.0</b></span>
+          <input type="range" id="cmp-temp" min="0" max="20" step="1" value="10">
+          <span class="hint">0=贪心 argmax</span>
+        </label>
+      </div>
+      <button id="cmp-run" class="cmp-btn" disabled>先上传图片</button>
+    </div>
+    <div class="result-area">
+      <div class="cmp-pipeline">
+        <div class="cmp-stage">
+          <span class="cmp-stage-label">原图 32×32</span>
+          <img id="cmp-orig" class="cmp-img" hidden>
+          <span class="cmp-img-ph" id="cmp-orig-ph">—</span>
+        </div>
+        <div class="cmp-stage">
+          <span class="cmp-stage-label">已知上半（灰=待补）</span>
+          <img id="cmp-masked" class="cmp-img" hidden>
+          <span class="cmp-img-ph" id="cmp-masked-ph">—</span>
+        </div>
+        <div class="cmp-stage">
+          <span class="cmp-stage-label">AR 补全</span>
+          <img id="cmp-completed" class="cmp-img" hidden>
+          <span class="cmp-img-ph" id="cmp-completed-ph">—</span>
+        </div>
+      </div>
+      <p id="cmp-placeholder" class="hint">
+        上传图片、设好参数后点"运行补全"。无 KV-cache → 每 token 一次完整 forward，
+        约 20–40 秒（取决于 GPU / keep%）；与 ImageNet64 训练共享 GPU，请挑空窗跑。
+      </p>
+    </div>
+  </div>
+</section>
+
 </main>
 
 <footer>

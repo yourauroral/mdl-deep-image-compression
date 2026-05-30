@@ -32,6 +32,7 @@ ID = CIFAR-10 test，OOD = SVHN / CIFAR-100 test（均 32×32 原生，无需 re
 typicality 参考统计 (μ, σ) 取自 CIFAR-10 **训练集** 子样本（模型学到的分布）。
 """
 import argparse
+import json
 import math
 import os
 import sys
@@ -172,6 +173,8 @@ def main():
     ap.add_argument("--max_images", type=int, default=None,
                     help="每个集最多评多少张（默认全量；截断会打印）")
     ap.add_argument("--batch_size", type=int, default=50)
+    ap.add_argument("--json_out", type=str, default=None,
+                    help="把 AUROC 表回填到该 JSON（默认 demo/data/ood.json），供前端 /api/ood 面板用")
     ap.add_argument("--self_test", action="store_true",
                     help="仅验证 AUROC/typicality 数学（合成数据，无需 GPU/ckpt）")
     args = ap.parse_args()
@@ -230,6 +233,7 @@ def main():
     print(f"\n{'='*64}")
     print(f"{'OOD 集':>14s} | {'raw_bpd':>10s} | {'typ_total':>10s} | {'typ_dualscale':>13s}")
     print(f"{'-'*64}")
+    auroc_rows = []                      # 供 --json_out 回填前端 /api/ood
     for name in [s.strip() for s in args.ood.split(",") if s.strip()]:
         if name == "svhn":
             ds = SVHN(root=root, split="test", download=True, transform=tf)
@@ -249,8 +253,46 @@ def main():
         if a_raw < 0.5:
             print(f"    ⚠ raw_bpd AUROC={a_raw:.3f}<0.5 → 复现 Nalisnick：裸 bpd 给 "
                   f"{name} 更低，typicality 修正之")
+        auroc_rows.append({
+            "name": name,
+            "raw_bpd": round(float(a_raw), 4),
+            "typ_total": round(float(a_tot), 4),
+            "typ_dualscale": round(float(a_dual), 4),
+        })
     print(f"{'='*64}")
     print("scorer 越高越 OOD；AUROC>0.5 有判别力。typ_dualscale 是本工作双尺度差异化。")
+
+    if args.json_out is not None or os.environ.get("OOD_JSON_OUT"):
+        _write_json_out(args.json_out or os.environ.get("OOD_JSON_OUT"), auroc_rows)
+
+
+def _write_json_out(path, auroc_rows):
+    """把本次 AUROC 结果回填到前端 ood.json（保留占位文件的 scorers/note 元数据，
+    只更新各 OOD 行的三列 AUROC + generated 时间戳）。AutoDL 上跑，故可用 datetime。"""
+    import datetime
+    if not path:
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "demo", "data", "ood.json")
+    base = {"ood": []}
+    if os.path.exists(path):
+        with open(path) as f:
+            base = json.load(f)
+    by_name = {r["name"]: r for r in auroc_rows}
+    for row in base.get("ood", []):
+        new = by_name.get(row["name"])
+        if new:
+            row.update({k: new[k] for k in ("raw_bpd", "typ_total", "typ_dualscale")})
+    # 占位里没有的 OOD 名（如 --ood 传了新集）也补进去
+    existing = {r["name"] for r in base.get("ood", [])}
+    for r in auroc_rows:
+        if r["name"] not in existing:
+            base.setdefault("ood", []).append({
+                "name": r["name"], "label": r["name"].upper(), **r,
+            })
+    base["generated"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    with open(path, "w") as f:
+        json.dump(base, f, ensure_ascii=False, indent=2)
+    print(f"[json_out] AUROC 已回填 → {path}")
 
 
 def _self_test():

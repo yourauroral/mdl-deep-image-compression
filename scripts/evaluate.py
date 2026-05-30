@@ -35,6 +35,7 @@ Usage:
 import os
 import sys
 import io
+import json
 import argparse
 import yaml
 import math
@@ -506,6 +507,38 @@ def cmd_single(args, config, device):
                          traditional_results,
                          model_label=f"{model_type.upper()} (Ours)")
 
+    if getattr(args, "json_out", None):
+        # 当前评测的数据集 key：override 优先（cifar100/svhn/stl10），否则 config 默认
+        ds_key = getattr(args, "dataset_override", None) or config["data"].get("dataset", "cifar10")
+        _upsert_transfer_json(args.json_out, ds_key, bpd_mean, bpd_std)
+
+
+def _upsert_transfer_json(path, ds_key, bpd, std):
+    """把单次 bpd 结果 upsert 进跨数据集 JSON（供前端 /api/transfer 面板）。
+
+    多次跑不同 --dataset_override 累积到同一文件：按 ds_key 找到占位行更新 bpd/std，
+    找不到就新增一行。保留占位文件的 label/in_domain/note 元数据。AutoDL 上跑，
+    可用 datetime 打时间戳。
+    """
+    import datetime
+    base = {"datasets": []}
+    if os.path.exists(path):
+        with open(path) as f:
+            base = json.load(f)
+    rows = base.setdefault("datasets", [])
+    hit = next((r for r in rows if r.get("name") == ds_key), None)
+    if hit is None:
+        hit = {"name": ds_key, "label": ds_key.upper(),
+               "in_domain": ds_key == base.get("train_dataset", "cifar10"), "note": ""}
+        rows.append(hit)
+    hit["bpd"] = round(float(bpd), 4)
+    hit["std"] = round(float(std), 4)
+    base["generated"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(base, f, ensure_ascii=False, indent=2)
+    print(f"[json_out] {ds_key} bpd={bpd:.4f} 已 upsert → {path}")
+
 
 def cmd_swa(args, config, device):
     """SWA vs best checkpoint 对比评测"""
@@ -641,6 +674,12 @@ experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/ema.pth \\
                              '仅看同一模型相对值）')
     parser.add_argument('--batch_size', type=int, default=64,
                         help='评测 batch size')
+    parser.add_argument('--json_out', type=str, default=None, nargs='?',
+                        const='demo/data/transfer.json',
+                        help='把本次 bpd 结果 upsert 到跨数据集 JSON（默认 '
+                             'demo/data/transfer.json），供前端 /api/transfer 面板用。'
+                             '按当前评测的数据集（override 或 config 默认）作 key 累积，'
+                             '多次跑不同 --dataset_override 共同填满一张表。')
     args = parser.parse_args()
 
     if args.ensemble and args.checkpoint:

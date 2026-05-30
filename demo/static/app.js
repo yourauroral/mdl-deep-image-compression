@@ -465,3 +465,263 @@ Chart.defaults.borderColor = "#2a2d3a";
     tbody.appendChild(tr);
   });
 })();
+
+// ── Panel 7: OOD 检测 (typicality) ──
+// ood.json schema: {generated, scorers:[{key,label,desc}], ood:[{name,label,raw_bpd,typ_total,typ_dualscale}]}
+// generated=null 或全行无数值 → 显示"待 AutoDL 跑"占位，不画图。
+(async function initOOD() {
+  const data = await fetchJSON("/api/ood");
+  if (!data) return;
+
+  const pending = $("ood-pending");
+  const hasData = data.generated &&
+    (data.ood || []).some(o => o.raw_bpd != null || o.typ_total != null || o.typ_dualscale != null);
+
+  if (!hasData) {
+    pending.hidden = false;
+    pending.innerHTML = data.note
+      ? data.note
+      : "待 AutoDL 跑 <code>bash downstream/run_downstream.sh ood</code> 回填。";
+    return;
+  }
+
+  $("ood-chart-wrap").hidden = false;
+  $("table-ood").hidden = false;
+
+  const oodList = data.ood;
+  const labels = oodList.map(o => o.label || o.name);
+  // 三个 scorer 各一组柱；颜色：raw 灰、typ_total 淡蓝、dual-scale 主蓝（本工作）
+  const series = [
+    { key: "raw_bpd",       name: "raw bpd",            color: "#5a5d72" },
+    { key: "typ_total",     name: "typicality |z|",     color: "#8a9bd0" },
+    { key: "typ_dualscale", name: "dual-scale (Ours)",  color: "#6c8cff" },
+  ];
+
+  // 0.5 随机基线参考线
+  const baselinePlugin = {
+    id: "oodBaseline",
+    afterDraw(chart) {
+      const { ctx, chartArea, scales } = chart;
+      const y = scales.y.getPixelForValue(0.5);
+      ctx.save();
+      ctx.strokeStyle = "rgba(255,255,255,0.35)";
+      ctx.setLineDash([5, 4]);
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(chartArea.left, y);
+      ctx.lineTo(chartArea.right, y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = "rgba(255,255,255,0.5)";
+      ctx.font = "11px -apple-system, sans-serif";
+      ctx.textAlign = "left";
+      ctx.fillText("0.5 随机基线", chartArea.left + 4, y - 4);
+      ctx.restore();
+    }
+  };
+
+  new Chart(document.getElementById("chart-ood"), {
+    type: "bar",
+    data: {
+      labels,
+      datasets: series.map(s => ({
+        label: s.name,
+        data: oodList.map(o => o[s.key]),
+        backgroundColor: s.color,
+        borderRadius: 3,
+      }))
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { position: "top" },
+        title: { display: true, text: `AUROC — ID=${data.id_dataset || "CIFAR-10 test"}（越高越能识别 OOD）`, color: "#e1e4ed" },
+        tooltip: {
+          callbacks: {
+            afterLabel: (item) => {
+              const sc = series[item.datasetIndex];
+              const meta = (data.scorers || []).find(s => s.key === sc.key);
+              return meta ? meta.desc : "";
+            }
+          }
+        }
+      },
+      scales: {
+        x: { grid: { display: false } },
+        y: { title: { display: true, text: "AUROC ↑" }, min: 0, max: 1, ticks: { stepSize: 0.1 } }
+      }
+    },
+    plugins: [baselinePlugin]
+  });
+
+  const tbody = document.querySelector("#table-ood tbody");
+  const fmt = (v) => v == null ? "—" : v.toFixed(4);
+  const cls = (v) => v == null ? "" : (v < 0.5 ? "ood-low" : "");
+  oodList.forEach(o => {
+    const tr = document.createElement("tr");
+    tr.innerHTML =
+      `<td>${o.label || o.name}</td>` +
+      `<td class="${cls(o.raw_bpd)}">${fmt(o.raw_bpd)}</td>` +
+      `<td>${fmt(o.typ_total)}</td>` +
+      `<td class="highlight">${fmt(o.typ_dualscale)}</td>`;
+    tbody.appendChild(tr);
+  });
+})();
+
+// ── Panel 8: 跨数据集 bpd 泛化 ──
+// transfer.json schema: {generated, datasets:[{name,label,in_domain,bpd,std,note}]}
+(async function initTransfer() {
+  const data = await fetchJSON("/api/transfer");
+  if (!data) return;
+
+  const pending = $("transfer-pending");
+  const rows = (data.datasets || []).filter(d => d.bpd != null);
+  const hasData = data.generated && rows.length > 0;
+
+  if (!hasData) {
+    pending.hidden = false;
+    pending.innerHTML = data.note
+      ? data.note
+      : "待 AutoDL 跑 <code>bash downstream/run_downstream.sh cross</code> 回填。";
+    return;
+  }
+
+  $("transfer-chart-wrap").hidden = false;
+  $("table-transfer").hidden = false;
+
+  const inDom = rows.find(d => d.in_domain);
+  const labels = rows.map(d => d.label || d.name);
+  const values = rows.map(d => d.bpd);
+  const colors = rows.map(d => d.in_domain ? "#6c8cff" : "#5a5d72");
+
+  new Chart(document.getElementById("chart-transfer"), {
+    type: "bar",
+    data: {
+      labels,
+      datasets: [{
+        label: "bits/dim",
+        data: values,
+        backgroundColor: colors,
+        borderRadius: 4,
+      }]
+    },
+    options: {
+      indexAxis: "y",
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        title: { display: true, text: `${data.model || "CC-iGPT v2"} — 同一模型跨数据集 bpd`, color: "#e1e4ed" },
+        tooltip: {
+          callbacks: {
+            label: (item) => {
+              const d = rows[item.dataIndex];
+              const std = d.std != null ? ` ± ${d.std.toFixed(2)}` : "";
+              return `bits/dim: ${d.bpd.toFixed(4)}${std}`;
+            },
+            afterLabel: (item) => rows[item.dataIndex].note || ""
+          }
+        }
+      },
+      scales: {
+        x: { title: { display: true, text: "bits/dim — 越低越好 ↓" }, min: 0,
+             grid: { color: "rgba(255,255,255,0.04)" } },
+        y: { grid: { display: false } }
+      }
+    }
+  });
+
+  const tbody = document.querySelector("#table-transfer tbody");
+  rows.forEach(d => {
+    const tr = document.createElement("tr");
+    const delta = (inDom && !d.in_domain) ? (d.bpd - inDom.bpd) : null;
+    const deltaStr = d.in_domain ? "<i>参照</i>"
+      : (delta != null ? `${delta >= 0 ? "+" : ""}${delta.toFixed(3)}` : "—");
+    const stdStr = d.std != null ? ` ± ${d.std.toFixed(2)}` : "";
+    tr.innerHTML =
+      `<td class="${d.in_domain ? "highlight" : ""}">${d.label || d.name}</td>` +
+      `<td class="${d.in_domain ? "highlight" : ""}">${d.bpd.toFixed(4)}${stdStr}</td>` +
+      `<td>${deltaStr}</td>` +
+      `<td class="hint">${d.note || ""}</td>`;
+    tbody.appendChild(tr);
+  });
+})();
+
+// ── Panel 9: 图像补全 (AR inpainting) ──
+// 实时 POST /api/complete（无 KV-cache，~20–40s）。上传后 enable 按钮，点击才跑（避免误触长采样）。
+(function initComplete() {
+  const area = $("cmp-upload-area");
+  const input = $("cmp-file-input");
+  const preview = $("cmp-preview-img");
+  const placeholder = $("cmp-upload-placeholder");
+  const keepSlider = $("cmp-keep"), keepVal = $("cmp-keep-val");
+  const tempSlider = $("cmp-temp"), tempVal = $("cmp-temp-val");
+  const runBtn = $("cmp-run");
+  const origImg = $("cmp-orig"), origPh = $("cmp-orig-ph");
+  const maskedImg = $("cmp-masked"), maskedPh = $("cmp-masked-ph");
+  const compImg = $("cmp-completed"), compPh = $("cmp-completed-ph");
+  const resultPh = $("cmp-placeholder");
+
+  let currentFile = null;
+
+  keepSlider.addEventListener("input", () => { keepVal.textContent = keepSlider.value + "%"; });
+  tempSlider.addEventListener("input", () => { tempVal.textContent = (tempSlider.value / 10).toFixed(1); });
+
+  area.addEventListener("click", () => input.click());
+  area.addEventListener("dragover", e => { e.preventDefault(); area.classList.add("dragover"); });
+  area.addEventListener("dragleave", () => area.classList.remove("dragover"));
+  area.addEventListener("drop", e => {
+    e.preventDefault();
+    area.classList.remove("dragover");
+    if (e.dataTransfer.files.length) pickFile(e.dataTransfer.files[0]);
+  });
+  input.addEventListener("change", () => { if (input.files.length) pickFile(input.files[0]); });
+
+  function pickFile(file) {
+    currentFile = file;
+    const reader = new FileReader();
+    reader.onload = () => { preview.src = reader.result; preview.hidden = false; placeholder.hidden = true; };
+    reader.readAsDataURL(file);
+    runBtn.disabled = false;
+    runBtn.textContent = "运行补全";
+  }
+
+  runBtn.addEventListener("click", async () => {
+    if (!currentFile) return;
+    runBtn.disabled = true;
+    runBtn.textContent = "采样中…（约 20–40s）";
+    resultPh.hidden = false;
+    resultPh.textContent = "AR 逐 token 采样中…（无 KV-cache，每 token 一次完整 forward，请稍候）";
+    origImg.hidden = maskedImg.hidden = compImg.hidden = true;
+    origPh.hidden = maskedPh.hidden = compPh.hidden = false;
+
+    const form = new FormData();
+    form.append("file", currentFile);
+    form.append("keep_frac", (keepSlider.value / 100).toFixed(2));
+    form.append("temperature", (tempSlider.value / 10).toFixed(1));
+    form.append("top_k", "100");
+    try {
+      const res = await fetch(API + "/api/complete", { method: "POST", body: form });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        resultPh.textContent = err.detail || "错误";
+        runBtn.disabled = false; runBtn.textContent = "重试";
+        return;
+      }
+      const d = await res.json();
+      origImg.src = "data:image/png;base64," + d.orig_png;
+      maskedImg.src = "data:image/png;base64," + d.masked_png;
+      compImg.src = "data:image/png;base64," + d.completed_png;
+      origImg.hidden = maskedImg.hidden = compImg.hidden = false;
+      origPh.hidden = maskedPh.hidden = compPh.hidden = true;
+      resultPh.hidden = false;
+      resultPh.innerHTML = `补全完成 — 保留上半 <b>${d.keep_pct}%</b>，温度 <b>${d.temperature}</b>，top-k <b>${d.top_k}</b>。`;
+      runBtn.disabled = false; runBtn.textContent = "重新采样";
+    } catch (e) {
+      resultPh.textContent = "无法连接后端";
+      runBtn.disabled = false; runBtn.textContent = "重试";
+    }
+  });
+})();
+
