@@ -173,8 +173,10 @@ def main():
     ap.add_argument("--max_images", type=int, default=None,
                     help="每个集最多评多少张（默认全量；截断会打印）")
     ap.add_argument("--batch_size", type=int, default=50)
-    ap.add_argument("--json_out", type=str, default=None,
-                    help="把 AUROC 表回填到该 JSON（默认 demo/data/ood.json），供前端 /api/ood 面板用")
+    ap.add_argument("--json_out", type=str, default=None, nargs="?",
+                    const="demo/data/ood.json",
+                    help="把 AUROC 表回填到该 JSON（裸 --json_out 默认 demo/data/ood.json），"
+                         "保留占位的 scorers/label 元数据，供前端 /api/ood 面板用")
     ap.add_argument("--self_test", action="store_true",
                     help="仅验证 AUROC/typicality 数学（合成数据，无需 GPU/ckpt）")
     args = ap.parse_args()
@@ -262,17 +264,14 @@ def main():
     print(f"{'='*64}")
     print("scorer 越高越 OOD；AUROC>0.5 有判别力。typ_dualscale 是本工作双尺度差异化。")
 
-    if args.json_out is not None or os.environ.get("OOD_JSON_OUT"):
-        _write_json_out(args.json_out or os.environ.get("OOD_JSON_OUT"), auroc_rows)
+    if args.json_out is not None:
+        _write_json_out(args.json_out, auroc_rows)
 
 
 def _write_json_out(path, auroc_rows):
     """把本次 AUROC 结果回填到前端 ood.json（保留占位文件的 scorers/note 元数据，
     只更新各 OOD 行的三列 AUROC + generated 时间戳）。AutoDL 上跑，故可用 datetime。"""
     import datetime
-    if not path:
-        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                            "demo", "data", "ood.json")
     base = {"ood": []}
     if os.path.exists(path):
         with open(path) as f:

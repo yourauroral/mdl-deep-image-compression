@@ -438,7 +438,8 @@ def complete(
     from scripts.complete_image import _complete_one
 
     model.eval()
-    o, m, c = _complete_one(model, model_type, x, keep_frac, temperature, top_k, device)
+    with torch.no_grad():
+        o, m, c = _complete_one(model, model_type, x, keep_frac, temperature, top_k, device)
 
     # (C,H,W) uint8 → (H,W,C) numpy → base64 PNG
     def _chw_to_png(t):
