@@ -37,8 +37,8 @@
 }
 
 % ── 标题信息（用户填空）──
-\title{基于 MDL 原则的深度图像压缩}
-\subtitle{CC-iGPT 双尺度条件式自回归}
+\title{基于 MDL 原则的深度图像压缩系统的设计与实现}
+\subtitle{CC-iGPT 双尺度条件式自回归压缩}
 \author{[ 姓名 ]}
 \institute{[ 学院 / 学校 ] \quad 指导教师: [ 导师姓名 ]}
 \date{2026 年 5 月 28 日}
@@ -49,7 +49,7 @@
 \maketitle
 
 % ============================== 2. 命题 ==============================
-\begin{frame}{命题：压缩即预测}
+\begin{frame}{命题：压缩即智能}
 \textbf{Shannon (1948)} \;源编码定理：随机序列的最优编码长度下界为其负对数似然
 \[
 L^{\star}(x) \;=\; -\log_2 p(x) \quad \text{(bits)}.
@@ -73,6 +73,41 @@ p_\theta(x) \;=\; \prod_t p_\theta(x_t \mid x_{<t}),
   \item \textbf{CE loss 直接等于压缩率} —— 训练目标与评估指标完全对齐
   \item 全程 \textbf{RGB-bit-exact} 域，不经色彩前端，与主流基线同域可比
 \end{itemize}
+\end{frame}
+
+% ============================== 2b. 研究背景 ==============================
+\begin{frame}{研究背景：神经无损压缩的两条血脉}
+\begin{columns}[T]
+\begin{column}{0.48\textwidth}
+\textbf{为什么用神经 AR 做无损？}
+\begin{itemize}\setlength{\itemsep}{3pt}
+  \item 传统编解码器（PNG / WebP / FLIF）\\
+        手工设计上下文 + 熵编码，建模能力受限
+  \item 神经 AR：学习 $p_\theta(x)$ 逼近 Shannon 下界，\\
+        \textbf{CE loss 直接 = 码长}
+  \item 算术编码把 $p_\theta$ 转成真实 bitstream \\
+        $\Rightarrow$ 严格无损、逐像素可还原
+\end{itemize}
+\end{column}
+\begin{column}{0.50\textwidth}
+\textbf{现有工作的两条血脉与缺口}
+\begin{itemize}\setlength{\itemsep}{3pt}
+  \item \textbf{密度血脉}：PixelCNN++ $\to$ PixelSNAIL \\
+        $\to$ Image Transf. $\to$ Sparse Transf. (Child 2019) \\
+        {\scriptsize 追 SOTA bpd，纯生成、\alert{无数字下游}}
+  \item \textbf{表征血脉}：iGPT (Chen 2020) \\
+        {\scriptsize AR 预训练做表征，\alert{不报 SOTA bpd}}
+  \item \alert{\textbf{本工作}}：用 \textbf{MDL} 统一两者 \\
+        {\scriptsize RGB-bit-exact 双尺度压缩（追 bpd）\\
+         $+$ 下游主线（验证表征 / 泛化 / 异常）}
+\end{itemize}
+\end{column}
+\end{columns}
+
+\vfill
+\centering\small
+\color{muted}
+回应导师反馈「下游不清晰」 $\Rightarrow$ \color{ours}\textbf{§5 MDL 下游主线：压得好 $\Rightarrow$ 学得好}
 \end{frame}
 
 % ============================== 3. 主表结果 ==============================
@@ -392,23 +427,248 @@ $\to$ \texttt{re-tokenize} $\to$ \texttt{fine.token\_embed} $\to$ \texttt{AR shi
 \end{columns}
 \end{frame}
 
-% ============================== 10. Probe + 总结 ==============================
-\begin{frame}{Linear Probe \& 总结}
-\begin{columns}[T]
-\begin{column}{0.42\textwidth}
-\small
-\textbf{Linear Probe}（CIFAR-10 表征质量）
+% ============================== 10. 下游任务：MDL 主线总览 ==============================
+\begin{frame}{下游任务：MDL 主线「压得好 $\Rightarrow$ 学得好」}
+同一份 CC-iGPT v2 权重（\textbf{不重训、不微调}），从五个侧面验证它学到的是\\
+自然图像的通用统计，而非数据集记忆：
 
-\smallskip
+\medskip
+\centering\small
+\begin{tabular}{@{}llll@{}}
+\toprule
+\textbf{侧面} & \textbf{任务} & \textbf{验证的 MDL 命题} & \textbf{状态} \\
+\midrule
+表征 & Linear probe       & 线性可分表征更强        & \alert{\textbf{已实测}} \\
+密度 & OOD typicality     & 能识别分布外样本        & 代码就绪 \\
+泛化 & 跨数据集 bpd       & 学自然图像统计、非记忆  & 代码就绪 \\
+生成 & 图像补全 (inpaint) & AR 条件生成能力         & 代码就绪 \\
+\midrule
+\multicolumn{4}{@{}l}{\textbf{地基}\;：真实可解性 roundtrip —— 算术编解码逐像素 bit-identical，} \\
+\multicolumn{4}{@{}l}{\quad\quad\;\; 证明所报 bpd 是\alert{真实可逆码长}而非 proxy} \\
+\bottomrule
+\end{tabular}
+
+\medskip
+\footnotesize\color{muted}
+representation 血脉承 iGPT，density 血脉承 Sparse Transformer（纯生成）；\\
+本工作用 MDL 把两者串成一条因果链。「代码就绪」者复用 CIFAR v2 现成 ckpt，待 GPU 空窗实测。
+\end{frame}
+
+% ============================== 下游 ① 表征：Linear probe (图) ==============================
+\begin{frame}{下游 ① 表征：Linear probe（逐层 top-1 准确率）}
+\figplaceholder{linear-probe-layerwise-acc.pdf}{11}{6}
+\end{frame}
+
+% ============================== 下游 ① 表征：Linear probe (文字) ==============================
+\begin{frame}{下游 ① 表征：probe 方法与结果}
+\begin{columns}[T]
+\begin{column}{0.50\textwidth}
+\small
+\textbf{方法}
+\begin{itemize}\setlength{\itemsep}{2pt}
+  \item 冻结预训练 CC-iGPT，逐层取 hidden state
+  \item 各层训一个线性分类器，测 CIFAR-10 top-1
+  \item v2 fine $+\,\alpha\cdot$ctx 注入，32 层全扫
+\end{itemize}
+
+\bigskip
+\textbf{MDL 命题}
 \begin{itemize}
-  \item CC-iGPT v2 fine + $\alpha\cdot$ctx \\
-        best L19 = \alert{\textbf{79.33\%}}
-  \item iGPT-S baseline \\
-        best L22 = 66.93\%
-  \item \textbf{+12.4\,pp} —— ctx 注入显著提升中层表征
+  \item 压得越好 $\Rightarrow$ 线性可分表征越强
+  \item ctx 注入显著抬高中层语义表征
 \end{itemize}
 \end{column}
-\begin{column}{0.56\textwidth}
+\begin{column}{0.50\textwidth}
+\small
+\textbf{结果（已实测）}
+\begin{itemize}\setlength{\itemsep}{2pt}
+  \item best \textbf{L19} = \alert{\textbf{79.33\%}}
+  \item iGPT-S baseline best L22 = 66.93\%
+  \item \alert{\textbf{+12.4\,pp}}
+\end{itemize}
+
+\bigskip
+{\scriptsize L0$\to$L19 单调上升至峰值，末段缓降 —— AR 模型典型表征曲线（末层过拟合到 token-level NLL，丢弃部分语义）。}
+\end{column}
+\end{columns}
+\end{frame}
+
+% ============================== 下游 ② 密度：OOD typicality (图) ==============================
+\begin{frame}{下游 ② 密度：OOD typicality（AUROC 对比）}
+\figplaceholder{ood-typicality-auroc.pdf}{11}{6}
+\end{frame}
+
+% ============================== 下游 ② 密度：OOD typicality (文字) ==============================
+\begin{frame}{下游 ② 密度：typicality 方法与差异化}
+\begin{columns}[T]
+\begin{column}{0.50\textwidth}
+\small
+\textbf{方法}
+\begin{itemize}\setlength{\itemsep}{2pt}
+  \item 把 CC-iGPT 当密度模型，per-image bpd 做异常分
+  \item ID = CIFAR-10 test，OOD = SVHN / CIFAR-100
+\end{itemize}
+
+\bigskip
+\textbf{绕 Nalisnick 坑}
+\begin{itemize}
+  \item 裸 bpd 给 SVHN \emph{更低} $\Rightarrow$ AUROC$<$0.5
+  \item typicality 用 $|z|$ 偏离修正之
+\end{itemize}
+\end{column}
+\begin{column}{0.50\textwidth}
+\small
+\textbf{双尺度差异化（本工作）}
+\[
+\text{score} = \sqrt{z_c^2 + z_f^2}
+\]
+\begin{itemize}
+  \item coarse / fine 两个独立 typicality 信号
+  \item 单尺度模型给不出
+\end{itemize}
+
+\bigskip
+\textbf{状态}
+\begin{itemize}
+  \item self-test 合成数据：裸 bpd 0.002 $\to$ typicality 0.995
+  \item 真实数据 \alert{待 AutoDL 实测}
+\end{itemize}
+\end{column}
+\end{columns}
+\end{frame}
+
+% ============================== 下游 ③ 泛化：跨数据集 bpd (图) ==============================
+\begin{frame}{下游 ③ 泛化：跨数据集 bpd}
+\figplaceholder{cross-dataset-bpd.pdf}{11}{6}
+\end{frame}
+
+% ============================== 下游 ③ 泛化：跨数据集 bpd (文字) ==============================
+\begin{frame}{下游 ③ 泛化：跨数据集 bpd 方法与命题}
+\begin{columns}[T]
+\begin{column}{0.50\textwidth}
+\small
+\textbf{方法}
+\begin{itemize}\setlength{\itemsep}{2pt}
+  \item CIFAR-10 训练的 v2 模型，\textbf{不重训}
+  \item 直接评 CIFAR-100 / SVHN / STL-10 的 bpd
+  \item resize 到模型原生 $32{\times}32$
+\end{itemize}
+
+\bigskip
+\textbf{MDL 命题}
+\begin{itemize}
+  \item 换一个自然图像集仍压得动
+  \item $\Rightarrow$ 学到的是自然图像统计，非数据集记忆
+\end{itemize}
+\end{column}
+\begin{column}{0.50\textwidth}
+\small
+\textbf{可比性声明}
+\begin{itemize}\setlength{\itemsep}{2pt}
+  \item 含重采样（STL-10 96$\to$32），\\
+        \alert{勿与各集官方 bpd 横比}
+  \item 只看\textbf{同一模型}在不同集上的相对值
+  \item in-domain CIFAR-10 作参照
+\end{itemize}
+
+\bigskip
+\textbf{状态}
+\begin{itemize}
+  \item \alert{待 AutoDL 实测}
+\end{itemize}
+\end{column}
+\end{columns}
+\end{frame}
+
+% ============================== 下游 ④ 生成：图像补全 (图) ==============================
+\begin{frame}{下游 ④ 生成：图像补全（AR inpainting）}
+\figplaceholder{image-completion-grid.pdf}{11}{6}
+\end{frame}
+
+% ============================== 下游 ④ 生成：图像补全 (文字) ==============================
+\begin{frame}{下游 ④ 生成：补全方法与命题}
+\begin{columns}[T]
+\begin{column}{0.50\textwidth}
+\small
+\textbf{方法}
+\begin{itemize}\setlength{\itemsep}{2pt}
+  \item 给前 keep\_frac 比例的 raster token（$\approx$上半）
+  \item AR 续采样补全下半（temperature $+$ top-$k$）
+  \item 无 KV-cache，逐 token 完整 forward
+\end{itemize}
+
+\bigskip
+\textbf{MDL 命题}
+\begin{itemize}
+  \item AR 条件生成能力（Sparse Transformer 同款下游）
+  \item 模型天然支持，不重训
+\end{itemize}
+\end{column}
+\begin{column}{0.50\textwidth}
+\small
+\textbf{产出}
+\begin{itemize}\setlength{\itemsep}{2pt}
+  \item 每行：原图 $|$ 已知上半(灰=待补) $|$ AR 补全
+  \item 前端 demo 实时交互版（可调 keep\% / 温度）
+\end{itemize}
+
+\bigskip
+\textbf{状态}
+\begin{itemize}
+  \item 仅 CIFAR v2 实用（fine 3072 token）
+  \item \alert{待 AutoDL 实测}
+\end{itemize}
+\end{column}
+\end{columns}
+\end{frame}
+
+% ============================== 下游 ⑤ 地基：真实可解性 roundtrip (图) ==============================
+\begin{frame}{下游 ⑤ 地基：真实可解性 roundtrip}
+\figplaceholder{lossless-roundtrip.pdf}{11}{6}
+\end{frame}
+
+% ============================== 下游 ⑤ 地基：真实可解性 roundtrip (文字) ==============================
+\begin{frame}{下游 ⑤ 地基：可解性方法与命题}
+\begin{columns}[T]
+\begin{column}{0.50\textwidth}
+\small
+\textbf{方法}
+\begin{itemize}\setlength{\itemsep}{2pt}
+  \item 手写 32-bit WNC 算术编解码
+  \item 图像 $\to$ token $\to$ 逐步条件分布 \\
+        $\to$ 真实 bitstream $\to$ 解码
+  \item 逐像素断言 bit-identical
+\end{itemize}
+
+\bigskip
+\textbf{可逆性保证}
+\begin{itemize}
+  \item 无 KV-cache，encode/decode 同 per-step forward
+  \item $\Rightarrow$ logits 逐位相同 $\Rightarrow$ 严格可逆
+\end{itemize}
+\end{column}
+\begin{column}{0.50\textwidth}
+\small
+\textbf{MDL 命题（整条主线的地基）}
+\begin{itemize}\setlength{\itemsep}{2pt}
+  \item 所报 bpd 是\alert{真实可逆码长}，非 proxy
+  \item 区别于只报 bpd、不验可逆性的工作
+\end{itemize}
+
+\bigskip
+\textbf{状态}
+\begin{itemize}
+  \item codec 单测 6/6 过
+  \item 预期 2/2 图 bit-identical，\alert{待 AutoDL 验证}
+\end{itemize}
+\end{column}
+\end{columns}
+\end{frame}
+
+% ============================== 11. 总结 ==============================
+\begin{frame}{总结：三大创新 $+$ MDL 主线}
+\begin{columns}[T]
+\begin{column}{0.50\textwidth}
 \small
 \textbf{三大创新}
 
@@ -418,11 +678,27 @@ $\to$ \texttt{re-tokenize} $\to$ \texttt{fine.token\_embed} $\to$ \texttt{AR shi
 
 \smallskip
 \textbf{② 工程} —— 8 个手写 Triton kernel \\
-{\scriptsize 7 进入训练栈 + 1 反面案例（V=256 roofline 证伪）}
+{\scriptsize 7 进入训练栈 $+$ 1 反面案例（$V{=}256$ roofline 证伪）}
 
 \smallskip
 \textbf{③ 分析} —— RGB-bit-exact 主表 \\
 {\scriptsize CIFAR-10 \alert{\textbf{2.8296}} 超越 PixelSNAIL 380M (2.85)，逼近 Sparse Transformer 59M (2.80)，参数预算 82.95M}
+\end{column}
+\begin{column}{0.50\textwidth}
+\small
+\textbf{MDL 主线：压得好 $\Rightarrow$ 学得好}
+
+\smallskip
+\begin{itemize}\setlength{\itemsep}{2pt}
+  \item \textbf{表征} —— probe best \alert{79.33\%}（$+$12.4\,pp）
+  \item \textbf{密度} —— 双尺度 typicality OOD
+  \item \textbf{泛化} —— 跨数据集 bpd
+  \item \textbf{生成} —— AR 图像补全
+  \item \textbf{地基} —— 真实可解性 roundtrip
+\end{itemize}
+
+\smallskip
+{\scriptsize 把压缩与表征 / 异常 / 泛化串成因果链，统一 density 与 representation 两条血脉。}
 \end{column}
 \end{columns}
 
