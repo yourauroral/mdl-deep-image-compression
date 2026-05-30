@@ -443,9 +443,9 @@ $\to$ \texttt{re-tokenize} $\to$ \texttt{fine.token\_embed} $\to$ \texttt{AR shi
 \textbf{侧面} & \textbf{任务} & \textbf{验证的 MDL 命题} & \textbf{状态} \\
 \midrule
 表征 & Linear probe       & 线性可分表征更强        & \alert{\textbf{已实测}} \\
-密度 & OOD typicality     & 能识别分布外样本        & 代码就绪 \\
-泛化 & 跨数据集 bpd       & 学自然图像统计、非记忆  & 代码就绪 \\
-生成 & 图像补全 (inpaint) & AR 条件生成能力         & 代码就绪 \\
+密度 & OOD typicality     & 能识别分布外样本        & \alert{\textbf{已实测}} \\
+泛化 & 跨数据集 bpd       & 学自然图像统计、非记忆  & \alert{\textbf{已实测}} \\
+生成 & 图像补全 (inpaint) & AR 条件生成能力         & \alert{\textbf{已实测}} \\
 \midrule
 \multicolumn{4}{@{}l}{\textbf{地基}\;：真实可解性 roundtrip —— 算术编解码逐像素 bit-identical，} \\
 \multicolumn{4}{@{}l}{\quad\quad\;\; 证明所报 bpd 是\alert{真实可逆码长}而非 proxy} \\
@@ -527,17 +527,20 @@ representation 血脉承 iGPT，density 血脉承 Sparse Transformer（纯生成
 \text{score} = \sqrt{z_c^2 + z_f^2}
 \]
 \begin{itemize}
-  \item coarse / fine 两个独立 typicality 信号
-  \item 单尺度模型给不出
+  \item coarse / fine \textbf{两个独立} typicality 信号 \\
+        {\scriptsize 单尺度模型结构上给不出（仅 1 个 bpd 信号）}
+  \item 实测 AUROC 与单信号 typ \textbf{基本持平} \\
+        {\scriptsize 卖点是\alert{结构能力}（多一路独立信号），非更高 AUROC}
 \end{itemize}
 
 \bigskip
 \textbf{结果（AUROC，越高越能识别 OOD）}
 \begin{itemize}\setlength{\itemsep}{2pt}
   \item self-test 合成数据：裸 bpd 0.002 $\to$ typicality 0.995
-  \item SVHN: raw \fillme{x.xx} / typ \fillme{x.xx} / dual \fillme{x.xx}
-  \item CIFAR-100: raw \fillme{x.xx} / typ \fillme{x.xx} / dual \fillme{x.xx}
+  \item SVHN: raw \alert{0.161} $\to$ typ \textbf{0.661} / dual \textbf{0.658}
+  \item CIFAR-100: raw 0.514 $\to$ typ 0.546 / dual 0.551
 \end{itemize}
+{\scriptsize SVHN raw$<$0.5 \alert{复现 Nalisnick}，typicality 救回 +0.50；CIFAR-100 近 OOD（同为自然图像）难度大，提升有限。}
 \end{column}
 \end{columns}
 \end{frame}
@@ -579,16 +582,21 @@ representation 血脉承 iGPT，density 血脉承 Sparse Transformer（纯生成
 \bigskip
 \textbf{结果（bits/dim，同一 CIFAR-10 模型）}
 \begin{itemize}\setlength{\itemsep}{2pt}
-  \item CIFAR-10 (in-domain): \fillme{x.xx}
-  \item CIFAR-100: \fillme{x.xx} \;/\; SVHN: \fillme{x.xx} \;/\; STL-10: \fillme{x.xx}
+  \item CIFAR-10 (in-domain): \textbf{2.831}
+  \item CIFAR-100: \textbf{2.870} \;/\; SVHN: \textbf{2.046} \;/\; STL-10: \textbf{3.405}
 \end{itemize}
+{\scriptsize CIFAR-100 仅 $+$0.04（近乎同分布，强泛化）；SVHN 更低是\alert{数据本身熵低}（数字图平滑、好压），非泛化更好；STL-10 高含 96$\to$32 重采样高频。}
 \end{column}
 \end{columns}
 \end{frame}
 
 % ============================== 下游 ④ 生成：图像补全 (图) ==============================
 \begin{frame}{下游 ④ 生成：图像补全（AR inpainting）}
-\figplaceholder{image-completion-grid.pdf}{11}{6}
+% Panel 9 截图：原图 | 已知上半(灰=待补) | AR 补全 三联图
+% 截图存成 figures/completion-panel9.png（或改下面文件名）；编译前务必放好图，否则本页报缺图
+\begin{center}
+\includegraphics[width=0.95\linewidth,height=0.78\textheight,keepaspectratio]{completion-panel9.png}
+\end{center}
 \end{frame}
 
 % ============================== 下游 ④ 生成：图像补全 (文字) ==============================
@@ -622,7 +630,7 @@ representation 血脉承 iGPT，density 血脉承 Sparse Transformer（纯生成
 \textbf{结果}
 \begin{itemize}\setlength{\itemsep}{2pt}
   \item 仅 CIFAR v2 实用（fine 3072 token）
-  \item 补全网格见左图 \fillme{回填 image-completion-grid.pdf}
+  \item 前端 Panel 9 实时补全（见左图），可现场换图 / 调 keep\% / 温度
 \end{itemize}
 \end{column}
 \end{columns}
