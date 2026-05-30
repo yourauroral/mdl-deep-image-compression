@@ -9,7 +9,7 @@ import math
 import random
 
 from src.mdlic.codec.arithmetic import (
-    ArithmeticEncoder, ArithmeticDecoder, build_cumfreq, pack_bits, FREQ_TOTAL,
+    ArithmeticEncoder, ArithmeticDecoder, build_cumfreq, pack_bits, unpack_bits, FREQ_TOTAL,
 )
 
 
@@ -122,3 +122,44 @@ def test_pack_bits_roundtrip_len():
     bits = [1, 0, 1, 1, 0, 0, 1, 0, 1]
     packed = pack_bits(bits)
     assert len(packed) == 2  # 9 bit → 2 byte
+
+
+def test_unpack_bits_inverts_pack():
+    # pack→unpack(原始 bit 数) 必须逐位还原（丢弃字节对齐 padding）
+    for n in [1, 7, 8, 9, 17, 100]:
+        bits = [random.randint(0, 1) for _ in range(n)]
+        assert unpack_bits(pack_bits(bits), n) == bits
+
+
+def test_unpack_bits_overflow_raises():
+    # 要求的 bit 数超过 data 容量应报错（容器 header n_bits 损坏的保护）
+    import pytest
+    with pytest.raises(ValueError):
+        unpack_bits(pack_bits([1, 0, 1]), 100)
+
+
+def test_encode_pack_file_roundtrip(tmp_path):
+    # 模拟落盘链路：encode → pack → 写文件 → 读回 → unpack → decode 还原符号
+    random.seed(1)
+    V = 256
+    syms, tables = [], []
+    enc = ArithmeticEncoder()
+    for _ in range(500):
+        logits = [random.gauss(0, 2.0) for _ in range(V)]
+        m = max(logits); ex = [math.exp(l - m) for l in logits]; z = sum(ex)
+        p = [e / z for e in ex]
+        s = random.randrange(V)
+        syms.append(s); tables.append(p)
+        enc.encode(s, build_cumfreq(p))
+    bits = enc.finish()
+    n_bits = len(bits)
+
+    f = tmp_path / "stream.bin"
+    f.write_bytes(pack_bits(bits))
+    bits_back = unpack_bits(f.read_bytes(), n_bits)
+    assert bits_back == bits
+
+    dec = ArithmeticDecoder(bits_back)
+    out = [dec.decode(build_cumfreq(p)) for p in tables]
+    assert out == syms
+

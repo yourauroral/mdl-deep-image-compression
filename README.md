@@ -85,6 +85,9 @@ python scripts/complete_image.py --config configs/ccigpt_cifar10_s_rgb_ronly_v2.
 python scripts/verify_lossless.py --config configs/ccigpt_cifar10_s_rgb_ronly_v2.yaml \
     --checkpoint experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/best.pth --num_images 2
 python scripts/verify_lossless.py --self_test   # 仅 coder roundtrip，无需 GPU/ckpt
+# bitstream 落盘为自包含 MDLC .bin（图像→bits→文件→bits→图像 全链路），再只读解析
+python scripts/verify_lossless.py --config <yaml> --checkpoint <best.pth> --num_images 2 --dump_dir experiments/bitstreams
+python scripts/verify_lossless.py --inspect experiments/bitstreams/img0.bin   # 只读：结构/hex/码长/bpd，无需 GPU/ckpt
 
 # Kernel Profiling
 python scripts/profile_kernels.py --roofline
@@ -282,8 +285,8 @@ src/mdlic/
 ├── ops/       7 个 Triton kernels + 1 反面案例 (fused_linear_ce)
 ├── data/      imagenet64_npy.py (mmap-backed Dataset)
 └── utils/     seed, bpd, clean_state_dict
-scripts/       train.py, evaluate.py (含 --ensemble / --dataset_override), linear_probe.py (含 --probe_dataset transfer),
-               ood_detect.py, complete_image.py, verify_lossless.py, dryrun_forward.py, profile_kernels.py, prepare_imagenet64_png.py
+scripts/       train.py, evaluate.py (含 --ensemble / --dataset_override / --json_out), linear_probe.py (含 --probe_dataset transfer),
+               ood_detect.py (--json_out), complete_image.py (--scale), verify_lossless.py (--dump_dir 落盘 .bin / --inspect 只读解析), dryrun_forward.py, profile_kernels.py, prepare_imagenet64_png.py
 configs/       igpt_cifar10_s_rgb,
                ccigpt_cifar10_s_rgb_ronly      (R-only v1 历史主表 2.9035 bpd, 100ep, 已被 v2 替代),
                ccigpt_cifar10_s_rgb_ronly_v2   (深窄 N=32/d=448 + 200ep, 当前主表 ensemble+TTA 2.8296 bpd)

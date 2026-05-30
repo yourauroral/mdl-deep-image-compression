@@ -201,3 +201,19 @@ def pack_bits(bits: List[int]) -> bytes:
     if n > 0:
         out.append(acc << (8 - n))
     return bytes(out)
+
+
+def unpack_bits(data: bytes, n_bits: int) -> List[int]:
+    """bytes → 前 n_bits 个 bit 列表（pack_bits 的逆，高位在前）。
+
+    pack_bits 末尾补 0 到字节对齐，故 unpack 必须知道真实 bit 数 n_bits 才能
+    丢弃 padding。是落盘 .bin → 解码的必要逆操作（容器 header 存 n_bits）。
+    """
+    if n_bits > len(data) * 8:
+        raise ValueError(f"n_bits={n_bits} 超过 data 容量 {len(data)*8} bit")
+    bits = []
+    for i in range(n_bits):
+        byte = data[i >> 3]
+        bit = (byte >> (7 - (i & 7))) & 1
+        bits.append(bit)
+    return bits

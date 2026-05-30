@@ -670,10 +670,11 @@ representation 血脉承 iGPT，density 血脉承 Sparse Transformer（纯生成
 \end{itemize}
 
 \bigskip
-\textbf{结果}
+\textbf{结果（实测）}
 \begin{itemize}\setlength{\itemsep}{2pt}
-  \item codec 单测 6/6 过
-  \item roundtrip: \fillme{x/x} 图 bit-identical，achieved bpd \fillme{x.xx}
+  \item codec 单测 6/6 过 $+$ \textbf{2/2 图 bit-identical}
+  \item achieved 码长 $\approx$ 理论 NLL，\alert{量化+收尾 overhead 仅 0.1–0.2\%}
+  \item {\scriptsize 例：img0 3.093 bpd (NLL 3.090) / img1 2.322 (NLL 2.316)，逐图随复杂度变，关键是 overhead 极小 $\Rightarrow$ 报的 bpd = 真码长}
 \end{itemize}
 \end{column}
 \end{columns}

@@ -32,16 +32,107 @@
 import argparse
 import math
 import os
+import struct
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.mdlic.codec.arithmetic import (
-    ArithmeticEncoder, ArithmeticDecoder, build_cumfreq, pack_bits, FREQ_TOTAL,
+    ArithmeticEncoder, ArithmeticDecoder, build_cumfreq, pack_bits, unpack_bits, FREQ_TOTAL,
 )
 
 # 均匀 256-way 先验（token 0 用），常量，encode/decode 共用
 _UNIFORM_CUM = list(range(0, FREQ_TOTAL + 1, FREQ_TOTAL // 256))
+
+# .bin 容器格式（self-contained，可独立解码）：
+#   magic "MDLC" (4B) | version u8 | dual u8 (1=双尺度 0=单尺度) |
+#   H u8 | C u8 | coarse_nbits u32-BE | fine_nbits u32-BE |
+#   coarse packed bytes | fine packed bytes
+# n_bits 存真实 bit 数（pack 末尾补 0 到字节对齐，unpack 须知 n_bits 丢 padding）。
+_MAGIC = b"MDLC"
+_VERSION = 1
+_HEADER = ">4sBBBBII"   # magic, ver, dual, H, C, coarse_nbits, fine_nbits
+_HEADER_SIZE = struct.calcsize(_HEADER)
+
+
+def _write_container(path, dual, H, C, c_bits, f_bits):
+    """把 coarse/fine bit 列表写成自包含 .bin。返回落盘字节数。"""
+    c_bytes = pack_bits(c_bits) if c_bits else b""
+    f_bytes = pack_bits(f_bits)
+    header = struct.pack(_HEADER, _MAGIC, _VERSION, 1 if dual else 0,
+                         H, C, len(c_bits), len(f_bits))
+    blob = header + c_bytes + f_bytes
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "wb") as fh:
+        fh.write(blob)
+    return len(blob)
+
+
+def _read_container(path):
+    """读回 .bin → (dual, H, C, c_bits, f_bits)。校验 magic/version。"""
+    with open(path, "rb") as fh:
+        blob = fh.read()
+    magic, ver, dual, H, C, c_nbits, f_nbits = struct.unpack(
+        _HEADER, blob[:_HEADER_SIZE])
+    if magic != _MAGIC:
+        raise ValueError(f"非 MDLC 容器（magic={magic!r}）")
+    if ver != _VERSION:
+        raise ValueError(f"版本不匹配（{ver} != {_VERSION}）")
+    off = _HEADER_SIZE
+    c_nbytes = (c_nbits + 7) // 8
+    f_nbytes = (f_nbits + 7) // 8
+    c_bits = unpack_bits(blob[off:off + c_nbytes], c_nbits) if c_nbits else []
+    off += c_nbytes
+    f_bits = unpack_bits(blob[off:off + f_nbytes], f_nbits)
+    return bool(dual), H, C, c_bits, f_bits
+
+
+def _inspect_container(path):
+    """只读不解模型：打印 MDLC 容器结构 + 头部 hex + 从文件独立算出的 bpd。
+
+    证明 .bin 是自包含的 —— 仅凭文件（无 ckpt）就能读出尺寸/码长/bpd。
+    （真正解回图像仍需模型逐 token forward，见 roundtrip 主流程。）
+    """
+    with open(path, "rb") as fh:
+        blob = fh.read()
+    total = len(blob)
+    if total < _HEADER_SIZE:
+        raise ValueError(f"文件太小（{total}B < header {_HEADER_SIZE}B），非 MDLC 容器")
+    magic, ver, dual, H, C, c_nbits, f_nbits = struct.unpack(
+        _HEADER, blob[:_HEADER_SIZE])
+    if magic != _MAGIC:
+        raise ValueError(f"非 MDLC 容器（magic={magic!r}）")
+
+    c_nbytes = (c_nbits + 7) // 8
+    f_nbytes = (f_nbits + 7) // 8
+    payload = total - _HEADER_SIZE
+    total_bits = c_nbits + f_nbits
+    n_subpix = H * H * C
+    bpd = total_bits / n_subpix
+
+    # 头部 hex（前 16 字节 = header），分组打印
+    head_hex = " ".join(f"{b:02x}" for b in blob[:_HEADER_SIZE])
+
+    print(f"== MDLC 容器: {path} ==")
+    print(f"  文件大小      : {total} byte")
+    print(f"  header (16B)  : {head_hex}")
+    print(f"  magic / ver   : {magic.decode('ascii', 'replace')} / v{ver}")
+    print(f"  尺度          : {'双尺度 (coarse+fine)' if dual else '单尺度 (igpt)'}")
+    print(f"  图像          : {H}×{H}×{C}  ({n_subpix} 子像素)")
+    if dual:
+        print(f"  coarse        : {c_nbits} bit  ({c_nbytes} byte)")
+        print(f"  fine          : {f_nbits} bit  ({f_nbytes} byte)")
+    print(f"  payload       : {payload} byte  (= coarse {c_nbytes} + fine {f_nbytes})")
+    print(f"  header 开销    : {_HEADER_SIZE} byte  ({100*_HEADER_SIZE/total:.1f}% of 文件)")
+    print(f"  码长          : {total_bits} bit")
+    print(f"  achieved bpd  : {bpd:.4f}  (= {total_bits} bit / {n_subpix} 子像素)")
+    # 一致性校验：payload 字节数应正好等于两段对齐字节之和
+    expect_payload = c_nbytes + f_nbytes
+    ok = (payload == expect_payload)
+    print(f"  自洽校验      : {'✅ payload 字节数与 header 声明一致' if ok else '❌ payload 与 header 不符（文件可能损坏）'}")
+    return ok
+
+
 
 
 def _self_test():
@@ -164,8 +255,13 @@ def _detokenize(tokens, image_size, channels):
     return t.permute(0, 3, 1, 2).contiguous()[0].to(torch.uint8)
 
 
-def _verify_image(model, model_type, x, device, log_every):
-    """对单张图 (1,C,H,W) float[0,1] 做 encode→decode→断言 bit-identical。"""
+def _verify_image(model, model_type, x, device, log_every, dump_path=None):
+    """对单张图 (1,C,H,W) float[0,1] 做 encode→decode→断言 bit-identical。
+
+    dump_path 非空时，额外把 bitstream 写成自包含 .bin，再读回断言 bit 一致 ——
+    证据链 图像→bits→文件→bits→图像 全程闭合（读回的 bits 即上面已证可解码的同一串，
+    故无需再跑一次昂贵 forward）。
+    """
     import torch
     import torch.nn.functional as F
 
@@ -203,6 +299,7 @@ def _verify_image(model, model_type, x, device, log_every):
             total_bits = len(c_bits) + len(f_bits)
             ideal_bits = c_ideal + f_ideal
             parts = {"coarse_bits": len(c_bits), "fine_bits": len(f_bits)}
+            _dump = (True, c_bits, f_bits)   # 落盘用：(dual, coarse_bits, fine_bits)
         else:
             tokens = model._tokenize(x)
             bits, ideal_bits = _encode_sequence(model, tokens, None, device,
@@ -214,6 +311,7 @@ def _verify_image(model, model_type, x, device, log_every):
             N_f = model.seq_len
             total_bits = len(bits)
             parts = {}
+            _dump = (False, [], bits)        # 单尺度：无 coarse，fine 位即整串
 
         # 模型 teacher-forced 参考 bpd（fp32）
         ref = model(x)
@@ -221,6 +319,18 @@ def _verify_image(model, model_type, x, device, log_every):
 
     orig = (x.clamp(0, 1) * 255).round().to(torch.uint8)[0]
     pixel_exact = bool(torch.equal(recon, orig))
+
+    # ---- bitstream 落盘（可选）：写自包含 .bin，读回断言 bit 一致 ----
+    # 读回的 bits 即上面已证可解码的同一串，故文件链路无需再跑 forward。
+    dump_info = {}
+    if dump_path is not None:
+        dual, c_bits_d, f_bits_d = _dump
+        file_bytes = _write_container(dump_path, dual, H, C, c_bits_d, f_bits_d)
+        d_dual, d_H, d_C, d_c, d_f = _read_container(dump_path)
+        file_ok = (d_dual == dual and d_H == H and d_C == C
+                   and d_c == c_bits_d and d_f == f_bits_d)
+        dump_info = {"dump_path": dump_path, "file_bytes": file_bytes,
+                     "file_roundtrip_ok": bool(file_ok)}
 
     achieved_bpd = total_bits / N_f
     ideal_bpd = ideal_bits / N_f
@@ -232,6 +342,7 @@ def _verify_image(model, model_type, x, device, log_every):
         "ref_bpd": ref_bpd,
         "N_f": N_f,
         **parts,
+        **dump_info,
     }
 
 
@@ -243,9 +354,18 @@ def main():
     ap.add_argument("--num_images", type=int, default=1)
     ap.add_argument("--log_every", type=int, default=512,
                     help="每多少步打印进度（0=静默）")
+    ap.add_argument("--dump_dir", type=str, default=None,
+                    help="把每张图的 bitstream 写成自包含 .bin 容器到该目录"
+                         "（图像→bits→文件→bits→图像，读回断言 bit 一致）")
     ap.add_argument("--self_test", action="store_true",
                     help="仅跑 coder 合成 roundtrip，无需 GPU/ckpt")
+    ap.add_argument("--inspect", type=str, default=None,
+                    help="只读模式：解析一个 .bin 容器打印结构/码长/bpd，无需 GPU/ckpt/模型")
     args = ap.parse_args()
+
+    if args.inspect:
+        _inspect_container(args.inspect)
+        return
 
     if args.self_test:
         _self_test()
@@ -276,7 +396,10 @@ def main():
         x = item[0] if isinstance(item, (tuple, list)) else item
         x = x.unsqueeze(0)
         print(f"--- image {idx} ---")
-        r = _verify_image(model, model_type, x, device, args.log_every)
+        dump_path = (os.path.join(args.dump_dir, f"img{idx}.bin")
+                     if args.dump_dir else None)
+        r = _verify_image(model, model_type, x, device, args.log_every,
+                          dump_path=dump_path)
         tag = "✅ bit-identical" if r["pixel_exact"] else "❌ MISMATCH"
         print(f"  {tag}")
         print(f"  码长: {r['total_bits']} bit  ({r['total_bits']/8:.0f} byte)"
@@ -286,7 +409,12 @@ def main():
               f"(理论 NLL bpd {r['ideal_bpd']:.4f}, "
               f"模型 teacher-forced bpd {r['ref_bpd']:.4f})")
         print(f"  量化+收尾 overhead vs NLL: "
-              f"{100*(r['achieved_bpd']-r['ideal_bpd'])/r['ideal_bpd']:.2f}%\n")
+              f"{100*(r['achieved_bpd']-r['ideal_bpd'])/r['ideal_bpd']:.2f}%")
+        if "dump_path" in r:
+            fok = "✅" if r["file_roundtrip_ok"] else "❌"
+            print(f"  bitstream → {r['dump_path']}  ({r['file_bytes']} byte 落盘)  "
+                  f"文件读回 bit 一致 {fok}")
+        print()
         n_pass += int(r["pixel_exact"])
 
     print(f"== 结果：{n_pass}/{args.num_images} 张 bit-identical 还原 ==")

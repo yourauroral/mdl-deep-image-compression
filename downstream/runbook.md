@@ -124,23 +124,38 @@ python scripts/complete_image.py --config $CFG --checkpoint $BEST \
 
 ---
 
-## [4] 真实可解性 roundtrip（最慢，~2 min/图 → 2 张约 5 min）
+## [4] 真实可解性 roundtrip（最慢，~2 min/图 → 2 张约 5 min；实测 865s）
 
 ```bash
 python scripts/verify_lossless.py --config $CFG --checkpoint $BEST --num_images 2
+
+# 可选：bitstream 落盘为自包含 MDLC .bin（写后读回断言 bit 一致）
+python scripts/verify_lossless.py --config $CFG --checkpoint $BEST --num_images 2 \
+    --dump_dir experiments/bitstreams
+# 只读解析某个 .bin（结构/hex/码长/bpd，无需 GPU/ckpt/模型）
+python scripts/verify_lossless.py --inspect experiments/bitstreams/img0.bin
 ```
 
-**预期：**
+**预期（2026-05-30 实测）：**
 ```
 ✅ bit-identical
-码长: ... bit  (... byte)  [coarse ... + fine ...]
-achieved bpd = 2.83xx  (理论 NLL bpd 2.83xx, 模型 teacher-forced bpd 2.83xx)
-量化+收尾 overhead vs NLL: 0.xx%        # 小正数
+码长: 9502 bit  (1188 byte)  [coarse 445 + fine 9057]
+achieved bpd = 3.0931  (理论 NLL bpd 3.0896, 模型 teacher-forced bpd 3.0876)
+量化+收尾 overhead vs NLL: 0.11%        # 小正数
+（img1: 2.3216 bpd, overhead 0.24%）
 == 结果：2/2 张 bit-identical 还原 ==
+# --dump_dir 时额外：bitstream → experiments/bitstreams/img0.bin (1205 byte) 文件读回 bit 一致 ✅
 ```
+
+⚠ **逐图 bpd 随图像复杂度变**（img0 3.09 / img1 2.32），不是某张图的绝对值有意义，关键是
+**2/2 可逆 + overhead vs NLL 仅 0.1–0.2%** → 证明报的 bpd = 真实可逆码长、算术编码近最优。
 
 这里慢是因为模型**无 KV-cache**，每个 token 跑一次完整 forward（encode + decode 各一遍）。
 属预期，不是卡死；`--log_every 512` 会打印进度。
+
+**`.bin` 容器（`--dump_dir`/`--inspect`）：** 自包含 MDLC 格式（16B header + coarse/fine 算术编码字节），
+仅凭文件即可读出尺寸/码长/bpd（`--inspect` 不依赖模型）。答辩三连：`ls -l` 看真文件 →
+`--inspect` 无模型读元数据 → roundtrip decode 回 bit-identical 原图。
 
 **论文用途：** 整条 MDL 主线的地基 —— 证明 bpd = 真实可逆码长，区别于只报 bpd 的工作。
 
