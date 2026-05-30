@@ -36,6 +36,10 @@
   \end{center}
 }
 
+% ── 回填位宏（AutoDL 跑出下游数字后替换；全文搜 \fillme 即可定位）──
+% 用法: \fillme{待填项说明}  → 渲染成醒目黄底「待填」标签
+\newcommand{\fillme}[1]{\colorbox{yellow!75}{\textcolor{black}{\scriptsize\textbf{[待填]} #1}}}
+
 % ── 标题信息（用户填空）──
 \title{基于 MDL 原则的深度图像压缩系统的设计与实现}
 \subtitle{CC-iGPT 双尺度条件式自回归压缩}
@@ -528,10 +532,11 @@ representation 血脉承 iGPT，density 血脉承 Sparse Transformer（纯生成
 \end{itemize}
 
 \bigskip
-\textbf{状态}
-\begin{itemize}
+\textbf{结果（AUROC，越高越能识别 OOD）}
+\begin{itemize}\setlength{\itemsep}{2pt}
   \item self-test 合成数据：裸 bpd 0.002 $\to$ typicality 0.995
-  \item 真实数据 \alert{待 AutoDL 实测}
+  \item SVHN: raw \fillme{x.xx} / typ \fillme{x.xx} / dual \fillme{x.xx}
+  \item CIFAR-100: raw \fillme{x.xx} / typ \fillme{x.xx} / dual \fillme{x.xx}
 \end{itemize}
 \end{column}
 \end{columns}
@@ -572,9 +577,10 @@ representation 血脉承 iGPT，density 血脉承 Sparse Transformer（纯生成
 \end{itemize}
 
 \bigskip
-\textbf{状态}
-\begin{itemize}
-  \item \alert{待 AutoDL 实测}
+\textbf{结果（bits/dim，同一 CIFAR-10 模型）}
+\begin{itemize}\setlength{\itemsep}{2pt}
+  \item CIFAR-10 (in-domain): \fillme{x.xx}
+  \item CIFAR-100: \fillme{x.xx} \;/\; SVHN: \fillme{x.xx} \;/\; STL-10: \fillme{x.xx}
 \end{itemize}
 \end{column}
 \end{columns}
@@ -613,10 +619,10 @@ representation 血脉承 iGPT，density 血脉承 Sparse Transformer（纯生成
 \end{itemize}
 
 \bigskip
-\textbf{状态}
-\begin{itemize}
+\textbf{结果}
+\begin{itemize}\setlength{\itemsep}{2pt}
   \item 仅 CIFAR v2 实用（fine 3072 token）
-  \item \alert{待 AutoDL 实测}
+  \item 补全网格见左图 \fillme{回填 image-completion-grid.pdf}
 \end{itemize}
 \end{column}
 \end{columns}
@@ -656,10 +662,10 @@ representation 血脉承 iGPT，density 血脉承 Sparse Transformer（纯生成
 \end{itemize}
 
 \bigskip
-\textbf{状态}
-\begin{itemize}
+\textbf{结果}
+\begin{itemize}\setlength{\itemsep}{2pt}
   \item codec 单测 6/6 过
-  \item 预期 2/2 图 bit-identical，\alert{待 AutoDL 验证}
+  \item roundtrip: \fillme{x/x} 图 bit-identical，achieved bpd \fillme{x.xx}
 \end{itemize}
 \end{column}
 \end{columns}
