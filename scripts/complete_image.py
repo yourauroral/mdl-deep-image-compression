@@ -111,8 +111,13 @@ def _complete_one(model, model_type, x, keep_frac, temperature, top_k, device):
     return orig.cpu(), masked.cpu(), completed.cpu()
 
 
-def _save_grid(rows, out_path):
-    """rows: list of (orig, masked, completed) 每个 (C,H,W) uint8 → 拼成 PNG。"""
+def _save_grid(rows, out_path, scale=8):
+    """rows: list of (orig, masked, completed) 每个 (C,H,W) uint8 → 拼成 PNG。
+
+    scale: nearest 放大倍数。native 32×32 拼出来才 ~104×206 px，进 slides/PDF 被
+    双线性插值放大会糊成一团；这里先按 native 拼好再整体 nearest 放大 scale 倍，
+    保持像素锐利（与前端 /api/complete 的 _b64_png scale=4 同理）。
+    """
     from PIL import Image
     import torch
 
@@ -131,7 +136,10 @@ def _save_grid(rows, out_path):
             xs = pad + col * (H + pad)
             canvas[y:y + H, xs:xs + H, :] = to_img(t)
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
-    Image.fromarray(canvas).save(out_path)
+    img = Image.fromarray(canvas)
+    if scale and scale > 1:
+        img = img.resize((grid_w * scale, grid_h * scale), Image.Resampling.NEAREST)
+    img.save(out_path)
 
 
 def main():
@@ -147,6 +155,8 @@ def main():
     ap.add_argument("--top_k", type=int, default=100, help="top-k 截断（0=不截断）")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", type=str, default="experiments/completion_grid.png")
+    ap.add_argument("--scale", type=int, default=8,
+                    help="存图 nearest 放大倍数（native 32px 太小，进 slides 会糊；默认 8×）")
     args = ap.parse_args()
 
     import torch
@@ -173,7 +183,7 @@ def main():
         rows.append((o, m, c))
         print(f"  image {idx}: done")
 
-    _save_grid(rows, args.out)
+    _save_grid(rows, args.out, scale=args.scale)
     print(f"== 网格已保存: {args.out}（每行: 原图 | 已知上半(灰=待补) | 补全）==")
 
 
