@@ -747,6 +747,9 @@ Chart.defaults.borderColor = "#2a2d3a";
   const encStats = $("co-enc-stats");
   const encDownload = $("co-enc-download");
   const encNote = $("co-enc-note");
+  const encProgWrap = $("co-enc-progress-wrap");
+  const encProgFill = $("co-enc-progress-fill");
+  const encProgLabel = $("co-enc-progress-label");
 
   let encFile = null;
   let lastDownloadUrl = null;   // 上一个 Blob object URL，换图时 revoke 防泄漏
@@ -774,7 +777,11 @@ Chart.defaults.borderColor = "#2a2d3a";
   encRun.addEventListener("click", async () => {
     if (!encFile) return;
     encRun.disabled = true; encRun.textContent = "编码中…";
-    encResult.hidden = true; encNote.textContent = "单次 forward 编码 + 自检中…";
+    encResult.hidden = true;
+    encNote.textContent = "逐 token gold 算术编码中…（与解码端同源，bit-exact 可解）";
+    encProgWrap.hidden = false;
+    encProgFill.style.width = "0%";
+    encProgLabel.textContent = "启动编码…";
 
     const form = new FormData();
     form.append("file", encFile);
@@ -783,38 +790,70 @@ Chart.defaults.borderColor = "#2a2d3a";
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         encNote.textContent = err.detail || "编码失败";
+        encProgWrap.hidden = true;
         encRun.disabled = false; encRun.textContent = "重试";
         return;
       }
-      const d = await res.json();
+      // 流式逐行读 NDJSON（同 /api/decode）
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      let done = false;
+      while (!done) {
+        const { value, done: rdDone } = await reader.read();
+        if (rdDone) break;
+        buf += decoder.decode(value, { stream: true });
+        let nl;
+        while ((nl = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, nl).trim();
+          buf = buf.slice(nl + 1);
+          if (!line) continue;
+          let msg;
+          try { msg = JSON.parse(line); } catch { continue; }
+          if (msg.type === "start") {
+            encProgLabel.textContent = `逐 token 编码中… 0 / ${msg.total}`;
+          } else if (msg.type === "progress") {
+            const pct = (msg.done / msg.total * 100).toFixed(1);
+            encProgFill.style.width = pct + "%";
+            encProgLabel.textContent = `[${msg.stage}] ${msg.done} / ${msg.total}（${pct}%）`;
+          } else if (msg.type === "done") {
+            encProgFill.style.width = "100%";
+            encProgLabel.textContent = `编码完成 — achieved ${msg.achieved_bpd} bpd`;
+            // base64 .bin → Blob → object URL 供下载
+            const bytes = Uint8Array.from(atob(msg.bin_b64), c => c.charCodeAt(0));
+            const blob = new Blob([bytes], { type: "application/octet-stream" });
+            if (lastDownloadUrl) URL.revokeObjectURL(lastDownloadUrl);
+            lastDownloadUrl = URL.createObjectURL(blob);
+            encDownload.href = lastDownloadUrl;
+            encDownload.download = msg.filename || "image.mdlc.bin";
+            lastEncFingerprint = msg.fingerprint;
 
-      // base64 .bin → Blob → object URL 供下载
-      const bytes = Uint8Array.from(atob(d.bin_b64), c => c.charCodeAt(0));
-      const blob = new Blob([bytes], { type: "application/octet-stream" });
-      if (lastDownloadUrl) URL.revokeObjectURL(lastDownloadUrl);
-      lastDownloadUrl = URL.createObjectURL(blob);
-      encDownload.href = lastDownloadUrl;
-      encDownload.download = d.filename || "image.mdlc.bin";
-      lastEncFingerprint = d.fingerprint;
-
-      const exactStr = d.pixel_exact
-        ? `<span class="co-ok">✅ bit-identical</span>`
-        : `<span class="co-fail">⚠ 自检不一致</span>`;
-      const partsStr = d.dual
-        ? `coarse ${d.coarse_bits} + fine ${d.fine_bits} bit`
-        : `${d.neural_bits} bit`;
-      encStats.innerHTML =
-        `<div class="codec-stat"><span>文件大小</span><b>${d.bin_bytes} B</b></div>` +
-        `<div class="codec-stat"><span>码长</span><b>${d.neural_bits} bit</b></div>` +
-        `<div class="codec-stat"><span>achieved bpd</span><b>${d.achieved_bpd}</b></div>` +
-        `<div class="codec-stat"><span>编码自检</span><b>${exactStr}</b></div>` +
-        `<div class="codec-stat codec-stat-wide"><span>分段</span><b>${partsStr}</b></div>` +
-        `<div class="codec-stat codec-stat-wide"><span>指纹</span><b><code>${d.fingerprint}</code></b></div>`;
-      encResult.hidden = false;
-      encNote.innerHTML = `下载后可直接拖到右侧 ② 解码块还原。<b>指纹 ${d.fingerprint}</b> 用于同会话交叉校验。`;
+            const exactStr = msg.pixel_exact
+              ? `<span class="co-ok">✅ bit-identical</span>`
+              : `<span class="co-fail">⚠ 自检不一致</span>`;
+            const partsStr = msg.dual
+              ? `coarse ${msg.coarse_bits} + fine ${msg.fine_bits} bit`
+              : `${msg.neural_bits} bit`;
+            encStats.innerHTML =
+              `<div class="codec-stat"><span>文件大小</span><b>${msg.bin_bytes} B</b></div>` +
+              `<div class="codec-stat"><span>码长</span><b>${msg.neural_bits} bit</b></div>` +
+              `<div class="codec-stat"><span>achieved bpd</span><b>${msg.achieved_bpd}</b></div>` +
+              `<div class="codec-stat"><span>编码自检</span><b>${exactStr}</b></div>` +
+              `<div class="codec-stat codec-stat-wide"><span>分段</span><b>${partsStr}</b></div>` +
+              `<div class="codec-stat codec-stat-wide"><span>指纹</span><b><code>${msg.fingerprint}</code></b></div>`;
+            encResult.hidden = false;
+            encNote.innerHTML = `下载后可直接拖到右侧 ② 解码块还原。<b>指纹 ${msg.fingerprint}</b> 用于同会话交叉校验。`;
+            done = true;
+          } else if (msg.type === "error") {
+            encProgLabel.textContent = "编码出错：" + msg.detail;
+            done = true;
+          }
+        }
+      }
       encRun.disabled = false; encRun.textContent = "重新编码";
     } catch (e) {
       encNote.textContent = "无法连接后端";
+      encProgWrap.hidden = true;
       encRun.disabled = false; encRun.textContent = "重试";
     }
   });

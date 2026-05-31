@@ -272,6 +272,30 @@ def _encode_sequence(igpt, tokens, coarse_ctx, device, tag, log_every):
     return enc.finish(), ideal_bits
 
 
+def _encode_sequence_iter(igpt, tokens, coarse_ctx, device):
+    """逐步算术编码生成器：每编码一个 token yield (m, T-1) 进度，
+    最终 `return` 出 bit 列表 (list[int])。
+
+    与 _encode_sequence 同一逐 token 路径（_logits_from_tokens），仅多吐进度，
+    供 demo 流式端点 /api/encode 用，绕开 AutoDL 反代 idle 超时。
+    关键：与 _decode_sequence_iter 用**完全相同**的 buffer 构造 + _logits_from_tokens，
+    故 encode 写的 bits 与 decode 逐 token 读所需分布逐位相同 → bit-exact 可解。
+    """
+    import torch
+    T = tokens.shape[1]
+    seq_in = igpt.seq_len - 1
+    enc = ArithmeticEncoder()
+    enc.encode(int(tokens[0, 0].item()), _UNIFORM_CUM)   # token 0：均匀先验
+    buf = torch.zeros((1, seq_in), dtype=torch.long, device=device)
+    for m in range(1, T):
+        buf[0, m - 1] = tokens[0, m - 1]
+        logits = _logits_from_tokens(igpt, buf, coarse_ctx, m - 1)
+        p = _probs(logits)
+        enc.encode(int(tokens[0, m].item()), build_cumfreq(p))
+        yield m, T - 1
+    return enc.finish()
+
+
 def _decode_sequence_iter(igpt, bits, T, coarse_ctx, device):
     """逐步算术解码生成器：每解出一个 token yield (m, T-1) 进度，
     最终 `return` 出 token 序列 (1, T)。每步 logits 必须与 encode 端逐位相同。

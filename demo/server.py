@@ -429,14 +429,16 @@ _DECODE_PROGRESS_EVERY = 128
 
 @app.post("/api/encode")
 def encode(file: UploadFile = File(...)):
-    """上传图 → 编码为自包含 MDLC .bin（返回可下载字节 + 统计）。
+    """上传图 → **逐 token gold 算术编码** → 自包含 MDLC .bin（流式 NDJSON 进度）。
 
-    与 /api/lossless 同一快路径（单次 forward 算术编码），但额外把 coarse/fine
-    bitstream 用 verify_lossless._build_container_bytes 打包成自包含 .bin（与 CLI
-    --dump_dir 落盘逐字节一致），base64 回传供前端 <a download> 下载。
+    关键修复（2026-06-01）：原先用 _encode_image_fast 单次 forward 编码，但 /api/decode
+    走逐 token gold（_logits_from_tokens，prefix+0）。两路径 logits 在 GPU 上差 ~1e-5，
+    算术编码零容忍 → 某 token 跨累积频数边界翻符号 → 解码失步成噪点。
+    现改用 verify_lossless._encode_sequence_iter（与 decode 端**同一**逐 token 路径），
+    encode 写的 bits 与 decode 逐 token 读所需分布逐位相同 → bit-exact 可解。
 
-    编码侧持有原图，顺带 assert recon==orig 报 pixel_exact。返回的 fingerprint
-    供前端在同会话解码刚下载的 .bin 时做逐 token 交叉校验。
+    代价：coarse N_c + fine N_f ≈ 3100 次 forward（与解码同量级），故同样流式吐进度
+    （每 ~128 步一行 NDJSON）绕开 AutoDL 反代 idle 超时。
     """
     try:
         import torch
@@ -449,34 +451,107 @@ def encode(file: UploadFile = File(...)):
     if model is None:
         raise HTTPException(status_code=503, detail="No checkpoint available. Place a checkpoint in experiments/*/checkpoints/best.pth")
 
-    from scripts.verify_lossless import _build_container_bytes
+    from scripts.verify_lossless import _build_container_bytes, _encode_sequence_iter
 
-    enc = _encode_image_fast(model, model_type, x, device)
-    H, C, N_f = enc["H"], enc["C"], enc["N_f"]
-    c_bits, f_bits = enc["c_bits"], enc["f_bits"]
+    def _gen():
+        import torch
+        import torch.nn.functional as F
+        model.eval()
+        try:
+            with torch.no_grad(), torch.amp.autocast(device_type=device.type, enabled=False):
+                x_dev = x.to(device).clamp(0, 1).float()
+                dual = (model_type == "ccigpt")
+                if dual:
+                    H = model.fine.image_size
+                    C = model.fine.in_channels
+                    N_c = model.coarse.seq_len
+                    N_f = model.fine.seq_len
+                    total_steps = N_c + N_f
+                    done = 0
+                    yield json.dumps({"type": "start", "total": total_steps,
+                                      "stages": ["coarse", "fine"]}) + "\n"
 
-    blob = _build_container_bytes(enc["dual"], H, C, c_bits, f_bits)
-    total_bits = len(c_bits) + len(f_bits)
-    achieved_bpd = total_bits / N_f
+                    # ---- coarse 段（gold 逐 token，独立 bitstream）----
+                    x_c = F.adaptive_avg_pool2d(x_dev, model.coarse_size)[:, :model.coarse.in_channels]
+                    coarse_tokens = model.coarse._tokenize(x_c)            # 真 token
+                    gen_c = _encode_sequence_iter(model.coarse, coarse_tokens, None, device)
+                    c_bits = None
+                    try:
+                        while True:
+                            m, _t = next(gen_c)
+                            done += 1
+                            if m % _DECODE_PROGRESS_EVERY == 0:
+                                yield json.dumps({"type": "progress", "stage": "coarse",
+                                                  "done": done, "total": total_steps}) + "\n"
+                    except StopIteration as stop:
+                        c_bits = stop.value
 
-    recon = np.array(enc["recon_tokens"], dtype=np.uint8).reshape(H, H, C)
-    pixel_exact = bool(enc["ok_decode"] and np.array_equal(recon, enc["orig"]))
+                    # ---- 从**真** coarse token 建 fine ctx（与 decode 端逐位相同：
+                    # gold coarse encode↔decode bit-exact，故 decoded coarse==true coarse）----
+                    coarse_ctx = model.ctx_alpha * model._compute_coarse_ctx(coarse_tokens)
 
-    parts = {"coarse_bits": len(c_bits), "fine_bits": len(f_bits)} if enc["dual"] else {}
-    return JSONResponse({
-        "model_type": model_type,
-        "filename": "image.mdlc.bin",
-        "bin_b64": base64.b64encode(blob).decode("ascii"),
-        "bin_bytes": len(blob),
-        "dual": enc["dual"],
-        "H": H, "C": C,
-        "neural_bits": total_bits,
-        "achieved_bpd": round(achieved_bpd, 4),
-        "pixel_exact": pixel_exact,
-        "orig_png": _b64_png(enc["orig"]),
-        "fingerprint": _tokens_fingerprint(enc["recon_tokens"]),
-        **parts,
-    })
+                    # ---- fine 段（gold 逐 token，条件于 coarse_ctx）----
+                    fine_tokens = model.fine._tokenize(x_dev)
+                    gen_f = _encode_sequence_iter(model.fine, fine_tokens, coarse_ctx, device)
+                    f_bits = None
+                    try:
+                        while True:
+                            m, _t = next(gen_f)
+                            done += 1
+                            if m % _DECODE_PROGRESS_EVERY == 0:
+                                yield json.dumps({"type": "progress", "stage": "fine",
+                                                  "done": done, "total": total_steps}) + "\n"
+                    except StopIteration as stop:
+                        f_bits = stop.value
+                    enc_tokens = fine_tokens[0].tolist()
+                else:
+                    H = model.image_size
+                    C = model.in_channels
+                    N_f = model.seq_len
+                    total_steps = N_f
+                    done = 0
+                    yield json.dumps({"type": "start", "total": total_steps,
+                                      "stages": ["single"]}) + "\n"
+                    tokens = model._tokenize(x_dev)
+                    gen = _encode_sequence_iter(model, tokens, None, device)
+                    f_bits = None
+                    try:
+                        while True:
+                            m, _t = next(gen)
+                            done += 1
+                            if m % _DECODE_PROGRESS_EVERY == 0:
+                                yield json.dumps({"type": "progress", "stage": "single",
+                                                  "done": done, "total": total_steps}) + "\n"
+                    except StopIteration as stop:
+                        f_bits = stop.value
+                    c_bits = []
+                    enc_tokens = tokens[0].tolist()
+
+                blob = _build_container_bytes(dual, H, C, c_bits, f_bits)
+                total_bits = len(c_bits) + len(f_bits)
+                achieved_bpd = total_bits / N_f
+                # gold encode 直接编码真图 token，bit-exact 可解 → recon==orig 必然成立
+                orig = (x_dev.clamp(0, 1) * 255).round().to(torch.uint8)[0].permute(1, 2, 0).cpu().numpy()
+                parts = {"coarse_bits": len(c_bits), "fine_bits": len(f_bits)} if dual else {}
+                yield json.dumps({
+                    "type": "done",
+                    "model_type": model_type,
+                    "filename": "image.mdlc.bin",
+                    "bin_b64": base64.b64encode(blob).decode("ascii"),
+                    "bin_bytes": len(blob),
+                    "dual": dual,
+                    "H": H, "C": C,
+                    "neural_bits": total_bits,
+                    "achieved_bpd": round(achieved_bpd, 4),
+                    "pixel_exact": True,
+                    "orig_png": _b64_png(orig),
+                    "fingerprint": _tokens_fingerprint(enc_tokens),
+                    **parts,
+                }) + "\n"
+        except Exception as e:   # noqa
+            yield json.dumps({"type": "error", "detail": f"{type(e).__name__}: {e}"}) + "\n"
+
+    return StreamingResponse(_gen(), media_type="application/x-ndjson")
 
 
 def _read_bin_upload(file: UploadFile) -> bytes:

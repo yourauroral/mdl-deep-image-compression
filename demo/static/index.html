@@ -291,11 +291,15 @@
         <img id="co-enc-preview" class="preview-img" hidden>
       </div>
       <button id="co-enc-run" class="cmp-btn" disabled>先上传图片</button>
+      <div id="co-enc-progress-wrap" class="co-progress-wrap" hidden>
+        <div class="co-progress-track"><div class="co-progress-fill" id="co-enc-progress-fill"></div></div>
+        <span class="co-progress-label" id="co-enc-progress-label">—</span>
+      </div>
       <div id="co-enc-result" class="codec-result" hidden>
         <div class="codec-stats" id="co-enc-stats"></div>
         <a id="co-enc-download" class="co-download" download>⬇ 下载 .bin</a>
       </div>
-      <p id="co-enc-note" class="hint codec-note">编码用单次 forward 快路径，约 1–2 秒。</p>
+      <p id="co-enc-note" class="hint codec-note">编码用逐 token gold 算术编码（与解码端同源，bit-exact 可解），约 1–2 分钟、流式显示进度。</p>
     </div>
 
     <!-- 解码块 -->
