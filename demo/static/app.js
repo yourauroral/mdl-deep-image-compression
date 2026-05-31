@@ -725,3 +725,226 @@ Chart.defaults.borderColor = "#2a2d3a";
   });
 })();
 
+// ── Panel 10: 无损 codec — 图像 ⇄ .bin ──
+// 编码：POST /api/encode → base64 .bin + 统计 → Blob 下载，暂存 fingerprint。
+// 解析：POST /api/inspect → 即时填结构表（无 GPU）。
+// 解码：POST /api/decode → StreamingResponse NDJSON，逐行读 getReader() 更新进度，
+//       末行 done 显示还原图；若与刚编码的 .bin fingerprint 一致 → 同会话交叉校验通过。
+(function initCodec() {
+  // —— 编码块 ——
+  const encArea = $("co-enc-upload-area");
+  const encInput = $("co-enc-file-input");
+  const encPreview = $("co-enc-preview");
+  const encPh = $("co-enc-placeholder");
+  const encRun = $("co-enc-run");
+  const encResult = $("co-enc-result");
+  const encStats = $("co-enc-stats");
+  const encDownload = $("co-enc-download");
+  const encNote = $("co-enc-note");
+
+  let encFile = null;
+  let lastDownloadUrl = null;   // 上一个 Blob object URL，换图时 revoke 防泄漏
+  let lastEncFingerprint = null;
+
+  function bindUpload(area, input, onPick) {
+    area.addEventListener("click", () => input.click());
+    area.addEventListener("dragover", e => { e.preventDefault(); area.classList.add("dragover"); });
+    area.addEventListener("dragleave", () => area.classList.remove("dragover"));
+    area.addEventListener("drop", e => {
+      e.preventDefault(); area.classList.remove("dragover");
+      if (e.dataTransfer.files.length) onPick(e.dataTransfer.files[0]);
+    });
+    input.addEventListener("change", () => { if (input.files.length) onPick(input.files[0]); });
+  }
+
+  bindUpload(encArea, encInput, (file) => {
+    encFile = file;
+    const reader = new FileReader();
+    reader.onload = () => { encPreview.src = reader.result; encPreview.hidden = false; encPh.hidden = true; };
+    reader.readAsDataURL(file);
+    encRun.disabled = false; encRun.textContent = "编码为 .bin";
+  });
+
+  encRun.addEventListener("click", async () => {
+    if (!encFile) return;
+    encRun.disabled = true; encRun.textContent = "编码中…";
+    encResult.hidden = true; encNote.textContent = "单次 forward 编码 + 自检中…";
+
+    const form = new FormData();
+    form.append("file", encFile);
+    try {
+      const res = await fetch(API + "/api/encode", { method: "POST", body: form });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        encNote.textContent = err.detail || "编码失败";
+        encRun.disabled = false; encRun.textContent = "重试";
+        return;
+      }
+      const d = await res.json();
+
+      // base64 .bin → Blob → object URL 供下载
+      const bytes = Uint8Array.from(atob(d.bin_b64), c => c.charCodeAt(0));
+      const blob = new Blob([bytes], { type: "application/octet-stream" });
+      if (lastDownloadUrl) URL.revokeObjectURL(lastDownloadUrl);
+      lastDownloadUrl = URL.createObjectURL(blob);
+      encDownload.href = lastDownloadUrl;
+      encDownload.download = d.filename || "image.mdlc.bin";
+      lastEncFingerprint = d.fingerprint;
+
+      const exactStr = d.pixel_exact
+        ? `<span class="co-ok">✅ bit-identical</span>`
+        : `<span class="co-fail">⚠ 自检不一致</span>`;
+      const partsStr = d.dual
+        ? `coarse ${d.coarse_bits} + fine ${d.fine_bits} bit`
+        : `${d.neural_bits} bit`;
+      encStats.innerHTML =
+        `<div class="codec-stat"><span>文件大小</span><b>${d.bin_bytes} B</b></div>` +
+        `<div class="codec-stat"><span>码长</span><b>${d.neural_bits} bit</b></div>` +
+        `<div class="codec-stat"><span>achieved bpd</span><b>${d.achieved_bpd}</b></div>` +
+        `<div class="codec-stat"><span>编码自检</span><b>${exactStr}</b></div>` +
+        `<div class="codec-stat codec-stat-wide"><span>分段</span><b>${partsStr}</b></div>` +
+        `<div class="codec-stat codec-stat-wide"><span>指纹</span><b><code>${d.fingerprint}</code></b></div>`;
+      encResult.hidden = false;
+      encNote.innerHTML = `下载后可直接拖到右侧 ② 解码块还原。<b>指纹 ${d.fingerprint}</b> 用于同会话交叉校验。`;
+      encRun.disabled = false; encRun.textContent = "重新编码";
+    } catch (e) {
+      encNote.textContent = "无法连接后端";
+      encRun.disabled = false; encRun.textContent = "重试";
+    }
+  });
+
+  // —— 解码块 ——
+  const decArea = $("co-dec-upload-area");
+  const decInput = $("co-dec-file-input");
+  const decPh = $("co-dec-placeholder");
+  const decFileInfo = $("co-dec-fileinfo");
+  const inspectRun = $("co-inspect-run");
+  const decRun = $("co-dec-run");
+  const structTable = $("co-struct-table");
+  const progWrap = $("co-dec-progress-wrap");
+  const progFill = $("co-dec-progress-fill");
+  const progLabel = $("co-dec-progress-label");
+  const decResult = $("co-dec-result");
+  const decImg = $("co-dec-img");
+  const decBadge = $("co-dec-badge");
+
+  let decFile = null;
+
+  bindUpload(decArea, decInput, (file) => {
+    decFile = file;
+    decFileInfo.hidden = false;
+    decFileInfo.innerHTML = `<code>${file.name}</code> · ${file.size} B`;
+    decPh.hidden = true;
+    inspectRun.disabled = false; decRun.disabled = false;
+    structTable.hidden = true; decResult.hidden = true; progWrap.hidden = true;
+  });
+
+  inspectRun.addEventListener("click", async () => {
+    if (!decFile) return;
+    inspectRun.disabled = true; inspectRun.textContent = "解析中…";
+    const form = new FormData();
+    form.append("file", decFile);
+    try {
+      const res = await fetch(API + "/api/inspect", { method: "POST", body: form });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        structTable.hidden = false;
+        structTable.querySelector("tbody").innerHTML =
+          `<tr><td>错误</td><td class="co-fail">${d.detail || "解析失败"}</td></tr>`;
+        return;
+      }
+      const row = (k, v) => `<tr><td>${k}</td><td>${v}</td></tr>`;
+      const okStr = d.self_consistent
+        ? `<span class="co-ok">✅ payload 与 header 一致</span>`
+        : `<span class="co-fail">❌ 不一致（文件可能损坏）</span>`;
+      const scaleStr = d.dual ? "双尺度 (coarse+fine)" : "单尺度 (igpt)";
+      const partsRow = d.dual
+        ? row("coarse / fine", `${d.coarse_nbits} bit / ${d.fine_nbits} bit`)
+        : "";
+      structTable.querySelector("tbody").innerHTML =
+        row("magic / 版本", `${d.magic} / v${d.version}`) +
+        row("header (16B)", `<code class="co-hex">${d.header_hex}</code>`) +
+        row("尺度", scaleStr) +
+        row("图像", `${d.H}×${d.H}×${d.C}（${d.n_subpix} 子像素）`) +
+        partsRow +
+        row("文件大小", `${d.total_bytes} B（payload ${d.payload_bytes} + header ${d.header_size}）`) +
+        row("码长", `${d.total_bits} bit`) +
+        row("achieved bpd", `<b>${d.bpd}</b>`) +
+        row("自洽校验", okStr);
+      structTable.hidden = false;
+    } catch (e) {
+      structTable.hidden = false;
+      structTable.querySelector("tbody").innerHTML =
+        `<tr><td>错误</td><td class="co-fail">无法连接后端</td></tr>`;
+    } finally {
+      inspectRun.disabled = false; inspectRun.textContent = "解析结构（即时）";
+    }
+  });
+
+  decRun.addEventListener("click", async () => {
+    if (!decFile) return;
+    decRun.disabled = true; inspectRun.disabled = true;
+    decRun.textContent = "解码中…";
+    decResult.hidden = true; decImg.hidden = true;
+    progWrap.hidden = false;
+    progFill.style.width = "0%";
+    progLabel.textContent = "启动解码…";
+
+    const form = new FormData();
+    form.append("file", decFile);
+    try {
+      const res = await fetch(API + "/api/decode", { method: "POST", body: form });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        progLabel.textContent = err.detail || "解码失败";
+        decRun.disabled = false; inspectRun.disabled = false; decRun.textContent = "重试";
+        return;
+      }
+      // 流式逐行读 NDJSON
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      let done = false;
+      while (!done) {
+        const { value, done: rdDone } = await reader.read();
+        if (rdDone) break;
+        buf += decoder.decode(value, { stream: true });
+        let nl;
+        while ((nl = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, nl).trim();
+          buf = buf.slice(nl + 1);
+          if (!line) continue;
+          let msg;
+          try { msg = JSON.parse(line); } catch { continue; }
+          if (msg.type === "start") {
+            progLabel.textContent = `逐 token 解码中… 0 / ${msg.total}`;
+          } else if (msg.type === "progress") {
+            const pct = (msg.done / msg.total * 100).toFixed(1);
+            progFill.style.width = pct + "%";
+            progLabel.textContent = `[${msg.stage}] ${msg.done} / ${msg.total}（${pct}%）`;
+          } else if (msg.type === "done") {
+            progFill.style.width = "100%";
+            progLabel.textContent = `解码完成 — achieved ${msg.achieved_bpd} bpd`;
+            decImg.src = "data:image/png;base64," + msg.recon_png;
+            decImg.hidden = false;
+            decResult.hidden = false;
+            const match = (lastEncFingerprint && msg.fingerprint === lastEncFingerprint);
+            decBadge.className = "ll-badge " + (match ? "ll-badge-ok" : "ll-badge-ok");
+            decBadge.innerHTML = match
+              ? `✅ 盲解码还原 — 指纹 <code>${msg.fingerprint}</code> 与刚编码的 .bin 逐 token 一致`
+              : `✅ 盲解码还原 — 指纹 <code>${msg.fingerprint}</code>，achieved <b>${msg.achieved_bpd}</b> bpd`;
+            done = true;
+          } else if (msg.type === "error") {
+            progLabel.textContent = "解码出错：" + msg.detail;
+            done = true;
+          }
+        }
+      }
+      decRun.disabled = false; inspectRun.disabled = false; decRun.textContent = "重新解码";
+    } catch (e) {
+      progLabel.textContent = "无法连接后端（或连接中断）";
+      decRun.disabled = false; inspectRun.disabled = false; decRun.textContent = "重试";
+    }
+  });
+})();
+

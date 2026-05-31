@@ -17,6 +17,9 @@ Demo 可视化后端 — FastAPI + 静态文件。
   POST /api/predict     — 上传图片 → 返回 bpd / 双尺度 CE / 热力图
   POST /api/lossless    — 上传图片 → 真实算术编解码 roundtrip（下游 §6.5/6.6）
   POST /api/complete    — 上传图片 → AR 补全下半（下游 §6.4，实时采样，~20–40s）
+  POST /api/encode      — 上传图片 → 编码为自包含 MDLC .bin（返回可下载字节，~1–2s）
+  POST /api/inspect     — 上传 .bin → 即时解析容器结构/码长/bpd（无需 GPU/ckpt）
+  POST /api/decode      — 上传 .bin → 流式逐 token 盲解码还原图像（NDJSON 进度）
 """
 
 import json
@@ -25,13 +28,14 @@ import sys
 import io
 import math
 import base64
+import hashlib
 import threading
 
 import numpy as np
 from pathlib import Path
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 # 提前固定 matplotlib backend 到 Agg：必须在 import pyplot 前，且只能在主线程
@@ -267,33 +271,19 @@ def _b64_png(arr, scale=4):
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
-@app.post("/api/lossless")
-def lossless(file: UploadFile = File(...)):
-    """真实可解性 demo：上传图 → 算术编码出真实 bitstream → 解码 → 逐像素比对。
+def _encode_image_fast(model, model_type, x, device):
+    """一次 teacher-forced forward → 真实算术编码出 coarse/fine bit 列表（快路径）。
 
-    与 scripts/verify_lossless.py 同一套手写 WNC 算术编解码，但为了浏览器交互
-    （秒级响应、且不与 IN64 训练抢 GPU），用**一次 teacher-forced forward** 拿到
-    每个位置的条件分布，而非 decode 端逐 token 重跑 T 次完整 forward。
+    /api/lossless、/api/encode 共用：单次 forward 拿每位置条件分布，编码 + 同表
+    roundtrip 自解一遍（自检 bit-identical）。模型 causal → 该 bitstream 与 decode 端
+    逐 token 盲解（/api/decode、verify_lossless）所需分布**逐位相同**（归纳法），
+    故落盘的 .bin 是真实可逆的，仅省了 encode 侧 decode 的 T 次 forward。
 
-    这不偷工：模型 causal，位置 i 的分布只依赖 token[0..i]，与真实 decoder 在已正确
-    解出前缀时算出的分布**逐位相同**（归纳法）。所以 bitstream 是真实可逆的，仅省了
-    decode 侧的 T 次 forward（纯加速）。严格逐步解码的版本在 verify_lossless.py。
-
-    返回 orig/recon 的 base64 PNG、是否 bit-identical、neural 码长 (byte/bpd)、
-    以及同图 PNG/WebP 无损字节数做对比。
+    返回 dict：dual / H / C / N_f / c_bits / f_bits / recon_tokens(list) /
+    ok_decode(bool) / orig(np.uint8 HWC)。
     """
-    try:
-        import torch
-        import torch.nn.functional as F
-        from PIL import Image
-    except ImportError:
-        raise HTTPException(status_code=500, detail="torch/torchvision not installed")
-
-    x, _ = _read_upload_to_tensor(file, size=32)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model, model_type = _get_cached_model(device)
-    if model is None:
-        raise HTTPException(status_code=503, detail="No checkpoint available. Place a checkpoint in experiments/*/checkpoints/best.pth")
+    import torch
+    import torch.nn.functional as F
 
     x = x.to(device).clamp(0, 1).float()
     model.eval()
@@ -320,33 +310,80 @@ def lossless(file: UploadFile = File(...)):
             f_bits, f_dec = _roundtrip_tokens(f_probs, fine_tokens, _UNIFORM_CUM)
             fine_ok = (f_dec == fine_tokens)
 
+            dual = True
             recon_tokens = f_dec
             H = model.fine.image_size
             C = model.fine.in_channels
             N_f = model.fine.seq_len
-            # 两段独立 bitstream，各自字节对齐 → 真实落盘字节数
-            neural_bytes = math.ceil(len(c_bits) / 8) + math.ceil(len(f_bits) / 8)
-            total_bits = len(c_bits) + len(f_bits)
             ok_decode = coarse_ok and fine_ok
-            parts = {"coarse_bits": len(c_bits), "fine_bits": len(f_bits)}
         else:
             tokens = model._tokenize(x)[0].tolist()
             out = model(x)
             probs = _probs_from_logits(out["logits"])
-            bits, dec = _roundtrip_tokens(probs, tokens, _UNIFORM_CUM)
-            ok_decode = (dec == tokens)
+            f_bits, dec = _roundtrip_tokens(probs, tokens, _UNIFORM_CUM)
+            c_bits = []
+            dual = False
             recon_tokens = dec
             H = model.image_size
             C = model.in_channels
             N_f = model.seq_len
-            neural_bytes = math.ceil(len(bits) / 8)
-            total_bits = len(bits)
-            parts = {}
+            ok_decode = (dec == tokens)
+
+    orig = (x.clamp(0, 1) * 255).round().to(torch.uint8)[0].permute(1, 2, 0).cpu().numpy()
+    return {
+        "dual": dual, "H": H, "C": C, "N_f": N_f,
+        "c_bits": c_bits, "f_bits": f_bits,
+        "recon_tokens": recon_tokens, "ok_decode": ok_decode,
+        "orig": orig,
+    }
+
+
+def _tokens_fingerprint(tokens):
+    """token 列表 → 8-hex SHA1 指纹，用于编/解码两侧同会话交叉校验。"""
+    b = bytes(int(t) & 0xFF for t in tokens)
+    return hashlib.sha1(b).hexdigest()[:8]
+
+
+@app.post("/api/lossless")
+def lossless(file: UploadFile = File(...)):
+    """真实可解性 demo：上传图 → 算术编码出真实 bitstream → 解码 → 逐像素比对。
+
+    与 scripts/verify_lossless.py 同一套手写 WNC 算术编解码，但为了浏览器交互
+    （秒级响应、且不与 IN64 训练抢 GPU），用**一次 teacher-forced forward** 拿到
+    每个位置的条件分布，而非 decode 端逐 token 重跑 T 次完整 forward。
+
+    这不偷工：模型 causal，位置 i 的分布只依赖 token[0..i]，与真实 decoder 在已正确
+    解出前缀时算出的分布**逐位相同**（归纳法）。所以 bitstream 是真实可逆的，仅省了
+    decode 侧的 T 次 forward（纯加速）。严格逐步解码的版本在 verify_lossless.py。
+
+    返回 orig/recon 的 base64 PNG、是否 bit-identical、neural 码长 (byte/bpd)、
+    以及同图 PNG/WebP 无损字节数做对比。
+    """
+    try:
+        import torch
+        from PIL import Image
+    except ImportError:
+        raise HTTPException(status_code=500, detail="torch/torchvision not installed")
+
+    x, _ = _read_upload_to_tensor(file, size=32)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model, model_type = _get_cached_model(device)
+    if model is None:
+        raise HTTPException(status_code=503, detail="No checkpoint available. Place a checkpoint in experiments/*/checkpoints/best.pth")
+
+    enc = _encode_image_fast(model, model_type, x, device)
+    H, C, N_f = enc["H"], enc["C"], enc["N_f"]
+    c_bits, f_bits = enc["c_bits"], enc["f_bits"]
+
+    # 两段独立 bitstream，各自字节对齐 → 真实落盘字节数
+    neural_bytes = (math.ceil(len(c_bits) / 8) if c_bits else 0) + math.ceil(len(f_bits) / 8)
+    total_bits = len(c_bits) + len(f_bits)
+    parts = {"coarse_bits": len(c_bits), "fine_bits": len(f_bits)} if enc["dual"] else {}
 
     # ---- 重建图（从 DECODED token，pixel-first 逆 tokenize）----
-    recon = np.array(recon_tokens, dtype=np.uint8).reshape(H, H, C)      # (H,W,C)
-    orig = (x.clamp(0, 1) * 255).round().to(torch.uint8)[0].permute(1, 2, 0).cpu().numpy()
-    pixel_exact = bool(ok_decode and np.array_equal(recon, orig))
+    recon = np.array(enc["recon_tokens"], dtype=np.uint8).reshape(H, H, C)   # (H,W,C)
+    orig = enc["orig"]
+    pixel_exact = bool(enc["ok_decode"] and np.array_equal(recon, orig))
 
     # ---- 传统无损对照（同一张 32×32 图）----
     def _fmt_bytes(arr, fmt, **kw):
@@ -379,6 +416,218 @@ def lossless(file: UploadFile = File(...)):
         "webp_bpd": round(webp_bytes * 8 / n_pixels, 4) if webp_bytes else None,
         **parts,
     })
+
+
+# 上传 .bin 大小上限：CIFAR 32×32×3 在 ~3 bpd 下 ≈ 1.1KB，给 1MB 余量足够防滥用。
+MAX_BIN_BYTES = 1 * 1024 * 1024
+# 流式解码每多少步推一次进度（太密会刷爆前端，太疏过不了反代 idle 超时）。
+_DECODE_PROGRESS_EVERY = 128
+
+
+@app.post("/api/encode")
+def encode(file: UploadFile = File(...)):
+    """上传图 → 编码为自包含 MDLC .bin（返回可下载字节 + 统计）。
+
+    与 /api/lossless 同一快路径（单次 forward 算术编码），但额外把 coarse/fine
+    bitstream 用 verify_lossless._build_container_bytes 打包成自包含 .bin（与 CLI
+    --dump_dir 落盘逐字节一致），base64 回传供前端 <a download> 下载。
+
+    编码侧持有原图，顺带 assert recon==orig 报 pixel_exact。返回的 fingerprint
+    供前端在同会话解码刚下载的 .bin 时做逐 token 交叉校验。
+    """
+    try:
+        import torch
+    except ImportError:
+        raise HTTPException(status_code=500, detail="torch/torchvision not installed")
+
+    x, _ = _read_upload_to_tensor(file, size=32)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model, model_type = _get_cached_model(device)
+    if model is None:
+        raise HTTPException(status_code=503, detail="No checkpoint available. Place a checkpoint in experiments/*/checkpoints/best.pth")
+
+    from scripts.verify_lossless import _build_container_bytes
+
+    enc = _encode_image_fast(model, model_type, x, device)
+    H, C, N_f = enc["H"], enc["C"], enc["N_f"]
+    c_bits, f_bits = enc["c_bits"], enc["f_bits"]
+
+    blob = _build_container_bytes(enc["dual"], H, C, c_bits, f_bits)
+    total_bits = len(c_bits) + len(f_bits)
+    achieved_bpd = total_bits / N_f
+
+    recon = np.array(enc["recon_tokens"], dtype=np.uint8).reshape(H, H, C)
+    pixel_exact = bool(enc["ok_decode"] and np.array_equal(recon, enc["orig"]))
+
+    parts = {"coarse_bits": len(c_bits), "fine_bits": len(f_bits)} if enc["dual"] else {}
+    return JSONResponse({
+        "model_type": model_type,
+        "filename": "image.mdlc.bin",
+        "bin_b64": base64.b64encode(blob).decode("ascii"),
+        "bin_bytes": len(blob),
+        "dual": enc["dual"],
+        "H": H, "C": C,
+        "neural_bits": total_bits,
+        "achieved_bpd": round(achieved_bpd, 4),
+        "pixel_exact": pixel_exact,
+        "orig_png": _b64_png(enc["orig"]),
+        "fingerprint": _tokens_fingerprint(enc["recon_tokens"]),
+        **parts,
+    })
+
+
+def _read_bin_upload(file: UploadFile) -> bytes:
+    """上传 .bin → 校验大小 + magic → 返回原始字节。"""
+    blob = file.file.read(MAX_BIN_BYTES + 1)
+    if len(blob) > MAX_BIN_BYTES:
+        raise HTTPException(status_code=413, detail=f".bin 过大（>{MAX_BIN_BYTES // 1024} KB）")
+    if len(blob) < 4 or blob[:4] != b"MDLC":
+        raise HTTPException(status_code=400, detail="不是 MDLC 容器（magic 不符）")
+    return blob
+
+
+@app.post("/api/inspect")
+def inspect(file: UploadFile = File(...)):
+    """上传 .bin → 即时解析容器结构/码长/bpd（纯文件级，无需 GPU/ckpt/模型）。
+
+    证明 .bin 自包含：仅凭文件就能读出尺寸/双尺度/码长/bpd。与 CLI
+    `verify_lossless.py --inspect` 同一套 _parse_container_meta，口径一致。
+    """
+    from scripts.verify_lossless import _parse_container_meta
+    blob = _read_bin_upload(file)
+    try:
+        meta = _parse_container_meta(blob)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    meta["bpd"] = round(meta["bpd"], 4)
+    return JSONResponse(meta)
+
+
+@app.post("/api/decode")
+def decode(file: UploadFile = File(...)):
+    """上传 .bin → 流式逐 token 盲解码还原图像（NDJSON 进度行）。
+
+    真实 decoder 视角：只给文件，无原图。逐 token 重跑完整 forward（无 KV-cache,
+    causal mask 保证 0 后缀不泄漏），与 scripts/verify_lossless 的 gold 路径同源
+    （共用 _decode_sequence_iter）。CIFAR coarse 64 + fine 3072 ≈ 3100 步、~60–120s,
+    故用 StreamingResponse 每 ~128 步推一行进度，绕开 AutoDL 反代 idle 超时。
+
+    解码步数由模型几何固定（model.coarse.seq_len / model.fine.seq_len），不受文件
+    字段控制 → 无放大攻击面。文件 H/C 必须与当前模型一致，否则解出的分布对不上。
+    """
+    try:
+        import torch
+    except ImportError:
+        raise HTTPException(status_code=500, detail="torch/torchvision not installed")
+
+    blob = _read_bin_upload(file)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model, model_type = _get_cached_model(device)
+    if model is None:
+        raise HTTPException(status_code=503, detail="No checkpoint available. Place a checkpoint in experiments/*/checkpoints/best.pth")
+
+    from scripts.verify_lossless import _read_container_bytes, _decode_sequence_iter
+    try:
+        dual, H, C, c_bits, f_bits = _read_container_bytes(blob)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # 几何一致性校验：文件声明的图像尺寸/通道必须与当前模型匹配
+    m_H = model.fine.image_size if model_type == "ccigpt" else model.image_size
+    m_C = model.fine.in_channels if model_type == "ccigpt" else model.in_channels
+    if (H, C) != (m_H, m_C):
+        raise HTTPException(
+            status_code=400,
+            detail=f".bin 图像几何 {H}×{H}×{C} 与当前模型 {m_H}×{m_H}×{m_C} 不符（需用编码时同款模型解）")
+    # 尺度一致性：.bin 的 dual 标志必须与模型尺度数匹配（双尺度 .bin ⇔ CC-iGPT）
+    if dual != (model_type == "ccigpt"):
+        want = "CC-iGPT 双尺度" if dual else "单尺度 iGPT"
+        raise HTTPException(status_code=400,
+                            detail=f"{'双尺度' if dual else '单尺度'} .bin 需 {want} 模型解码，当前模型为 {model_type}")
+
+    def _gen():
+        import torch
+        model.eval()
+        with torch.no_grad(), torch.amp.autocast(device_type=device.type, enabled=False):
+            try:
+                if model_type == "ccigpt" and dual:
+                    N_c = model.coarse.seq_len
+                    N_f = model.fine.seq_len
+                    total_steps = N_c + N_f
+                    done = 0
+                    yield json.dumps({"type": "start", "total": total_steps,
+                                      "stages": ["coarse", "fine"]}) + "\n"
+
+                    # ---- coarse 段 ----
+                    gen_c = _decode_sequence_iter(model.coarse, c_bits, N_c, None, device)
+                    coarse_dec = None
+                    try:
+                        while True:
+                            m, _t = next(gen_c)
+                            done += 1
+                            if m % _DECODE_PROGRESS_EVERY == 0:
+                                yield json.dumps({"type": "progress", "stage": "coarse",
+                                                  "done": done, "total": total_steps}) + "\n"
+                    except StopIteration as stop:
+                        coarse_dec = stop.value
+
+                    # ---- 从解出的 coarse token 重建 fine ctx ----
+                    coarse_ctx = model.ctx_alpha * model._compute_coarse_ctx(coarse_dec)
+
+                    # ---- fine 段 ----
+                    gen_f = _decode_sequence_iter(model.fine, f_bits, N_f, coarse_ctx, device)
+                    fine_dec = None
+                    try:
+                        while True:
+                            m, _t = next(gen_f)
+                            done += 1
+                            if m % _DECODE_PROGRESS_EVERY == 0:
+                                yield json.dumps({"type": "progress", "stage": "fine",
+                                                  "done": done, "total": total_steps}) + "\n"
+                    except StopIteration as stop:
+                        fine_dec = stop.value
+
+                    recon_t = fine_dec
+                    total_bits = len(c_bits) + len(f_bits)
+                    n_subpix = H * H * C
+                else:
+                    N = model.seq_len
+                    total_steps = N
+                    done = 0
+                    yield json.dumps({"type": "start", "total": total_steps,
+                                      "stages": ["single"]}) + "\n"
+                    gen = _decode_sequence_iter(model, f_bits, N, None, device)
+                    dec = None
+                    try:
+                        while True:
+                            m, _t = next(gen)
+                            done += 1
+                            if m % _DECODE_PROGRESS_EVERY == 0:
+                                yield json.dumps({"type": "progress", "stage": "single",
+                                                  "done": done, "total": total_steps}) + "\n"
+                    except StopIteration as stop:
+                        dec = stop.value
+                    recon_t = dec
+                    total_bits = len(f_bits)
+                    n_subpix = H * H * C
+
+                # ---- 逆 tokenize → 还原图 → base64 PNG ----
+                recon_tokens = recon_t[0].tolist()
+                recon = np.array(recon_tokens, dtype=np.uint8).reshape(H, H, C)
+                achieved_bpd = total_bits / n_subpix
+                yield json.dumps({
+                    "type": "done",
+                    "recon_png": _b64_png(recon),
+                    "achieved_bpd": round(achieved_bpd, 4),
+                    "neural_bits": total_bits,
+                    "H": H, "C": C,
+                    "fingerprint": _tokens_fingerprint(recon_tokens),
+                }) + "\n"
+            except Exception as e:   # 解码中途出错也以 NDJSON 形式吐给前端
+                yield json.dumps({"type": "error", "detail": f"{type(e).__name__}: {e}"}) + "\n"
+
+    # media_type 用 ndjson；sync 生成器由 Starlette 放进 threadpool，GPU 不阻塞 event loop
+    return StreamingResponse(_gen(), media_type="application/x-ndjson")
 
 
 # 补全请求采样上限：keep_frac 决定要采样多少 token（越小越慢）。模型无 KV-cache，

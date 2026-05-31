@@ -265,6 +265,78 @@
   </div>
 </section>
 
+<!-- Panel 10: 交互式无损 codec — 图像 ⇄ .bin -->
+<section class="panel" id="panel-codec">
+  <h2>无损 codec — 图像 ⇄ .bin 文件</h2>
+  <p class="panel-desc">
+    把 Panel 2 的可解性落到文件：上传图 → 编码下载真实<b>自包含 .bin</b>（MDLC 容器，与 CLI
+    <code>verify_lossless.py --dump_dir</code> 逐字节一致）；再把 .bin 传回 → <b>仅凭文件</b>即时解析结构，
+    或<b>逐 token 盲解码</b>还原图像。解码无 KV-cache → 每 token 一次完整 forward，CIFAR ≈ 3100 步、约
+    1–2 分钟，流式进度条实时显示（绕开反代超时）。
+  </p>
+  <div class="codec-layout">
+
+    <!-- 编码块 -->
+    <div class="codec-col">
+      <h3 class="codec-col-title">① 编码：图像 → .bin</h3>
+      <div class="upload-area" id="co-enc-upload-area">
+        <input type="file" id="co-enc-file-input" accept="image/*" hidden>
+        <div class="upload-placeholder" id="co-enc-placeholder">
+          <span class="upload-icon">+</span>
+          <p>点击或拖拽上传图片</p>
+          <p class="hint">缩放至 32×32 后编码</p>
+        </div>
+        <img id="co-enc-preview" class="preview-img" hidden>
+      </div>
+      <button id="co-enc-run" class="cmp-btn" disabled>先上传图片</button>
+      <div id="co-enc-result" class="codec-result" hidden>
+        <div class="codec-stats" id="co-enc-stats"></div>
+        <a id="co-enc-download" class="co-download" download>⬇ 下载 .bin</a>
+      </div>
+      <p id="co-enc-note" class="hint codec-note">编码用单次 forward 快路径，约 1–2 秒。</p>
+    </div>
+
+    <!-- 解码块 -->
+    <div class="codec-col">
+      <h3 class="codec-col-title">② 解码：.bin → 图像</h3>
+      <div class="upload-area co-bin-area" id="co-dec-upload-area">
+        <input type="file" id="co-dec-file-input" accept=".bin,application/octet-stream" hidden>
+        <div class="upload-placeholder" id="co-dec-placeholder">
+          <span class="upload-icon">≣</span>
+          <p>点击或拖拽 .bin 文件</p>
+          <p class="hint">MDLC 容器（编码块下载的那个）</p>
+        </div>
+        <div id="co-dec-fileinfo" class="co-fileinfo" hidden></div>
+      </div>
+      <div class="co-btn-row">
+        <button id="co-inspect-run" class="cmp-btn cmp-btn-sec" disabled>解析结构（即时）</button>
+        <button id="co-dec-run" class="cmp-btn" disabled>解码还原（~1–2 min）</button>
+      </div>
+
+      <!-- 结构解析表 -->
+      <table id="co-struct-table" class="data-table co-struct" hidden>
+        <tbody></tbody>
+      </table>
+
+      <!-- 解码进度 -->
+      <div id="co-dec-progress-wrap" class="co-progress-wrap" hidden>
+        <div class="co-progress-track"><div class="co-progress-fill" id="co-dec-progress-fill"></div></div>
+        <span class="co-progress-label" id="co-dec-progress-label">—</span>
+      </div>
+
+      <!-- 还原图 -->
+      <div id="co-dec-result" class="codec-result" hidden>
+        <img id="co-dec-img" class="ll-img" hidden>
+        <div id="co-dec-badge" class="ll-badge"></div>
+      </div>
+      <p id="co-dec-note" class="hint codec-note">
+        盲解码：只给文件、无原图，逐 token 重跑 forward（与 verify_lossless gold 路径同源）。
+      </p>
+    </div>
+
+  </div>
+</section>
+
 </main>
 
 <footer>

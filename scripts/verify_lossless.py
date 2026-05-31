@@ -55,23 +55,25 @@ _HEADER = ">4sBBBBII"   # magic, ver, dual, H, C, coarse_nbits, fine_nbits
 _HEADER_SIZE = struct.calcsize(_HEADER)
 
 
-def _write_container(path, dual, H, C, c_bits, f_bits):
-    """把 coarse/fine bit 列表写成自包含 .bin。返回落盘字节数。"""
+def _build_container_bytes(dual, H, C, c_bits, f_bits):
+    """coarse/fine bit 列表 → 自包含 MDLC .bin 字节串（不落盘）。
+
+    落盘（_write_container）与 demo 内存编码（/api/encode）共用同一打包逻辑，
+    保证两条路径产出的容器逐字节一致。
+    """
     c_bytes = pack_bits(c_bits) if c_bits else b""
     f_bytes = pack_bits(f_bits)
     header = struct.pack(_HEADER, _MAGIC, _VERSION, 1 if dual else 0,
                          H, C, len(c_bits), len(f_bits))
-    blob = header + c_bytes + f_bytes
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path, "wb") as fh:
-        fh.write(blob)
-    return len(blob)
+    return header + c_bytes + f_bytes
 
 
-def _read_container(path):
-    """读回 .bin → (dual, H, C, c_bits, f_bits)。校验 magic/version。"""
-    with open(path, "rb") as fh:
-        blob = fh.read()
+def _read_container_bytes(blob):
+    """MDLC .bin 字节串 → (dual, H, C, c_bits, f_bits)。校验 magic/version。
+
+    读文件（_read_container）与 demo 上传解码（/api/decode）共用，保证两条
+    路径对同一字节串解出完全相同的 bit 列表。
+    """
     magic, ver, dual, H, C, c_nbits, f_nbits = struct.unpack(
         _HEADER, blob[:_HEADER_SIZE])
     if magic != _MAGIC:
@@ -87,14 +89,28 @@ def _read_container(path):
     return bool(dual), H, C, c_bits, f_bits
 
 
-def _inspect_container(path):
-    """只读不解模型：打印 MDLC 容器结构 + 头部 hex + 从文件独立算出的 bpd。
+def _write_container(path, dual, H, C, c_bits, f_bits):
+    """把 coarse/fine bit 列表写成自包含 .bin。返回落盘字节数。"""
+    blob = _build_container_bytes(dual, H, C, c_bits, f_bits)
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "wb") as fh:
+        fh.write(blob)
+    return len(blob)
 
-    证明 .bin 是自包含的 —— 仅凭文件（无 ckpt）就能读出尺寸/码长/bpd。
-    （真正解回图像仍需模型逐 token forward，见 roundtrip 主流程。）
-    """
+
+def _read_container(path):
+    """读回 .bin → (dual, H, C, c_bits, f_bits)。校验 magic/version。"""
     with open(path, "rb") as fh:
         blob = fh.read()
+    return _read_container_bytes(blob)
+
+
+def _parse_container_meta(blob):
+    """MDLC .bin 字节串 → 结构元信息 dict（不解模型，纯文件级）。
+
+    证明 .bin 自包含：仅凭文件就能读出尺寸/码长/bpd。CLI 的 --inspect 与
+    demo 的 /api/inspect 共用，保证两边算出的 bpd / 自洽校验完全同口径。
+    """
     total = len(blob)
     if total < _HEADER_SIZE:
         raise ValueError(f"文件太小（{total}B < header {_HEADER_SIZE}B），非 MDLC 容器")
@@ -108,27 +124,54 @@ def _inspect_container(path):
     payload = total - _HEADER_SIZE
     total_bits = c_nbits + f_nbits
     n_subpix = H * H * C
-    bpd = total_bits / n_subpix
+    bpd = total_bits / n_subpix if n_subpix else 0.0
+    # payload 字节数应正好等于两段对齐字节之和（损坏检测）
+    self_consistent = (payload == c_nbytes + f_nbytes)
 
-    # 头部 hex（前 16 字节 = header），分组打印
-    head_hex = " ".join(f"{b:02x}" for b in blob[:_HEADER_SIZE])
+    return {
+        "total_bytes": total,
+        "header_size": _HEADER_SIZE,
+        "header_hex": " ".join(f"{b:02x}" for b in blob[:_HEADER_SIZE]),
+        "magic": magic.decode("ascii", "replace"),
+        "version": ver,
+        "dual": bool(dual),
+        "H": H, "C": C,
+        "n_subpix": n_subpix,
+        "coarse_nbits": c_nbits, "coarse_nbytes": c_nbytes,
+        "fine_nbits": f_nbits, "fine_nbytes": f_nbytes,
+        "payload_bytes": payload,
+        "total_bits": total_bits,
+        "bpd": bpd,
+        "self_consistent": self_consistent,
+    }
+
+
+def _inspect_container(path):
+    """只读不解模型：打印 MDLC 容器结构 + 头部 hex + 从文件独立算出的 bpd。
+
+    证明 .bin 是自包含的 —— 仅凭文件（无 ckpt）就能读出尺寸/码长/bpd。
+    （真正解回图像仍需模型逐 token forward，见 roundtrip 主流程。）
+    """
+    with open(path, "rb") as fh:
+        blob = fh.read()
+    m = _parse_container_meta(blob)
 
     print(f"== MDLC 容器: {path} ==")
-    print(f"  文件大小      : {total} byte")
-    print(f"  header (16B)  : {head_hex}")
-    print(f"  magic / ver   : {magic.decode('ascii', 'replace')} / v{ver}")
-    print(f"  尺度          : {'双尺度 (coarse+fine)' if dual else '单尺度 (igpt)'}")
-    print(f"  图像          : {H}×{H}×{C}  ({n_subpix} 子像素)")
-    if dual:
-        print(f"  coarse        : {c_nbits} bit  ({c_nbytes} byte)")
-        print(f"  fine          : {f_nbits} bit  ({f_nbytes} byte)")
-    print(f"  payload       : {payload} byte  (= coarse {c_nbytes} + fine {f_nbytes})")
-    print(f"  header 开销    : {_HEADER_SIZE} byte  ({100*_HEADER_SIZE/total:.1f}% of 文件)")
-    print(f"  码长          : {total_bits} bit")
-    print(f"  achieved bpd  : {bpd:.4f}  (= {total_bits} bit / {n_subpix} 子像素)")
-    # 一致性校验：payload 字节数应正好等于两段对齐字节之和
-    expect_payload = c_nbytes + f_nbytes
-    ok = (payload == expect_payload)
+    print(f"  文件大小      : {m['total_bytes']} byte")
+    print(f"  header (16B)  : {m['header_hex']}")
+    print(f"  magic / ver   : {m['magic']} / v{m['version']}")
+    print(f"  尺度          : {'双尺度 (coarse+fine)' if m['dual'] else '单尺度 (igpt)'}")
+    print(f"  图像          : {m['H']}×{m['H']}×{m['C']}  ({m['n_subpix']} 子像素)")
+    if m["dual"]:
+        print(f"  coarse        : {m['coarse_nbits']} bit  ({m['coarse_nbytes']} byte)")
+        print(f"  fine          : {m['fine_nbits']} bit  ({m['fine_nbytes']} byte)")
+    print(f"  payload       : {m['payload_bytes']} byte  "
+          f"(= coarse {m['coarse_nbytes']} + fine {m['fine_nbytes']})")
+    print(f"  header 开销    : {m['header_size']} byte  "
+          f"({100*m['header_size']/m['total_bytes']:.1f}% of 文件)")
+    print(f"  码长          : {m['total_bits']} bit")
+    print(f"  achieved bpd  : {m['bpd']:.4f}  (= {m['total_bits']} bit / {m['n_subpix']} 子像素)")
+    ok = m["self_consistent"]
     print(f"  自洽校验      : {'✅ payload 字节数与 header 声明一致' if ok else '❌ payload 与 header 不符（文件可能损坏）'}")
     return ok
 
@@ -229,8 +272,13 @@ def _encode_sequence(igpt, tokens, coarse_ctx, device, tag, log_every):
     return enc.finish(), ideal_bits
 
 
-def _decode_sequence(igpt, bits, T, coarse_ctx, device, tag, log_every):
-    """逐步算术解码出 token 序列 (1, T)。每步 logits 必须与 encode 端逐位相同。"""
+def _decode_sequence_iter(igpt, bits, T, coarse_ctx, device):
+    """逐步算术解码生成器：每解出一个 token yield (m, T-1) 进度，
+    最终 `return` 出 token 序列 (1, T)。每步 logits 必须与 encode 端逐位相同。
+
+    CLI（_decode_sequence）与 demo 流式端点（/api/decode）共用此单一解码逻辑，
+    各自决定进度怎么消费（打印 / 推送），保证两条路径不漂移。
+    """
     import torch
     seq_in = igpt.seq_len - 1
     dec = ArithmeticDecoder(bits)
@@ -243,8 +291,21 @@ def _decode_sequence(igpt, bits, T, coarse_ctx, device, tag, log_every):
         logits = _logits_from_tokens(igpt, buf, coarse_ctx, m - 1)
         p = _probs(logits)
         out[0, m] = dec.decode(build_cumfreq(p))
-        if log_every and m % log_every == 0:
-            print(f"    [{tag} decode] {m}/{T-1}")
+        yield m, T - 1
+    return out
+
+
+def _decode_sequence(igpt, bits, T, coarse_ctx, device, tag, log_every):
+    """逐步算术解码出 token 序列 (1, T)，CLI 进度打印版。"""
+    gen = _decode_sequence_iter(igpt, bits, T, coarse_ctx, device)
+    out = None
+    try:
+        while True:
+            m, total = next(gen)
+            if log_every and m % log_every == 0:
+                print(f"    [{tag} decode] {m}/{total}")
+    except StopIteration as stop:
+        out = stop.value
     return out
 
 
