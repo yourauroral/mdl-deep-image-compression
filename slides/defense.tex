@@ -114,6 +114,49 @@ p_\theta(x) \;=\; \prod_t p_\theta(x_t \mid x_{<t}),
 回应导师反馈「下游不清晰」 $\Rightarrow$ \color{ours}\textbf{§5 MDL 下游主线：压得好 $\Rightarrow$ 学得好}
 \end{frame}
 
+% ============================== 2c. 国内外研究现状 ==============================
+\begin{frame}{研究现状：国内外进展与缺口}
+\begin{columns}[T]
+\begin{column}{0.50\textwidth}
+\textbf{国外}
+\begin{itemize}\setlength{\itemsep}{2.5pt}\small
+  \item \textbf{传统编解码器}：PNG / WebP / FLIF / JPEG-LS \\
+        {\scriptsize 手工上下文 $+$ 熵编码，建模能力受限}
+  \item \textbf{神经 AR 密度}：PixelRNN/CNN (van den Oord 2016) \\
+        $\to$ PixelCNN++ $\to$ PixelSNAIL $\to$ Sparse Transf. \\
+        {\scriptsize 逐代刷新 bpd，纯生成、\alert{无数字下游}}
+  \item \textbf{Flow 无损}：L3C (Mentzer 2019)、IDF (Hoogeboom 2019) \\
+        {\scriptsize 可逆映射 $+$ 精确似然，但建模容量受可逆约束}
+  \item \textbf{AR 表征}：iGPT (Chen 2020) \\
+        {\scriptsize 像素 AR 预训练做表征，\alert{放弃 SOTA bpd}}
+\end{itemize}
+\end{column}
+\begin{column}{0.48\textwidth}
+\textbf{国内}
+\begin{itemize}\setlength{\itemsep}{2.5pt}\small
+  \item \textbf{华为诺亚方舟}：iVPF (CVPR 2021)、\\
+        iFlow (NeurIPS 2021) \\
+        {\scriptsize 数值可逆 flow，解决 flow 无损的精度 $+$ 编码效率}
+  \item \textbf{学习式压缩（以有损为主）}：中科大、\\
+        南京大学等团队端到端图像压缩 \\
+        {\scriptsize 优化 rate--distortion，\alert{非 bit-exact 无损}}
+  \item {\scriptsize 国内像素级 \textbf{无损} AR 路线相对稀疏，\\
+        多走 flow / 有损方向}
+\end{itemize}
+
+\medskip
+\textbf{共同缺口}
+\begin{itemize}\setlength{\itemsep}{2.5pt}\small
+  \item 密度血脉追 bpd 但\alert{无下游数字}；表征血脉做下游但\alert{弃 bpd}
+\end{itemize}
+\end{column}
+\end{columns}
+
+\vfill
+\centering\small\color{muted}
+本工作定位 $\Rightarrow$ \color{ours}\textbf{RGB-bit-exact 像素 AR（追 bpd）$+$ MDL 下游主线（压得好 $\Rightarrow$ 学得好），统一两条血脉}
+\end{frame}
+
 % ============================== 3. 主表结果 ==============================
 \begin{frame}{主表结果：CIFAR-10 RGB-bit-exact}
 \begin{center}
@@ -458,13 +501,13 @@ representation 血脉承 iGPT，density 血脉承 Sparse Transformer（纯生成
 本工作用 MDL 把两者串成一条因果链。
 \end{frame}
 
-% ============================== 下游 ① 表征：Linear probe (图) ==============================
-\begin{frame}{下游 ① 表征：Linear probe（逐层 top-1 准确率）}
+% ============================== 下游 1 表征：Linear probe (图) ==============================
+\begin{frame}{下游 1 表征：Linear probe（逐层 top-1 准确率）}
 \figplaceholder{linear-probe-layerwise-acc.pdf}{11}{6}
 \end{frame}
 
-% ============================== 下游 ① 表征：Linear probe (文字) ==============================
-\begin{frame}{下游 ① 表征：probe 方法与结果}
+% ============================== 下游 1 表征：Linear probe (文字) ==============================
+\begin{frame}{下游 1 表征：probe 方法与结果}
 \begin{columns}[T]
 \begin{column}{0.50\textwidth}
 \small
@@ -497,13 +540,13 @@ representation 血脉承 iGPT，density 血脉承 Sparse Transformer（纯生成
 \end{columns}
 \end{frame}
 
-% ============================== 下游 ② 密度：OOD typicality (图) ==============================
-\begin{frame}{下游 ② 密度：OOD typicality（AUROC 对比）}
+% ============================== 下游 2 密度：OOD typicality (图) ==============================
+\begin{frame}{下游 2 密度：OOD typicality（AUROC 对比）}
 \figplaceholder{ood-typicality-auroc.pdf}{11}{6}
 \end{frame}
 
-% ============================== 下游 ② 密度：OOD typicality (文字) ==============================
-\begin{frame}{下游 ② 密度：typicality 方法与差异化}
+% ============================== 下游 2 密度：OOD typicality (文字) ==============================
+\begin{frame}{下游 2 密度：typicality 方法与差异化}
 \begin{columns}[T]
 \begin{column}{0.50\textwidth}
 \small
@@ -545,13 +588,13 @@ representation 血脉承 iGPT，density 血脉承 Sparse Transformer（纯生成
 \end{columns}
 \end{frame}
 
-% ============================== 下游 ③ 泛化：跨数据集 bpd (图) ==============================
-\begin{frame}{下游 ③ 泛化：跨数据集 bpd}
+% ============================== 下游 3 泛化：跨数据集 bpd (图) ==============================
+\begin{frame}{下游 3 泛化：跨数据集 bpd}
 \figplaceholder{cross-dataset-bpd.pdf}{11}{6}
 \end{frame}
 
-% ============================== 下游 ③ 泛化：跨数据集 bpd (文字) ==============================
-\begin{frame}{下游 ③ 泛化：跨数据集 bpd 方法与命题}
+% ============================== 下游 3 泛化：跨数据集 bpd (文字) ==============================
+\begin{frame}{下游 3 泛化：跨数据集 bpd 方法与命题}
 \begin{columns}[T]
 \begin{column}{0.50\textwidth}
 \small
@@ -590,8 +633,8 @@ representation 血脉承 iGPT，density 血脉承 Sparse Transformer（纯生成
 \end{columns}
 \end{frame}
 
-% ============================== 下游 ④ 生成：图像补全 (图) ==============================
-\begin{frame}{下游 ④ 生成：图像补全（AR inpainting）}
+% ============================== 下游 4 生成：图像补全 (图) ==============================
+\begin{frame}{下游 4 生成：图像补全（AR inpainting）}
 % Panel 9 截图：原图 | 已知上半(灰=待补) | AR 补全 三联图
 % 截图存成 figures/completion-panel9.png（或改下面文件名）；编译前务必放好图，否则本页报缺图
 \begin{center}
@@ -599,8 +642,8 @@ representation 血脉承 iGPT，density 血脉承 Sparse Transformer（纯生成
 \end{center}
 \end{frame}
 
-% ============================== 下游 ④ 生成：图像补全 (文字) ==============================
-\begin{frame}{下游 ④ 生成：补全方法与命题}
+% ============================== 下游 4 生成：图像补全 (文字) ==============================
+\begin{frame}{下游 4 生成：补全方法与命题}
 \begin{columns}[T]
 \begin{column}{0.50\textwidth}
 \small
@@ -636,13 +679,13 @@ representation 血脉承 iGPT，density 血脉承 Sparse Transformer（纯生成
 \end{columns}
 \end{frame}
 
-% ============================== 下游 ⑤ 地基：真实可解性 roundtrip (图) ==============================
-\begin{frame}{下游 ⑤ 地基：真实可解性 roundtrip}
+% ============================== 下游 5 地基：真实可解性 roundtrip (图) ==============================
+\begin{frame}{下游 5 地基：真实可解性 roundtrip}
 \figplaceholder{lossless-roundtrip.pdf}{11}{6}
 \end{frame}
 
-% ============================== 下游 ⑤ 地基：真实可解性 roundtrip (文字) ==============================
-\begin{frame}{下游 ⑤ 地基：可解性方法与命题}
+% ============================== 下游 5 地基：真实可解性 roundtrip (文字) ==============================
+\begin{frame}{下游 5 地基：可解性方法与命题}
 \begin{columns}[T]
 \begin{column}{0.50\textwidth}
 \small
@@ -688,15 +731,15 @@ representation 血脉承 iGPT，density 血脉承 Sparse Transformer（纯生成
 \textbf{三大创新}
 
 \smallskip
-\textbf{① 方法} —— 零新参的双尺度条件注入 \\
+\textbf{1 方法} —— 零新参的双尺度条件注入 \\
 {\scriptsize coarse 量化 token $\to$ bit-exact ctx $\to$ $\alpha\cdot$additive，仅 1 个标量参数}
 
 \smallskip
-\textbf{② 工程} —— 8 个手写 Triton kernel \\
+\textbf{2 工程} —— 8 个手写 Triton kernel \\
 {\scriptsize 7 进入训练栈 $+$ 1 反面案例（$V{=}256$ roofline 证伪）}
 
 \smallskip
-\textbf{③ 分析} —— RGB-bit-exact 主表 \\
+\textbf{3 分析} —— RGB-bit-exact 主表 \\
 {\scriptsize CIFAR-10 \alert{\textbf{2.8296}} 超越 PixelSNAIL 380M (2.85)，逼近 Sparse Transformer 59M (2.80)，参数预算 82.95M}
 \end{column}
 \begin{column}{0.50\textwidth}
