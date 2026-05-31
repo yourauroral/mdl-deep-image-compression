@@ -1,15 +1,39 @@
 {
-  "generated": null,
+  "generated": "2026-05-30 21:49",
   "id_dataset": "CIFAR-10 test",
   "ref": "CIFAR-10 train 子样本 (μ/σ)",
   "scorers": [
-    {"key": "raw_bpd",       "label": "raw bpd",            "desc": "裸 bpd 阈值 — 复现 Nalisnick 2019 失败（CIFAR 训的模型给 SVHN 更低 bpd，AUROC 常 < 0.5）"},
-    {"key": "typ_total",     "label": "typicality |z|",     "desc": "单信号 typicality：|bpd 偏离训练分布均值|，双向异常"},
-    {"key": "typ_dualscale", "label": "dual-scale (Ours)",  "desc": "sqrt(z_coarse² + z_fine²) 双尺度联合 typicality — 单尺度模型给不出，本工作差异化"}
+    {
+      "key": "raw_bpd",
+      "label": "raw bpd",
+      "desc": "裸 bpd 阈值 — 复现 Nalisnick 2019 失败（CIFAR 训的模型给 SVHN 更低 bpd，AUROC 常 < 0.5）"
+    },
+    {
+      "key": "typ_total",
+      "label": "typicality |z|",
+      "desc": "单信号 typicality：|bpd 偏离训练分布均值|，双向异常"
+    },
+    {
+      "key": "typ_dualscale",
+      "label": "dual-scale (Ours)",
+      "desc": "sqrt(z_coarse² + z_fine²) 双尺度联合 typicality — 单尺度模型给不出，本工作差异化"
+    }
   ],
   "ood": [
-    {"name": "svhn",     "label": "SVHN",      "raw_bpd": null, "typ_total": null, "typ_dualscale": null},
-    {"name": "cifar100", "label": "CIFAR-100", "raw_bpd": null, "typ_total": null, "typ_dualscale": null}
+    {
+      "name": "svhn",
+      "label": "SVHN",
+      "raw_bpd": 0.1614,
+      "typ_total": 0.6612,
+      "typ_dualscale": 0.6575
+    },
+    {
+      "name": "cifar100",
+      "label": "CIFAR-100",
+      "raw_bpd": 0.5136,
+      "typ_total": 0.546,
+      "typ_dualscale": 0.551
+    }
   ],
   "note": "OOD typicality（论文 §5 / future.md §6.2）。scorer 越高越 OOD，AUROC>0.5 有判别力。待 AutoDL 跑 `bash downstream/run_downstream.sh ood` 回填（脚本带 --json_out）。"
 }
