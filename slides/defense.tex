@@ -438,24 +438,24 @@ $\to$ \texttt{re-tokenize} $\to$ \texttt{fine.token\_embed} $\to$ \texttt{AR shi
 
 \medskip
 \centering\small
-\begin{tabular}{@{}llll@{}}
+\begin{tabular}{@{}lll@{}}
 \toprule
-\textbf{侧面} & \textbf{任务} & \textbf{验证的 MDL 命题} & \textbf{状态} \\
+\textbf{侧面} & \textbf{任务} & \textbf{验证的 MDL 命题} \\
 \midrule
-表征 & Linear probe       & 线性可分表征更强        & \alert{\textbf{已实测}} \\
-密度 & OOD typicality     & 能识别分布外样本        & \alert{\textbf{已实测}} \\
-泛化 & 跨数据集 bpd       & 学自然图像统计、非记忆  & \alert{\textbf{已实测}} \\
-生成 & 图像补全 (inpaint) & AR 条件生成能力         & \alert{\textbf{已实测}} \\
+表征 & Linear probe       & 线性可分表征更强        \\
+密度 & OOD typicality     & 能识别分布外样本        \\
+泛化 & 跨数据集 bpd       & 学自然图像统计、非记忆  \\
+生成 & 图像补全 (inpaint) & AR 条件生成能力         \\
 \midrule
-\multicolumn{4}{@{}l}{\textbf{地基}\;：真实可解性 roundtrip —— 算术编解码逐像素 bit-identical，} \\
-\multicolumn{4}{@{}l}{\quad\quad\;\; 证明所报 bpd 是\alert{真实可逆码长}而非 proxy} \\
+\multicolumn{3}{@{}l}{\textbf{地基}\;：真实可解性 roundtrip —— 算术编解码逐像素 bit-identical，} \\
+\multicolumn{3}{@{}l}{\quad\quad\;\; 证明所报 bpd 是\alert{真实可逆码长}而非 proxy} \\
 \bottomrule
 \end{tabular}
 
 \medskip
 \footnotesize\color{muted}
 representation 血脉承 iGPT，density 血脉承 Sparse Transformer（纯生成）；\\
-本工作用 MDL 把两者串成一条因果链。「代码就绪」者复用 CIFAR v2 现成 ckpt，待 GPU 空窗实测。
+本工作用 MDL 把两者串成一条因果链。
 \end{frame}
 
 % ============================== 下游 ① 表征：Linear probe (图) ==============================
@@ -484,7 +484,7 @@ representation 血脉承 iGPT，density 血脉承 Sparse Transformer（纯生成
 \end{column}
 \begin{column}{0.50\textwidth}
 \small
-\textbf{结果（已实测）}
+\textbf{结果}
 \begin{itemize}\setlength{\itemsep}{2pt}
   \item best \textbf{L19} = \alert{\textbf{79.33\%}}
   \item iGPT-S baseline best L22 = 66.93\%
@@ -670,7 +670,7 @@ representation 血脉承 iGPT，density 血脉承 Sparse Transformer（纯生成
 \end{itemize}
 
 \bigskip
-\textbf{结果（实测）}
+\textbf{结果}
 \begin{itemize}\setlength{\itemsep}{2pt}
   \item codec 单测 6/6 过 $+$ \textbf{2/2 图 bit-identical}
   \item achieved 码长 $\approx$ 理论 NLL，\alert{量化+收尾 overhead 仅 0.1–0.2\%}
