@@ -485,6 +485,13 @@ footer {
 }
 .co-download:hover { background: #5878f0; }
 
+/* Panel 2 roundtrip 图下方的紧凑下载按钮（真实 32×32 PNG）*/
+.ll-download {
+  padding: 0.3rem 0.6rem;
+  font-size: 0.72rem;
+  border-radius: 6px;
+}
+
 .codec-note { line-height: 1.45; }
 
 .co-struct { font-size: 0.8rem; }

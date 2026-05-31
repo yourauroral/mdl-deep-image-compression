@@ -405,6 +405,9 @@ def lossless(file: UploadFile = File(...)):
         "pixel_exact": pixel_exact,
         "orig_png": _b64_png(orig),
         "recon_png": _b64_png(recon),
+        # 真实 32×32 原始像素 PNG（scale=1，无放大），供前端 <a download> 落盘原图/重建图
+        "orig_png_full": _b64_png(orig, scale=1),
+        "recon_png_full": _b64_png(recon, scale=1),
         "neural_bytes": neural_bytes,
         "neural_bits": total_bits,
         "achieved_bpd": round(achieved_bpd, 4),

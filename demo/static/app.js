@@ -98,6 +98,7 @@ Chart.defaults.borderColor = "#2a2d3a";
   const placeholder = $("ll-upload-placeholder");
   const origImg = $("ll-orig"), origPh = $("ll-orig-ph");
   const reconImg = $("ll-recon"), reconPh = $("ll-recon-ph");
+  const origDl = $("ll-orig-download"), reconDl = $("ll-recon-download");
   const badge = $("ll-badge");
   const compare = $("ll-compare");
   const resultPh = $("ll-placeholder");
@@ -133,6 +134,7 @@ Chart.defaults.borderColor = "#2a2d3a";
     badge.hidden = true; compare.hidden = true;
     origImg.hidden = reconImg.hidden = true;
     origPh.hidden = reconPh.hidden = false;
+    origDl.hidden = reconDl.hidden = true;
     codecSub.textContent = "neural codec";
 
     const form = new FormData();
@@ -150,6 +152,10 @@ Chart.defaults.borderColor = "#2a2d3a";
       reconImg.src = "data:image/png;base64," + d.recon_png;
       origImg.hidden = reconImg.hidden = false;
       origPh.hidden = reconPh.hidden = true;
+      // 下载用真实 32×32 原始像素 PNG（非展示用的 4× 放大图）
+      origDl.href = "data:image/png;base64," + (d.orig_png_full || d.orig_png);
+      reconDl.href = "data:image/png;base64," + (d.recon_png_full || d.recon_png);
+      origDl.hidden = reconDl.hidden = false;
       codecSub.textContent = d.neural_bytes + " B";
 
       badge.hidden = false;
