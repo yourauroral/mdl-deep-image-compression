@@ -934,11 +934,20 @@ Chart.defaults.borderColor = "#2a2d3a";
             decImg.src = "data:image/png;base64," + msg.recon_png;
             decImg.hidden = false;
             decResult.hidden = false;
-            const match = (lastEncFingerprint && msg.fingerprint === lastEncFingerprint);
-            decBadge.className = "ll-badge " + (match ? "ll-badge-ok" : "ll-badge-ok");
-            decBadge.innerHTML = match
-              ? `✅ 盲解码还原 — 指纹 <code>${msg.fingerprint}</code> 与刚编码的 .bin 逐 token 一致`
-              : `✅ 盲解码还原 — 指纹 <code>${msg.fingerprint}</code>，achieved <b>${msg.achieved_bpd}</b> bpd`;
+            // 真实交叉校验：只有指纹与本会话刚编码的 .bin 逐 token 一致才算成功。
+            // 无 lastEncFingerprint（换会话/刷新后传入的 .bin）→ 无法校验，不下成功结论。
+            if (lastEncFingerprint && msg.fingerprint === lastEncFingerprint) {
+              decBadge.className = "ll-badge ll-badge-ok";
+              decBadge.innerHTML = `✅ 盲解码还原 — 指纹 <code>${msg.fingerprint}</code> 与刚编码的 .bin 逐 token 一致`;
+            } else if (lastEncFingerprint) {
+              decBadge.className = "ll-badge ll-badge-fail";
+              decBadge.innerHTML = `❌ 解码失步 — 指纹 <code>${msg.fingerprint}</code> 与编码端 <code>${lastEncFingerprint}</code> 不一致`
+                + `<br><small>解码模型/权重与编码时不是同一个（server 重启或 ckpt 切换？），bitstream 无法正确还原</small>`;
+            } else {
+              decBadge.className = "ll-badge";
+              decBadge.innerHTML = `ℹ️ 盲解码完成 — 指纹 <code>${msg.fingerprint}</code>，achieved <b>${msg.achieved_bpd}</b> bpd`
+                + `<br><small>本会话未编码该 .bin，无法做逐 token 交叉校验；若图像异常请在同一会话内「编码→下载→解码」复核</small>`;
+            }
             done = true;
           } else if (msg.type === "error") {
             progLabel.textContent = "解码出错：" + msg.detail;
