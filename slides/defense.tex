@@ -176,12 +176,9 @@ p_\theta(x) \;=\; \prod_t p_\theta(x_t \mid x_{<t}),
 % ============================== 3b. ImageNet64 第二轨道（in-training） ==============================
 \begin{frame}{第二轨道：ImageNet 64$\times$64（训练中）}
 \centering
-\includegraphics[width=0.72\textwidth]{ImageNet64baseline.pdf}
+\includegraphics[width=0.92\linewidth]{ImageNet64baseline.pdf}
 
-\vspace{2mm}
-{\centering\footnotesize\color{muted}
-同款双尺度（coarse 256 $+$ fine 12288 token），4-GPU、12 ep cosine；
-ep5/12 val \textbf{3.5217} 已追平 SPN，退火尾段未走，目标 \alert{$<$3.44} 待判定。\par}
+\
 \end{frame}
 
 % ============================== 4. 模型架构总览（图） ==============================
