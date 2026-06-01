@@ -15,9 +15,8 @@ Demo 可视化后端 — FastAPI + 静态文件。
   GET  /api/ood         — OOD typicality AUROC 表（下游 §6.2，AutoDL 回填）
   GET  /api/transfer    — 跨数据集 bpd 泛化（下游 §6.3，AutoDL 回填）
   POST /api/predict     — 上传图片 → 返回 bpd / 双尺度 CE / 热力图
-  POST /api/lossless    — 上传图片 → 真实算术编解码 roundtrip（下游 §6.5/6.6）
   POST /api/complete    — 上传图片 → AR 补全下半（下游 §6.4，实时采样，~20–40s）
-  POST /api/encode      — 上传图片 → 编码为自包含 MDLC .bin（返回可下载字节，~1–2s）
+  POST /api/encode      — 上传图片 → 逐 token gold 算术编码为自包含 MDLC .bin（流式 NDJSON）
   POST /api/inspect     — 上传 .bin → 即时解析容器结构/码长/bpd（无需 GPU/ckpt）
   POST /api/decode      — 上传 .bin → 流式逐 token 盲解码还原图像（NDJSON 进度）
 """
@@ -48,11 +47,6 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg
 # 项目根目录
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-
-# 手写算术编解码器（纯 Python，无 torch 依赖）——/api/lossless 真实可解性 demo 用
-from src.mdlic.codec.arithmetic import (
-    ArithmeticEncoder, ArithmeticDecoder, build_cumfreq, FREQ_TOTAL,
-)
 
 DATA_DIR = Path(__file__).resolve().parent / "data"
 
@@ -138,8 +132,8 @@ def get_transfer():
 def _read_upload_to_tensor(file: UploadFile, size: int = 32):
     """上传图片 → 校验 → resize → (1,3,size,size) float[0,1] tensor + PIL Image。
 
-    /api/predict 与 /api/lossless 共用，保证两条路径对上传走完全一致的
-    校验 / 解码 / 缩放，避免 bpd 与可解性 demo 因预处理口径漂移而对不上。
+    /api/predict / /api/encode / /api/complete 共用，保证各路径对上传走完全一致的
+    校验 / 解码 / 缩放，避免 bpd 与编码/补全因预处理口径漂移而对不上。
     """
     try:
         from PIL import Image
@@ -223,45 +217,10 @@ def predict(file: UploadFile = File(...)):
     })
 
 
-# 均匀 256-way 先验（token 0 不被模型预测，用均匀分布编码 = 8 bit），
-# 与 scripts/verify_lossless.py 的 _UNIFORM_CUM 同口径。
-_UNIFORM_CUM = list(range(0, FREQ_TOTAL + 1, FREQ_TOTAL // 256))
-
-
-def _probs_from_logits(logits_seq):
-    """(1, T-1, V) logits → list[list[float]] 概率表（fp64 softmax，确定性）。"""
-    import torch
-    return torch.softmax(logits_seq.double(), dim=-1)[0].tolist()
-
-
-def _roundtrip_tokens(prob_table, tokens_list, first_cum):
-    """对一段 token 做真实算术编/解码 roundtrip。
-
-    prob_table: list[V] × (T-1)，位置 i 的分布预测 token[i+1]。
-    tokens_list: 长度 T 的真实 token。first_cum: token0 的累积频数表（均匀先验）。
-
-    返回 (bits:list[int], decoded:list[int])。encode 与 decode 用**同一张** cumfreq
-    表（先 build 一次缓存），保证逐位可逆 —— 这是真实可解性的核心。
-    """
-    cum_tables = [build_cumfreq(p) for p in prob_table]   # 每位置一张，复用
-
-    enc = ArithmeticEncoder()
-    enc.encode(tokens_list[0], first_cum)
-    for i, sym in enumerate(tokens_list[1:]):
-        enc.encode(sym, cum_tables[i])
-    bits = enc.finish()
-
-    dec = ArithmeticDecoder(bits)
-    decoded = [dec.decode(first_cum)]
-    for i in range(len(tokens_list) - 1):
-        decoded.append(dec.decode(cum_tables[i]))
-    return bits, decoded
-
-
 def _b64_png(arr, scale=4):
     """(H,W,C) uint8 numpy → base64 PNG，nearest 放大 scale 倍便于肉眼看清 32×32。
 
-    /api/lossless 与 /api/complete 共用，保证两条路径出图口径一致。
+    /api/encode 与 /api/decode / /api/complete 共用，保证各路径出图口径一致。
     """
     from PIL import Image
     im = Image.fromarray(arr).resize((arr.shape[1] * scale, arr.shape[0] * scale),
@@ -271,154 +230,10 @@ def _b64_png(arr, scale=4):
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
-def _encode_image_fast(model, model_type, x, device):
-    """一次 teacher-forced forward → 真实算术编码出 coarse/fine bit 列表（快路径）。
-
-    /api/lossless、/api/encode 共用：单次 forward 拿每位置条件分布，编码 + 同表
-    roundtrip 自解一遍（自检 bit-identical）。模型 causal → 该 bitstream 与 decode 端
-    逐 token 盲解（/api/decode、verify_lossless）所需分布**逐位相同**（归纳法），
-    故落盘的 .bin 是真实可逆的，仅省了 encode 侧 decode 的 T 次 forward。
-
-    返回 dict：dual / H / C / N_f / c_bits / f_bits / recon_tokens(list) /
-    ok_decode(bool) / orig(np.uint8 HWC)。
-    """
-    import torch
-    import torch.nn.functional as F
-
-    x = x.to(device).clamp(0, 1).float()
-    model.eval()
-
-    # 全程关 autocast + fp32，与 verify_lossless / cc_igpt bit-exact ctx 路径一致
-    with torch.no_grad(), torch.amp.autocast(device_type=device.type, enabled=False):
-        if model_type == "ccigpt":
-            # ---- coarse（独立 bitstream）----
-            x_c = F.adaptive_avg_pool2d(x, model.coarse_size)[:, :model.coarse.in_channels]
-            coarse_tokens = model.coarse._tokenize(x_c)[0].tolist()
-            out_c = model.coarse(x_c)
-            c_probs = _probs_from_logits(out_c["logits"])
-            c_bits, c_dec = _roundtrip_tokens(c_probs, coarse_tokens, _UNIFORM_CUM)
-            coarse_ok = (c_dec == coarse_tokens)
-
-            # ---- 从 DECODED coarse token 重建 fine 条件 ctx（decoder 视角，不作弊）----
-            coarse_dec_t = torch.tensor(c_dec, dtype=torch.long, device=device).view(1, -1)
-            coarse_ctx = model.ctx_alpha * model._compute_coarse_ctx(coarse_dec_t)
-
-            # ---- fine（条件于 coarse_ctx）----
-            fine_tokens = model.fine._tokenize(x)[0].tolist()
-            out_f = model.fine(x, coarse_ctx=coarse_ctx)
-            f_probs = _probs_from_logits(out_f["logits"])
-            f_bits, f_dec = _roundtrip_tokens(f_probs, fine_tokens, _UNIFORM_CUM)
-            fine_ok = (f_dec == fine_tokens)
-
-            dual = True
-            recon_tokens = f_dec
-            H = model.fine.image_size
-            C = model.fine.in_channels
-            N_f = model.fine.seq_len
-            ok_decode = coarse_ok and fine_ok
-        else:
-            tokens = model._tokenize(x)[0].tolist()
-            out = model(x)
-            probs = _probs_from_logits(out["logits"])
-            f_bits, dec = _roundtrip_tokens(probs, tokens, _UNIFORM_CUM)
-            c_bits = []
-            dual = False
-            recon_tokens = dec
-            H = model.image_size
-            C = model.in_channels
-            N_f = model.seq_len
-            ok_decode = (dec == tokens)
-
-    orig = (x.clamp(0, 1) * 255).round().to(torch.uint8)[0].permute(1, 2, 0).cpu().numpy()
-    return {
-        "dual": dual, "H": H, "C": C, "N_f": N_f,
-        "c_bits": c_bits, "f_bits": f_bits,
-        "recon_tokens": recon_tokens, "ok_decode": ok_decode,
-        "orig": orig,
-    }
-
-
 def _tokens_fingerprint(tokens):
     """token 列表 → 8-hex SHA1 指纹，用于编/解码两侧同会话交叉校验。"""
     b = bytes(int(t) & 0xFF for t in tokens)
     return hashlib.sha1(b).hexdigest()[:8]
-
-
-@app.post("/api/lossless")
-def lossless(file: UploadFile = File(...)):
-    """真实可解性 demo：上传图 → 算术编码出真实 bitstream → 解码 → 逐像素比对。
-
-    与 scripts/verify_lossless.py 同一套手写 WNC 算术编解码，但为了浏览器交互
-    （秒级响应、且不与 IN64 训练抢 GPU），用**一次 teacher-forced forward** 拿到
-    每个位置的条件分布，而非 decode 端逐 token 重跑 T 次完整 forward。
-
-    这不偷工：模型 causal，位置 i 的分布只依赖 token[0..i]，与真实 decoder 在已正确
-    解出前缀时算出的分布**逐位相同**（归纳法）。所以 bitstream 是真实可逆的，仅省了
-    decode 侧的 T 次 forward（纯加速）。严格逐步解码的版本在 verify_lossless.py。
-
-    返回 orig/recon 的 base64 PNG、是否 bit-identical、neural 码长 (byte/bpd)、
-    以及同图 PNG/WebP 无损字节数做对比。
-    """
-    try:
-        import torch
-        from PIL import Image
-    except ImportError:
-        raise HTTPException(status_code=500, detail="torch/torchvision not installed")
-
-    x, _ = _read_upload_to_tensor(file, size=32)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model, model_type = _get_cached_model(device)
-    if model is None:
-        raise HTTPException(status_code=503, detail="No checkpoint available. Place a checkpoint in experiments/*/checkpoints/best.pth")
-
-    enc = _encode_image_fast(model, model_type, x, device)
-    H, C, N_f = enc["H"], enc["C"], enc["N_f"]
-    c_bits, f_bits = enc["c_bits"], enc["f_bits"]
-
-    # 两段独立 bitstream，各自字节对齐 → 真实落盘字节数
-    neural_bytes = (math.ceil(len(c_bits) / 8) if c_bits else 0) + math.ceil(len(f_bits) / 8)
-    total_bits = len(c_bits) + len(f_bits)
-    parts = {"coarse_bits": len(c_bits), "fine_bits": len(f_bits)} if enc["dual"] else {}
-
-    # ---- 重建图（从 DECODED token，pixel-first 逆 tokenize）----
-    recon = np.array(enc["recon_tokens"], dtype=np.uint8).reshape(H, H, C)   # (H,W,C)
-    orig = enc["orig"]
-    pixel_exact = bool(enc["ok_decode"] and np.array_equal(recon, orig))
-
-    # ---- 传统无损对照（同一张 32×32 图）----
-    def _fmt_bytes(arr, fmt, **kw):
-        buf = io.BytesIO()
-        Image.fromarray(arr).save(buf, format=fmt, **kw)
-        return buf.tell()
-
-    png_bytes = _fmt_bytes(orig, "PNG", optimize=True)
-    try:
-        webp_bytes = _fmt_bytes(orig, "WEBP", lossless=True)
-    except Exception:
-        webp_bytes = None
-
-    achieved_bpd = total_bits / N_f
-    n_pixels = H * H * C
-
-    return JSONResponse({
-        "model_type": model_type,
-        "pixel_exact": pixel_exact,
-        "orig_png": _b64_png(orig),
-        "recon_png": _b64_png(recon),
-        # 真实 32×32 原始像素 PNG（scale=1，无放大），供前端 <a download> 落盘原图/重建图
-        "orig_png_full": _b64_png(orig, scale=1),
-        "recon_png_full": _b64_png(recon, scale=1),
-        "neural_bytes": neural_bytes,
-        "neural_bits": total_bits,
-        "achieved_bpd": round(achieved_bpd, 4),
-        "png_bytes": png_bytes,
-        "webp_bytes": webp_bytes,
-        "n_subpixels": n_pixels,
-        # 传统格式 bpd = bytes×8 / 子像素数，与 neural achieved_bpd 同口径可比
-        "png_bpd": round(png_bytes * 8 / n_pixels, 4),
-        "webp_bpd": round(webp_bytes * 8 / n_pixels, 4) if webp_bytes else None,
-        **parts,
-    })
 
 
 # 上传 .bin 大小上限：CIFAR 32×32×3 在 ~3 bpd 下 ≈ 1.1KB，给 1MB 余量足够防滥用。
@@ -431,11 +246,12 @@ _DECODE_PROGRESS_EVERY = 128
 def encode(file: UploadFile = File(...)):
     """上传图 → **逐 token gold 算术编码** → 自包含 MDLC .bin（流式 NDJSON 进度）。
 
-    关键修复（2026-06-01）：原先用 _encode_image_fast 单次 forward 编码，但 /api/decode
-    走逐 token gold（_logits_from_tokens，prefix+0）。两路径 logits 在 GPU 上差 ~1e-5，
-    算术编码零容忍 → 某 token 跨累积频数边界翻符号 → 解码失步成噪点。
-    现改用 verify_lossless._encode_sequence_iter（与 decode 端**同一**逐 token 路径），
-    encode 写的 bits 与 decode 逐 token 读所需分布逐位相同 → bit-exact 可解。
+    关键修复（2026-06-01）：原先用单次 teacher-forced forward 编码（快路径），但
+    /api/decode 走逐 token gold（_logits_from_tokens，prefix+0）。两路径 logits 在 GPU
+    上差 ~1e-5（实测 max|Δ|=3.8e-5），算术编码零容忍 → 某 token 跨累积频数边界翻符号
+    → 解码失步成噪点。现改用 verify_lossless._encode_sequence_iter（与 decode 端**同一**
+    逐 token 路径），encode 写的 bits 与 decode 逐 token 读所需分布逐位相同 → bit-exact 可解。
+    （旧快路径 _encode_image_fast + /api/lossless 面板已于同日移除。）
 
     代价：coarse N_c + fine N_f ≈ 3100 次 forward（与解码同量级），故同样流式吐进度
     （每 ~128 步一行 NDJSON）绕开 AutoDL 反代 idle 超时。
