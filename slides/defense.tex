@@ -103,7 +103,7 @@ p_\theta(x) \;=\; \prod_t p_\theta(x_t \mid x_{<t}),
         {\scriptsize AR 预训练做表征，\alert{不报 SOTA bpd}}
   \item \alert{\textbf{本工作}}：用 \textbf{MDL} 统一两者 \\
         {\scriptsize RGB-bit-exact 双尺度压缩（追 bpd）\\
-         $+$ 下游主线（验证表征 / 泛化 / 异常）}
+         $+$ 下游主线（验证表征 / 生成 / 真实可解性）}
 \end{itemize}
 \end{column}
 \end{columns}
@@ -171,6 +171,25 @@ p_\theta(x) \;=\; \prod_t p_\theta(x_t \mid x_{<t}),
 
 \smallskip
 {\scriptsize vs PixelSNAIL 380M (2.85) \textbf{$-0.020$} \;\; $\cdot$ \;\; vs Sparse Transformer 59M (2.80) $+0.020$}
+\end{frame}
+
+% ============================== 3b. ImageNet64 第二轨道（in-training） ==============================
+\begin{frame}{第二轨道：ImageNet 64$\times$64（训练中）}
+\begin{columns}[T]
+\begin{column}{0.50\textwidth}
+\centering
+\includegraphics[width=\linewidth,keepaspectratio]{ImageNet64baseline.pdf}
+\end{column}
+\begin{column}{0.50\textwidth}
+\centering
+\includegraphics[width=\linewidth,keepaspectratio]{ImageNet_trainning_curve.pdf}
+\end{column}
+\end{columns}
+
+\vspace{1mm}
+\centering\scriptsize\color{muted}
+同款 CC-iGPT 双尺度（coarse $16{\times}16{=}256$ token $+$ fine 12288 token），4-GPU DDP、12 ep cosine。\\
+in-training ep5/12 val \textbf{3.5217}，已追平 SPN (3.52)；cosine 退火尾段（ep8--12）未走，目标 \alert{$<$3.44}（Sparse Transformer）待最终判定。
 \end{frame}
 
 % ============================== 4. 模型架构总览（图） ==============================
@@ -476,7 +495,7 @@ $\to$ \texttt{re-tokenize} $\to$ \texttt{fine.token\_embed} $\to$ \texttt{AR shi
 
 % ============================== 10. 下游任务：MDL 主线总览 ==============================
 \begin{frame}{下游任务：MDL 主线「压得好 $\Rightarrow$ 学得好」}
-同一份 CC-iGPT v2 权重（\textbf{不重训、不微调}），从五个侧面验证它学到的是\\
+同一份 CC-iGPT 权重（\textbf{不重训、不微调}），从三个侧面验证它学到的是\\
 自然图像的通用统计，而非数据集记忆：
 
 \medskip
@@ -486,11 +505,9 @@ $\to$ \texttt{re-tokenize} $\to$ \texttt{fine.token\_embed} $\to$ \texttt{AR shi
 \textbf{侧面} & \textbf{任务} & \textbf{验证的 MDL 命题} \\
 \midrule
 表征 & Linear probe       & 线性可分表征更强        \\
-密度 & OOD typicality     & 能识别分布外样本        \\
-泛化 & 跨数据集 bpd       & 学自然图像统计、非记忆  \\
 生成 & 图像补全 (inpaint) & AR 条件生成能力         \\
 \midrule
-\multicolumn{3}{@{}l}{\textbf{地基}\;：真实可解性 roundtrip —— 算术编解码逐像素 bit-identical，} \\
+\multicolumn{3}{@{}l}{\textbf{地基}\;：真实可解性 —— 图像 ⇄ .bin 逐 token gold 编解码 bit-identical，} \\
 \multicolumn{3}{@{}l}{\quad\quad\;\; 证明所报 bpd 是\alert{真实可逆码长}而非 proxy} \\
 \bottomrule
 \end{tabular}
@@ -503,7 +520,9 @@ representation 血脉承 iGPT，density 血脉承 Sparse Transformer（纯生成
 
 % ============================== 下游 1 表征：Linear probe (图) ==============================
 \begin{frame}{下游 1 表征：Linear probe（逐层 top-1 准确率）}
-\figplaceholder{linear-probe-layerwise-acc.pdf}{11}{6}
+\begin{center}
+\includegraphics[height=0.78\textheight,keepaspectratio]{下游任务线性表征.png}
+\end{center}
 \end{frame}
 
 % ============================== 下游 1 表征：Linear probe (文字) ==============================
@@ -540,110 +559,16 @@ representation 血脉承 iGPT，density 血脉承 Sparse Transformer（纯生成
 \end{columns}
 \end{frame}
 
-% ============================== 下游 2 密度：OOD typicality (图) ==============================
-\begin{frame}{下游 2 密度：OOD typicality（AUROC 对比）}
-\figplaceholder{ood-typicality-auroc.pdf}{11}{6}
-\end{frame}
-
-% ============================== 下游 2 密度：OOD typicality (文字) ==============================
-\begin{frame}{下游 2 密度：typicality 方法与差异化}
-\begin{columns}[T]
-\begin{column}{0.50\textwidth}
-\small
-\textbf{方法}
-\begin{itemize}\setlength{\itemsep}{2pt}
-  \item 把 CC-iGPT 当密度模型，per-image bpd 做异常分
-  \item ID = CIFAR-10 test，OOD = SVHN / CIFAR-100
-\end{itemize}
-
-\bigskip
-\textbf{绕 Nalisnick 坑}
-\begin{itemize}
-  \item 裸 bpd 给 SVHN \emph{更低} $\Rightarrow$ AUROC$<$0.5
-  \item typicality 用 $|z|$ 偏离修正之
-\end{itemize}
-\end{column}
-\begin{column}{0.50\textwidth}
-\small
-\textbf{双尺度差异化（本工作）}
-\[
-\text{score} = \sqrt{z_c^2 + z_f^2}
-\]
-\begin{itemize}
-  \item coarse / fine \textbf{两个独立} typicality 信号 \\
-        {\scriptsize 单尺度模型结构上给不出（仅 1 个 bpd 信号）}
-  \item 实测 AUROC 与单信号 typ \textbf{基本持平} \\
-        {\scriptsize 卖点是\alert{结构能力}（多一路独立信号），非更高 AUROC}
-\end{itemize}
-
-\bigskip
-\textbf{结果（AUROC，越高越能识别 OOD）}
-\begin{itemize}\setlength{\itemsep}{2pt}
-  \item self-test 合成数据：裸 bpd 0.002 $\to$ typicality 0.995
-  \item SVHN: raw \alert{0.161} $\to$ typ \textbf{0.661} / dual \textbf{0.658}
-  \item CIFAR-100: raw 0.514 $\to$ typ 0.546 / dual 0.551
-\end{itemize}
-{\scriptsize SVHN raw$<$0.5 \alert{复现 Nalisnick}，typicality 救回 +0.50；CIFAR-100 近 OOD（同为自然图像）难度大，提升有限。}
-\end{column}
-\end{columns}
-\end{frame}
-
-% ============================== 下游 3 泛化：跨数据集 bpd (图) ==============================
-\begin{frame}{下游 3 泛化：跨数据集 bpd}
-\figplaceholder{cross-dataset-bpd.pdf}{11}{6}
-\end{frame}
-
-% ============================== 下游 3 泛化：跨数据集 bpd (文字) ==============================
-\begin{frame}{下游 3 泛化：跨数据集 bpd 方法与命题}
-\begin{columns}[T]
-\begin{column}{0.50\textwidth}
-\small
-\textbf{方法}
-\begin{itemize}\setlength{\itemsep}{2pt}
-  \item CIFAR-10 训练的 v2 模型，\textbf{不重训}
-  \item 直接评 CIFAR-100 / SVHN / STL-10 的 bpd
-  \item resize 到模型原生 $32{\times}32$
-\end{itemize}
-
-\bigskip
-\textbf{MDL 命题}
-\begin{itemize}
-  \item 换一个自然图像集仍压得动
-  \item $\Rightarrow$ 学到的是自然图像统计，非数据集记忆
-\end{itemize}
-\end{column}
-\begin{column}{0.50\textwidth}
-\small
-\textbf{可比性声明}
-\begin{itemize}\setlength{\itemsep}{2pt}
-  \item 含重采样（STL-10 96$\to$32），\\
-        \alert{勿与各集官方 bpd 横比}
-  \item 只看\textbf{同一模型}在不同集上的相对值
-  \item in-domain CIFAR-10 作参照
-\end{itemize}
-
-\bigskip
-\textbf{结果（bits/dim，同一 CIFAR-10 模型）}
-\begin{itemize}\setlength{\itemsep}{2pt}
-  \item CIFAR-10 (in-domain): \textbf{2.831}
-  \item CIFAR-100: \textbf{2.870} \;/\; SVHN: \textbf{2.046} \;/\; STL-10: \textbf{3.405}
-\end{itemize}
-{\scriptsize CIFAR-100 仅 $+$0.04（近乎同分布，强泛化）；SVHN 更低是\alert{数据本身熵低}（数字图平滑、好压），非泛化更好；STL-10 高含 96$\to$32 重采样高频。}
-\end{column}
-\end{columns}
-\end{frame}
-
-% ============================== 下游 4 生成：图像补全 (图) ==============================
-\begin{frame}{下游 4 生成：图像补全（AR inpainting）}
-% Panel 9 截图：原图 | 已知上半(灰=待补) | AR 补全 三联图
-% 截图存成 figures/completion-panel9.png（或改下面文件名）；编译前务必放好图，否则本页报缺图
+% ============================== 下游 2 生成：图像补全 (图) ==============================
+\begin{frame}{下游 2 生成：图像补全（AR inpainting）}
+% 三联图：原图 | 已知上半(灰=待补) | AR 补全
 \begin{center}
-\includegraphics[width=0.95\linewidth,height=0.78\textheight,keepaspectratio]{completion-panel9.png}
+\includegraphics[width=0.95\linewidth,height=0.78\textheight,keepaspectratio]{下游任务图像补全.png}
 \end{center}
 \end{frame}
 
-% ============================== 下游 4 生成：图像补全 (文字) ==============================
-\begin{frame}{下游 4 生成：补全方法与命题}
+% ============================== 下游 2 生成：图像补全 (文字) ==============================
+\begin{frame}{下游 2 生成：补全方法与命题}
 \begin{columns}[T]
 \begin{column}{0.50\textwidth}
 \small
@@ -673,19 +598,21 @@ representation 血脉承 iGPT，density 血脉承 Sparse Transformer（纯生成
 \textbf{结果}
 \begin{itemize}\setlength{\itemsep}{2pt}
   \item 仅 CIFAR v2 实用（fine 3072 token）
-  \item 前端 Panel 9 实时补全（见左图），可现场换图 / 调 keep\% / 温度
+  \item 前端实时补全面板（见左图），可现场换图 / 调 keep\% / 温度
 \end{itemize}
 \end{column}
 \end{columns}
 \end{frame}
 
-% ============================== 下游 5 地基：真实可解性 roundtrip (图) ==============================
-\begin{frame}{下游 5 地基：真实可解性 roundtrip}
-\figplaceholder{lossless-roundtrip.pdf}{11}{6}
+% ============================== 下游 3 地基：真实可解性 (图) ==============================
+\begin{frame}{下游 3 地基：真实可解性 —— 图像 ⇄ .bin 编解码}
+\begin{center}
+\includegraphics[width=0.95\linewidth,height=0.78\textheight,keepaspectratio]{下游任务真实编码解码.png}
+\end{center}
 \end{frame}
 
-% ============================== 下游 5 地基：真实可解性 roundtrip (文字) ==============================
-\begin{frame}{下游 5 地基：可解性方法与命题}
+% ============================== 下游 3 地基：真实可解性 roundtrip (文字) ==============================
+\begin{frame}{下游 3 地基：可解性方法与命题}
 \begin{columns}[T]
 \begin{column}{0.50\textwidth}
 \small
@@ -693,15 +620,15 @@ representation 血脉承 iGPT，density 血脉承 Sparse Transformer（纯生成
 \begin{itemize}\setlength{\itemsep}{2pt}
   \item 手写 32-bit WNC 算术编解码
   \item 图像 $\to$ token $\to$ 逐步条件分布 \\
-        $\to$ 真实 bitstream $\to$ 解码
-  \item 逐像素断言 bit-identical
+        $\to$ 真实 bitstream $\to$ 盲解码还原
+  \item 逐像素断言 bit-identical（前端可现场上传图 ⇄ 下载 .bin）
 \end{itemize}
 
 \bigskip
 \textbf{可逆性保证}
 \begin{itemize}
-  \item 无 KV-cache，encode/decode 同 per-step forward
-  \item $\Rightarrow$ logits 逐位相同 $\Rightarrow$ 严格可逆
+  \item 无 KV-cache，\textbf{encode / decode 同一逐 token forward}
+  \item $\Rightarrow$ logits 逐位相同 $\Rightarrow$ 严格可逆（bit-exact）
 \end{itemize}
 \end{column}
 \begin{column}{0.50\textwidth}
@@ -749,10 +676,8 @@ representation 血脉承 iGPT，density 血脉承 Sparse Transformer（纯生成
 \smallskip
 \begin{itemize}\setlength{\itemsep}{2pt}
   \item \textbf{表征} —— probe best \alert{79.33\%}（$+$12.4\,pp）
-  \item \textbf{密度} —— 双尺度 typicality OOD
-  \item \textbf{泛化} —— 跨数据集 bpd
   \item \textbf{生成} —— AR 图像补全
-  \item \textbf{地基} —— 真实可解性 roundtrip
+  \item \textbf{地基} —— 真实可解性（图像 ⇄ .bin bit-identical）
 \end{itemize}
 
 \smallskip
