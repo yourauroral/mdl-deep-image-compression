@@ -176,8 +176,7 @@ p_\theta(x) \;=\; \prod_t p_\theta(x_t \mid x_{<t}),
 % ============================== 3b. ImageNet64 第二轨道（in-training） ==============================
 \begin{frame}{第二轨道：ImageNet 64$\times$64（训练中）}
 \centering
-\includegraphics[width=0.49\textwidth]{ImageNet64baseline.pdf}\hspace{2mm}%
-\includegraphics[width=0.49\textwidth]{ImageNet_trainning_curve.pdf}
+\includegraphics[width=0.72\textwidth]{ImageNet64baseline.pdf}
 
 \vspace{2mm}
 {\centering\footnotesize\color{muted}
@@ -394,10 +393,14 @@ $\to$ \texttt{re-tokenize} $\to$ \texttt{fine.token\_embed} $\to$ \texttt{AR shi
 \end{frame}
 
 % ============================== 8. 训练 (图) ==============================
-\begin{frame}{训练动力学：CC-iGPT v2 R-only training curve}
-\begin{center}
-\includegraphics[height=0.78\textheight,keepaspectratio]{CC-iGPT R-only training curves.pdf}
-\end{center}
+\begin{frame}{训练动力学：CIFAR-10 与 ImageNet64 训练曲线}
+\centering
+\includegraphics[width=0.49\textwidth]{CC-iGPT R-only training curves.pdf}\hspace{2mm}%
+\includegraphics[width=0.49\textwidth]{ImageNet_trainning_curve.pdf}
+
+\vspace{2mm}
+{\centering\footnotesize\color{muted}
+左：CIFAR-10 v2 R-only 200 ep（主表 2.8296）\quad 右：ImageNet 64$\times$64 12 ep cosine（训练中，ep5 val 3.5217）\par}
 \end{frame}
 
 % ============================== 8b. 训练 + Ensemble (文字) ==============================
@@ -659,8 +662,9 @@ representation 血脉承 iGPT，density 血脉承 Sparse Transformer（纯生成
 {\scriptsize 7 进入训练栈 $+$ 1 反面案例（$V{=}256$ roofline 证伪）}
 
 \smallskip
-\textbf{3 分析} —— RGB-bit-exact 主表 \\
-{\scriptsize CIFAR-10 \alert{\textbf{2.8296}} 超越 PixelSNAIL 380M (2.85)，逼近 Sparse Transformer 59M (2.80)，参数预算 82.95M}
+\textbf{3 分析} —— RGB-bit-exact 主表（双轨道） \\
+{\scriptsize CIFAR-10 \alert{\textbf{2.8296}} 超越 PixelSNAIL 380M (2.85)、逼近 Sparse Transformer 59M (2.80)，82.95M 参数；\\
+ImageNet 64$\times$64 第二轨道训练中（ep5 val \textbf{3.5217} 已追平 SPN，目标 $<$3.44）}
 \end{column}
 \begin{column}{0.50\textwidth}
 \small
@@ -674,7 +678,7 @@ representation 血脉承 iGPT，density 血脉承 Sparse Transformer（纯生成
 \end{itemize}
 
 \smallskip
-{\scriptsize 把压缩与表征 / 异常 / 泛化串成因果链，统一 density 与 representation 两条血脉。}
+{\scriptsize 把压缩与表征 / 生成 / 可解性串成因果链，统一 density 与 representation 两条血脉。}
 \end{column}
 \end{columns}
 
