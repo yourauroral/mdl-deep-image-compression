@@ -736,9 +736,6 @@ Chart.defaults.borderColor = "#2a2d3a";
             encDownload.download = msg.filename || "image.mdlc.bin";
             lastEncFingerprint = msg.fingerprint;
 
-            const exactStr = msg.pixel_exact
-              ? `<span class="co-ok">✅ bit-identical</span>`
-              : `<span class="co-fail">⚠ 自检不一致</span>`;
             const partsStr = msg.dual
               ? `coarse ${msg.coarse_bits} + fine ${msg.fine_bits} bit`
               : `${msg.neural_bits} bit`;
@@ -746,7 +743,6 @@ Chart.defaults.borderColor = "#2a2d3a";
               `<div class="codec-stat"><span>文件大小</span><b>${msg.bin_bytes} B</b></div>` +
               `<div class="codec-stat"><span>码长</span><b>${msg.neural_bits} bit</b></div>` +
               `<div class="codec-stat"><span>achieved bpd</span><b>${msg.achieved_bpd}</b></div>` +
-              `<div class="codec-stat"><span>编码自检</span><b>${exactStr}</b></div>` +
               `<div class="codec-stat codec-stat-wide"><span>分段</span><b>${partsStr}</b></div>` +
               `<div class="codec-stat codec-stat-wide"><span>指纹</span><b><code>${msg.fingerprint}</code></b></div>`;
             encResult.hidden = false;

@@ -220,7 +220,7 @@ def predict(file: UploadFile = File(...)):
 def _b64_png(arr, scale=4):
     """(H,W,C) uint8 numpy → base64 PNG，nearest 放大 scale 倍便于肉眼看清 32×32。
 
-    /api/encode 与 /api/decode / /api/complete 共用，保证各路径出图口径一致。
+    /api/decode 与 /api/complete 共用，保证各路径出图口径一致。
     """
     from PIL import Image
     im = Image.fromarray(arr).resize((arr.shape[1] * scale, arr.shape[0] * scale),
@@ -246,12 +246,10 @@ _DECODE_PROGRESS_EVERY = 128
 def encode(file: UploadFile = File(...)):
     """上传图 → **逐 token gold 算术编码** → 自包含 MDLC .bin（流式 NDJSON 进度）。
 
-    关键修复（2026-06-01）：原先用单次 teacher-forced forward 编码（快路径），但
-    /api/decode 走逐 token gold（_logits_from_tokens，prefix+0）。两路径 logits 在 GPU
-    上差 ~1e-5（实测 max|Δ|=3.8e-5），算术编码零容忍 → 某 token 跨累积频数边界翻符号
-    → 解码失步成噪点。现改用 verify_lossless._encode_sequence_iter（与 decode 端**同一**
-    逐 token 路径），encode 写的 bits 与 decode 逐 token 读所需分布逐位相同 → bit-exact 可解。
-    （旧快路径 _encode_image_fast + /api/lossless 面板已于同日移除。）
+    编码必须与 /api/decode 走**同一**逐 token 路径（verify_lossless._encode_sequence_iter
+    与 _decode_sequence_iter 共用 _logits_from_tokens，prefix+0 缓冲逐位相同）：算术编码
+    零容忍，logits 差一个 ULP 即可让某 token 跨累积频数边界翻符号、解码失步成噪点。同源
+    保证 encode 写的 bits 与 decode 逐 token 读所需分布逐位相同 → bit-exact 可解。
 
     代价：coarse N_c + fine N_f ≈ 3100 次 forward（与解码同量级），故同样流式吐进度
     （每 ~128 步一行 NDJSON）绕开 AutoDL 反代 idle 超时。
@@ -270,7 +268,6 @@ def encode(file: UploadFile = File(...)):
     from scripts.verify_lossless import _build_container_bytes, _encode_sequence_iter
 
     def _gen():
-        import torch
         import torch.nn.functional as F
         model.eval()
         try:
@@ -346,8 +343,6 @@ def encode(file: UploadFile = File(...)):
                 blob = _build_container_bytes(dual, H, C, c_bits, f_bits)
                 total_bits = len(c_bits) + len(f_bits)
                 achieved_bpd = total_bits / N_f
-                # gold encode 直接编码真图 token，bit-exact 可解 → recon==orig 必然成立
-                orig = (x_dev.clamp(0, 1) * 255).round().to(torch.uint8)[0].permute(1, 2, 0).cpu().numpy()
                 parts = {"coarse_bits": len(c_bits), "fine_bits": len(f_bits)} if dual else {}
                 yield json.dumps({
                     "type": "done",
@@ -359,8 +354,6 @@ def encode(file: UploadFile = File(...)):
                     "H": H, "C": C,
                     "neural_bits": total_bits,
                     "achieved_bpd": round(achieved_bpd, 4),
-                    "pixel_exact": True,
-                    "orig_png": _b64_png(orig),
                     "fingerprint": _tokens_fingerprint(enc_tokens),
                     **parts,
                 }) + "\n"

@@ -204,7 +204,7 @@ uvicorn demo.server:app --host 0.0.0.0 --port 6006 --reload
 
 ## 结果归档建议
 
-- [1][2] 控制台表格 → 截图 / 复制进论文 §5 表；`--json_out` 同时落 demo 前端 Panel 7/8。
-- [3] `experiments/completion_grid.png` → 论文定性面板 / 答辩 demo；Panel 9 是其交互版。
-- [4] 控制台 `✅ 2/2 bit-identical` + achieved bpd → §5 可解性硬证据（前端 Panel 2 交互版）。
+- [1][2] 控制台表格 → 截图 / 复制进论文 §5 表；`--json_out` 同时落 demo 前端 OOD / 跨数据集面板。
+- [3] `experiments/completion_grid.png` → 论文定性面板 / 答辩 demo；补全面板是其交互版。
+- [4] 控制台 `✅ 2/2 bit-identical` + achieved bpd → §5 可解性硬证据（前端 codec 面板 图像⇄.bin 交互版）。
 - 跑完把关键数字回填到论文 §5 与 `future.md §6`。
