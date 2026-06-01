@@ -392,8 +392,11 @@ $\to$ \texttt{re-tokenize} $\to$ \texttt{fine.token\_embed} $\to$ \texttt{AR shi
 % ============================== 8. 训练 (图) ==============================
 \begin{frame}{训练动力学：CIFAR-10 与 ImageNet64 训练曲线}
 \centering
-\includegraphics[width=0.49\textwidth]{CC-iGPT R-only training curves.pdf}\hspace{2mm}%
-\includegraphics[width=0.49\textwidth]{ImageNet_trainning_curve.pdf}
+% 两图按同一高度并排（CIFAR 曲线偏扁，IN64 偏方）；resizebox 锁定总宽=\linewidth，等高且不出框
+\resizebox{\linewidth}{!}{%
+  \includegraphics[height=4cm]{CC-iGPT R-only training curves.pdf}\hspace{3mm}%
+  \includegraphics[height=4cm]{ImageNet_trainning_curve.pdf}%
+}
 
 \vspace{2mm}
 {\centering\footnotesize\color{muted}
@@ -428,9 +431,6 @@ $\to$ \texttt{re-tokenize} $\to$ \texttt{fine.token\_embed} $\to$ \texttt{AR shi
   \item Fused RoPE
   \item Fused Attn + RoPE
 \end{itemize}
-
-\bigskip
-约 \textbf{2{,}400 行} Triton 代码，全部手写
 \end{column}
 \begin{column}{0.48\textwidth}
 \textbf{1 个反面案例}
@@ -482,7 +482,7 @@ representation 血脉承 iGPT，density 血脉承 Sparse Transformer（纯生成
 % ============================== 下游 1 表征：Linear probe (图) ==============================
 \begin{frame}{下游 1 表征：Linear probe（逐层 top-1 准确率）}
 \begin{center}
-\includegraphics[height=0.78\textheight,keepaspectratio]{下游任务线性表征.png}
+\includegraphics[width=\linewidth,keepaspectratio]{下游任务线性表征.png}
 \end{center}
 \end{frame}
 
