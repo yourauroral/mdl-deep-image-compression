@@ -175,21 +175,14 @@ p_\theta(x) \;=\; \prod_t p_\theta(x_t \mid x_{<t}),
 
 % ============================== 3b. ImageNet64 第二轨道（in-training） ==============================
 \begin{frame}{第二轨道：ImageNet 64$\times$64（训练中）}
-\begin{columns}[T]
-\begin{column}{0.50\textwidth}
 \centering
-\includegraphics[width=\linewidth,keepaspectratio]{ImageNet64baseline.pdf}
-\end{column}
-\begin{column}{0.50\textwidth}
-\centering
-\includegraphics[width=\linewidth,keepaspectratio]{ImageNet_trainning_curve.pdf}
-\end{column}
-\end{columns}
+\includegraphics[width=0.49\textwidth]{ImageNet64baseline.pdf}\hspace{2mm}%
+\includegraphics[width=0.49\textwidth]{ImageNet_trainning_curve.pdf}
 
-\vspace{1mm}
-\centering\scriptsize\color{muted}
-同款 CC-iGPT 双尺度（coarse $16{\times}16{=}256$ token $+$ fine 12288 token），4-GPU DDP、12 ep cosine。\\
-in-training ep5/12 val \textbf{3.5217}，已追平 SPN (3.52)；cosine 退火尾段（ep8--12）未走，目标 \alert{$<$3.44}（Sparse Transformer）待最终判定。
+\vspace{2mm}
+{\centering\footnotesize\color{muted}
+同款双尺度（coarse 256 $+$ fine 12288 token），4-GPU、12 ep cosine；
+ep5/12 val \textbf{3.5217} 已追平 SPN，退火尾段未走，目标 \alert{$<$3.44} 待判定。\par}
 \end{frame}
 
 % ============================== 4. 模型架构总览（图） ==============================
@@ -507,7 +500,7 @@ $\to$ \texttt{re-tokenize} $\to$ \texttt{fine.token\_embed} $\to$ \texttt{AR shi
 表征 & Linear probe       & 线性可分表征更强        \\
 生成 & 图像补全 (inpaint) & AR 条件生成能力         \\
 \midrule
-\multicolumn{3}{@{}l}{\textbf{地基}\;：真实可解性 —— 图像 ⇄ .bin 逐 token gold 编解码 bit-identical，} \\
+\multicolumn{3}{@{}l}{\textbf{地基}\;：真实可解性 —— 图像 $\leftrightarrow$ .bin 逐 token gold 编解码 bit-identical，} \\
 \multicolumn{3}{@{}l}{\quad\quad\;\; 证明所报 bpd 是\alert{真实可逆码长}而非 proxy} \\
 \bottomrule
 \end{tabular}
@@ -605,7 +598,7 @@ representation 血脉承 iGPT，density 血脉承 Sparse Transformer（纯生成
 \end{frame}
 
 % ============================== 下游 3 地基：真实可解性 (图) ==============================
-\begin{frame}{下游 3 地基：真实可解性 —— 图像 ⇄ .bin 编解码}
+\begin{frame}{下游 3 地基：真实可解性 —— 图像 $\leftrightarrow$ .bin 编解码}
 \begin{center}
 \includegraphics[width=0.95\linewidth,height=0.78\textheight,keepaspectratio]{下游任务真实编码解码.png}
 \end{center}
@@ -621,7 +614,7 @@ representation 血脉承 iGPT，density 血脉承 Sparse Transformer（纯生成
   \item 手写 32-bit WNC 算术编解码
   \item 图像 $\to$ token $\to$ 逐步条件分布 \\
         $\to$ 真实 bitstream $\to$ 盲解码还原
-  \item 逐像素断言 bit-identical（前端可现场上传图 ⇄ 下载 .bin）
+  \item 逐像素断言 bit-identical（前端可现场上传图 $\leftrightarrow$ 下载 .bin）
 \end{itemize}
 
 \bigskip
@@ -677,7 +670,7 @@ representation 血脉承 iGPT，density 血脉承 Sparse Transformer（纯生成
 \begin{itemize}\setlength{\itemsep}{2pt}
   \item \textbf{表征} —— probe best \alert{79.33\%}（$+$12.4\,pp）
   \item \textbf{生成} —— AR 图像补全
-  \item \textbf{地基} —— 真实可解性（图像 ⇄ .bin bit-identical）
+  \item \textbf{地基} —— 真实可解性（图像 $\leftrightarrow$ .bin bit-identical）
 \end{itemize}
 
 \smallskip
