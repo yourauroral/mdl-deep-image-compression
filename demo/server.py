@@ -28,6 +28,7 @@ import io
 import math
 import base64
 import hashlib
+import logging
 import threading
 
 import numpy as np
@@ -58,6 +59,10 @@ ALLOWED_CONTENT_TYPES = {
 }
 
 app = FastAPI(title="MDL Deep Image Compression Demo")
+
+# 流式端点出错时：完整堆栈记到服务端日志，客户端只收通用提示（避免在公网
+# AutoDL --host 0.0.0.0 映射下把 CUDA OOM / 主机路径等内部细节泄漏给访问者）。
+logger = logging.getLogger("mdlic.demo")
 
 # 显式 CORS 白名单：仅允许本地开发用 origin。部署到公网时按需扩充。
 app.add_middleware(
@@ -238,8 +243,32 @@ def _tokens_fingerprint(tokens):
 
 # 上传 .bin 大小上限：CIFAR 32×32×3 在 ~3 bpd 下 ≈ 1.1KB，给 1MB 余量足够防滥用。
 MAX_BIN_BYTES = 1 * 1024 * 1024
-# 流式解码每多少步推一次进度（太密会刷爆前端，太疏过不了反代 idle 超时）。
+# 流式编/解码每多少步推一次进度（太密会刷爆前端，太疏过不了反代 idle 超时）。
 _DECODE_PROGRESS_EVERY = 128
+
+
+def _drive_coder(gen, stage, base, total):
+    """驱动 _encode/_decode_sequence_iter，按**累积**步数 gate 进度并 yield NDJSON 行，
+    StopIteration 时返回 (coder 结果, 新 base)。
+
+    base = 之前各 stage 已完成步数；累积 done = base + m。gate 条件 `cum % N == 0`
+    **或** `m == per_stage_total`（每个 stage 末步必发）—— 修掉两个老坑：
+      1. coarse N_c=64 < N=128 时整段零进度（per-stage `m % N` 永不命中）；
+      2. fine 末段 m∈(2944, 3071] 静默 127 步，bar 卡 95.9% 直到 done。
+    保证每段首尾都有进度行 flush，反代 idle keep-alive 不被这两个窗口击穿。
+    """
+    cum = base
+    last_m = 0
+    try:
+        while True:
+            m, per_stage_total = next(gen)
+            cum = base + m
+            last_m = m
+            if cum % _DECODE_PROGRESS_EVERY == 0 or m == per_stage_total:
+                yield json.dumps({"type": "progress", "stage": stage,
+                                  "done": cum, "total": total}) + "\n"
+    except StopIteration as stop:
+        return stop.value, base + last_m
 
 
 @app.post("/api/encode")
@@ -280,7 +309,6 @@ def encode(file: UploadFile = File(...)):
                     N_c = model.coarse.seq_len
                     N_f = model.fine.seq_len
                     total_steps = N_c + N_f
-                    done = 0
                     yield json.dumps({"type": "start", "total": total_steps,
                                       "stages": ["coarse", "fine"]}) + "\n"
 
@@ -288,16 +316,7 @@ def encode(file: UploadFile = File(...)):
                     x_c = F.adaptive_avg_pool2d(x_dev, model.coarse_size)[:, :model.coarse.in_channels]
                     coarse_tokens = model.coarse._tokenize(x_c)            # 真 token
                     gen_c = _encode_sequence_iter(model.coarse, coarse_tokens, None, device)
-                    c_bits = None
-                    try:
-                        while True:
-                            m, _t = next(gen_c)
-                            done += 1
-                            if m % _DECODE_PROGRESS_EVERY == 0:
-                                yield json.dumps({"type": "progress", "stage": "coarse",
-                                                  "done": done, "total": total_steps}) + "\n"
-                    except StopIteration as stop:
-                        c_bits = stop.value
+                    c_bits, base = yield from _drive_coder(gen_c, "coarse", 0, total_steps)
 
                     # ---- 从**真** coarse token 建 fine ctx（与 decode 端逐位相同：
                     # gold coarse encode↔decode bit-exact，故 decoded coarse==true coarse）----
@@ -306,37 +325,19 @@ def encode(file: UploadFile = File(...)):
                     # ---- fine 段（gold 逐 token，条件于 coarse_ctx）----
                     fine_tokens = model.fine._tokenize(x_dev)
                     gen_f = _encode_sequence_iter(model.fine, fine_tokens, coarse_ctx, device)
-                    f_bits = None
-                    try:
-                        while True:
-                            m, _t = next(gen_f)
-                            done += 1
-                            if m % _DECODE_PROGRESS_EVERY == 0:
-                                yield json.dumps({"type": "progress", "stage": "fine",
-                                                  "done": done, "total": total_steps}) + "\n"
-                    except StopIteration as stop:
-                        f_bits = stop.value
-                    enc_tokens = fine_tokens[0].tolist()
+                    f_bits, _ = yield from _drive_coder(gen_f, "fine", base, total_steps)
+                    # 指纹覆盖 coarse+fine 全序列（非仅 fine），交叉校验涵盖整张重建
+                    enc_tokens = coarse_tokens[0].tolist() + fine_tokens[0].tolist()
                 else:
                     H = model.image_size
                     C = model.in_channels
                     N_f = model.seq_len
                     total_steps = N_f
-                    done = 0
                     yield json.dumps({"type": "start", "total": total_steps,
                                       "stages": ["single"]}) + "\n"
                     tokens = model._tokenize(x_dev)
                     gen = _encode_sequence_iter(model, tokens, None, device)
-                    f_bits = None
-                    try:
-                        while True:
-                            m, _t = next(gen)
-                            done += 1
-                            if m % _DECODE_PROGRESS_EVERY == 0:
-                                yield json.dumps({"type": "progress", "stage": "single",
-                                                  "done": done, "total": total_steps}) + "\n"
-                    except StopIteration as stop:
-                        f_bits = stop.value
+                    f_bits, _ = yield from _drive_coder(gen, "single", 0, total_steps)
                     c_bits = []
                     enc_tokens = tokens[0].tolist()
 
@@ -357,8 +358,10 @@ def encode(file: UploadFile = File(...)):
                     "fingerprint": _tokens_fingerprint(enc_tokens),
                     **parts,
                 }) + "\n"
-        except Exception as e:   # noqa
-            yield json.dumps({"type": "error", "detail": f"{type(e).__name__}: {e}"}) + "\n"
+        except Exception:   # noqa: BLE001 — 完整堆栈进日志，客户端只收通用提示
+            logger.exception("/api/encode 流式编码失败")
+            yield json.dumps({"type": "error",
+                              "detail": "编码失败（服务端错误，详见后端日志）"}) + "\n"
 
     return StreamingResponse(_gen(), media_type="application/x-ndjson")
 
@@ -441,62 +444,36 @@ def decode(file: UploadFile = File(...)):
                     N_c = model.coarse.seq_len
                     N_f = model.fine.seq_len
                     total_steps = N_c + N_f
-                    done = 0
                     yield json.dumps({"type": "start", "total": total_steps,
                                       "stages": ["coarse", "fine"]}) + "\n"
 
                     # ---- coarse 段 ----
                     gen_c = _decode_sequence_iter(model.coarse, c_bits, N_c, None, device)
-                    coarse_dec = None
-                    try:
-                        while True:
-                            m, _t = next(gen_c)
-                            done += 1
-                            if m % _DECODE_PROGRESS_EVERY == 0:
-                                yield json.dumps({"type": "progress", "stage": "coarse",
-                                                  "done": done, "total": total_steps}) + "\n"
-                    except StopIteration as stop:
-                        coarse_dec = stop.value
+                    coarse_dec, base = yield from _drive_coder(gen_c, "coarse", 0, total_steps)
 
                     # ---- 从解出的 coarse token 重建 fine ctx ----
                     coarse_ctx = model.ctx_alpha * model._compute_coarse_ctx(coarse_dec)
 
                     # ---- fine 段 ----
                     gen_f = _decode_sequence_iter(model.fine, f_bits, N_f, coarse_ctx, device)
-                    fine_dec = None
-                    try:
-                        while True:
-                            m, _t = next(gen_f)
-                            done += 1
-                            if m % _DECODE_PROGRESS_EVERY == 0:
-                                yield json.dumps({"type": "progress", "stage": "fine",
-                                                  "done": done, "total": total_steps}) + "\n"
-                    except StopIteration as stop:
-                        fine_dec = stop.value
+                    fine_dec, _ = yield from _drive_coder(gen_f, "fine", base, total_steps)
 
                     recon_t = fine_dec
                     total_bits = len(c_bits) + len(f_bits)
                     n_subpix = H * H * C
+                    # 指纹覆盖 coarse+fine 全序列，与 /api/encode 端同口径
+                    fp_tokens = coarse_dec[0].tolist() + fine_dec[0].tolist()
                 else:
                     N = model.seq_len
                     total_steps = N
-                    done = 0
                     yield json.dumps({"type": "start", "total": total_steps,
                                       "stages": ["single"]}) + "\n"
                     gen = _decode_sequence_iter(model, f_bits, N, None, device)
-                    dec = None
-                    try:
-                        while True:
-                            m, _t = next(gen)
-                            done += 1
-                            if m % _DECODE_PROGRESS_EVERY == 0:
-                                yield json.dumps({"type": "progress", "stage": "single",
-                                                  "done": done, "total": total_steps}) + "\n"
-                    except StopIteration as stop:
-                        dec = stop.value
+                    dec, _ = yield from _drive_coder(gen, "single", 0, total_steps)
                     recon_t = dec
                     total_bits = len(f_bits)
                     n_subpix = H * H * C
+                    fp_tokens = dec[0].tolist()
 
                 # ---- 逆 tokenize → 还原图 → base64 PNG ----
                 recon_tokens = recon_t[0].tolist()
@@ -508,10 +485,12 @@ def decode(file: UploadFile = File(...)):
                     "achieved_bpd": round(achieved_bpd, 4),
                     "neural_bits": total_bits,
                     "H": H, "C": C,
-                    "fingerprint": _tokens_fingerprint(recon_tokens),
+                    "fingerprint": _tokens_fingerprint(fp_tokens),
                 }) + "\n"
-            except Exception as e:   # 解码中途出错也以 NDJSON 形式吐给前端
-                yield json.dumps({"type": "error", "detail": f"{type(e).__name__}: {e}"}) + "\n"
+            except Exception:   # noqa: BLE001 — 完整堆栈进日志，客户端只收通用提示
+                logger.exception("/api/decode 流式解码失败")
+                yield json.dumps({"type": "error",
+                                  "detail": "解码失败（服务端错误，详见后端日志）"}) + "\n"
 
     # media_type 用 ndjson；sync 生成器由 Starlette 放进 threadpool，GPU 不阻塞 event loop
     return StreamingResponse(_gen(), media_type="application/x-ndjson")

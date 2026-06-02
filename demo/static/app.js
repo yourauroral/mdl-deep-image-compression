@@ -707,6 +707,7 @@ Chart.defaults.borderColor = "#2a2d3a";
       const decoder = new TextDecoder();
       let buf = "";
       let done = false;
+      let streamErr = false;   // 收到 error 行 or 流提前断 → 用 '重试' 标签，note 不留 'bit-exact 可解'
       while (!done) {
         const { value, done: rdDone } = await reader.read();
         if (rdDone) break;
@@ -750,11 +751,19 @@ Chart.defaults.borderColor = "#2a2d3a";
             done = true;
           } else if (msg.type === "error") {
             encProgLabel.textContent = "编码出错：" + msg.detail;
+            encNote.textContent = "编码失败，未生成 .bin";
+            streamErr = true;
             done = true;
           }
         }
       }
-      encRun.disabled = false; encRun.textContent = "重新编码";
+      // 流提前断（rdDone 但没收到 done/error）：别留下卡住的进度条静默假成功
+      if (!done) {
+        encProgLabel.textContent = "连接中断，编码未完成";
+        encNote.textContent = "编码失败，未生成 .bin";
+        streamErr = true;
+      }
+      encRun.disabled = false; encRun.textContent = streamErr ? "重试" : "重新编码";
     } catch (e) {
       encNote.textContent = "无法连接后端";
       encProgWrap.hidden = true;
@@ -854,6 +863,7 @@ Chart.defaults.borderColor = "#2a2d3a";
       const decoder = new TextDecoder();
       let buf = "";
       let done = false;
+      let streamErr = false;
       while (!done) {
         const { value, done: rdDone } = await reader.read();
         if (rdDone) break;
@@ -894,11 +904,15 @@ Chart.defaults.borderColor = "#2a2d3a";
             done = true;
           } else if (msg.type === "error") {
             progLabel.textContent = "解码出错：" + msg.detail;
+            streamErr = true;
             done = true;
           }
         }
       }
-      decRun.disabled = false; inspectRun.disabled = false; decRun.textContent = "重新解码";
+      // 流提前断（rdDone 但没收到 done/error）：明确报错，别留卡住的进度条
+      if (!done) { progLabel.textContent = "连接中断，解码未完成"; streamErr = true; }
+      decRun.disabled = false; inspectRun.disabled = false;
+      decRun.textContent = streamErr ? "重试" : "重新解码";
     } catch (e) {
       progLabel.textContent = "无法连接后端（或连接中断）";
       decRun.disabled = false; inspectRun.disabled = false; decRun.textContent = "重试";
