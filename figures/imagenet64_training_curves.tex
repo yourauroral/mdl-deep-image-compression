@@ -2,15 +2,16 @@
 % 编译: pdflatex imagenet64_training_curves.tex   (或 latexmk -pdf)
 % 嵌入论文: \input{figures/imagenet64_training_curves.tex}
 %
-% 数据来源: experiments/ccigpt_imagenet64_v1_train.log（截至 ep5/12，2026-06-01）
+% 数据来源: experiments/ccigpt_imagenet64_v1_train.log（截至 ep6/12，2026-06-02）
 %   ep | train_bpd | val_bpd | LR
 %    1 |   4.3969  |  3.6624 | 3.00e-04
 %    2 |   3.5751  |  3.5834 | 3.00e-04
 %    3 |   3.5127  |  3.5523 | 2.94e-04
 %    4 |   3.4825  |  3.5358 | 2.77e-04
 %    5 |   3.4654  |  3.5217 | 2.51e-04
+%    6 |   3.4545  |  3.5147 | 2.17e-04
 %
-% ！进行中：ep6-12 待回填。cosine 退火尾段 ep8-12 未走，3.44 目标待最终判定。
+% ！进行中：ep7-12 待回填（ep7 训练中）。cosine 退火尾段 ep8-12 未走，3.44 目标待最终判定。
 \documentclass[tikz,border=8pt]{standalone}
 \usepackage{tikz}
 \usepackage{pgfplots}
@@ -49,11 +50,11 @@
 \node[font=\scriptsize, purple!45!black, anchor=north, align=center]
     at (axis cs:10.25, 4.45) {cosine anneal tail\\(ep8--12, not yet run)};
 
-% --- 当前进度竖虚线 (ep5) ---
+% --- 当前进度竖虚线 (ep6) ---
 \draw[densely dashed, gray!45!orange, line width=0.4pt]
-    (axis cs:5, 3.35) -- (axis cs:5, 4.5);
+    (axis cs:6, 3.35) -- (axis cs:6, 4.5);
 \node[font=\scriptsize, orange!55!black, anchor=south west, rotate=90]
-    at (axis cs:5, 3.55) {\,now: ep5/12};
+    at (axis cs:6, 3.55) {\,now: ep6/12};
 
 % --- 目标线 3.44 (Sparse Transformer) ---
 \draw[densely dashed, purple!45, line width=0.5pt]
@@ -61,7 +62,7 @@
 \node[font=\scriptsize, purple!55!black, anchor=west]
     at (axis cs:0.2, 3.40) {target 3.44 (Sparse Trans.)};
 
-% --- train_bpd 曲线 (5 点) ---
+% --- train_bpd 曲线 (6 点) ---
 \addplot+[
     mark=square*, mark size=1.3pt, line width=0.9pt, color=blue!70!black,
 ] coordinates {
@@ -70,10 +71,11 @@
     (3, 3.5127)
     (4, 3.4825)
     (5, 3.4654)
+    (6, 3.4545)
 };
 \addlegendentry{train bpd}
 
-% --- val_bpd 曲线 (5 点) ---
+% --- val_bpd 曲线 (6 点) ---
 \addplot+[
     mark=*, mark size=1.3pt, line width=0.9pt, color=orange!80!black,
 ] coordinates {
@@ -82,12 +84,13 @@
     (3, 3.5523)
     (4, 3.5358)
     (5, 3.5217)
+    (6, 3.5147)
 };
 \addlegendentry{val bpd}
 
-% --- ep5 末点标注 ---
+% --- ep6 末点标注 ---
 \node[font=\scriptsize, orange!80!black, anchor=west]
-    at (axis cs:5.15, 3.5217) {ep5 val \textbf{3.5217}};
+    at (axis cs:6.15, 3.5147) {ep6 val \textbf{3.5147}};
 
 \end{axis}
 
@@ -99,7 +102,7 @@
 % --- 副标题（配置） ---
 \node[font=\scriptsize, gray!50!black, anchor=north, yshift=-2pt]
     at (current bounding box.south)
-    {\textit{N=32/d=448 $\cdot$ 12ep cosine $\cdot$ warmup 1ep $\cdot$ effective batch 288 $\cdot$ 4-GPU DDP $\cdot$ as of ep5/12 (2026-06-01)}};
+    {\textit{N=32/d=448 $\cdot$ 12ep cosine $\cdot$ warmup 1ep $\cdot$ effective batch 288 $\cdot$ 4-GPU DDP $\cdot$ as of ep6/12 (2026-06-02)}};
 
 \end{tikzpicture}
 \end{document}
