@@ -35,7 +35,9 @@ future.md
 *.docx
 *.pdf
 *.txt
+!requirements.txt
+!requirements-dev.txt
 *.log
-
+reading_plan.md
 # 论文草稿（local-only，markdown 草稿 → 复制到 Word）
 thesis/

@@ -11,6 +11,7 @@ Usage:
 import os
 import sys
 import csv
+import json
 import argparse
 import yaml
 import math
@@ -204,6 +205,72 @@ def _atomic_save(obj, path: str):
     tmp_path = path + ".tmp"
     torch.save(obj, tmp_path)
     os.replace(tmp_path, path)
+
+
+def _json_ready(obj):
+    """Convert common training objects into JSON-serializable values."""
+    if isinstance(obj, dict):
+        return {str(k): _json_ready(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_ready(v) for v in obj]
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    if isinstance(obj, (np.floating,)):
+        return float(obj)
+    if isinstance(obj, torch.Tensor):
+        if obj.numel() == 1:
+            return _json_ready(obj.detach().cpu().item())
+        return _json_ready(obj.detach().cpu().tolist())
+    if isinstance(obj, (str, int, float, bool)) or obj is None:
+        return obj
+    return str(obj)
+
+
+def _atomic_save_json(obj, path: str):
+    """Atomically write sidecar JSON metadata next to checkpoint files."""
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(_json_ready(obj), f, ensure_ascii=False, indent=2, sort_keys=True)
+        f.write("\n")
+    os.replace(tmp_path, path)
+
+
+def _checkpoint_meta(config: dict, args, epoch: int, kind: str, seed: int,
+                     metrics: dict, extra: dict = None) -> dict:
+    """Small, human-readable metadata sidecar for checkpoint provenance."""
+    mcfg = config.get("model", {})
+    tcfg = config.get("train", {})
+    return {
+        "kind": kind,
+        "epoch": epoch,
+        "exp_name": config.get("exp_name"),
+        "config_path": getattr(args, "config", None),
+        "resume_path": getattr(args, "resume", None),
+        "seed": seed,
+        "model": {
+            "type": mcfg.get("type", "igpt"),
+            "image_size": mcfg.get("image_size"),
+            "in_channels": mcfg.get("in_channels"),
+            "vocab_size": mcfg.get("vocab_size"),
+            "d_model": mcfg.get("d_model"),
+            "N": mcfg.get("N"),
+            "h": mcfg.get("h"),
+            "coarse_in_channels": mcfg.get("coarse_in_channels"),
+            "coarse_d_model": mcfg.get("coarse_d_model"),
+            "coarse_N": mcfg.get("coarse_N"),
+            "pool_factor": mcfg.get("pool_factor"),
+        },
+        "train": {
+            "amp_dtype": tcfg.get("amp_dtype", "fp16"),
+            "batch_size": tcfg.get("batch_size"),
+            "grad_accum_steps": tcfg.get("grad_accum_steps", 1),
+            "lr": tcfg.get("lr"),
+            "epochs": tcfg.get("epochs"),
+            "lr_schedule": tcfg.get("lr_schedule", "cosine"),
+        },
+        "metrics": metrics,
+        "extra": extra or {},
+    }
 
 
 def train_one_epoch(model, loader, optimizers, scaler, device,
@@ -838,6 +905,23 @@ def main():
                 if bpd_avg < best_bpd:
                     best_bpd = bpd_avg
                     _atomic_save(raw_model.state_dict(), os.path.join(checkpoint_dir, 'best.pth'))
+                    current_lr = optimizers[0].param_groups[0]['lr']
+                    _atomic_save_json(
+                        _checkpoint_meta(
+                            config, args, epoch, "best", seed,
+                            metrics={
+                                "train_loss": avg_loss,
+                                "train_bpd": avg_bpd,
+                                "val_loss": loss_avg,
+                                "val_bpd": bpd_avg,
+                                "val_bpd_std": std_bpd,
+                                "best_bpd": best_bpd,
+                                "lr": current_lr,
+                            },
+                            extra={"checkpoint": "best.pth"},
+                        ),
+                        os.path.join(checkpoint_dir, 'best.meta.json'),
+                    )
 
         if scheduler is not None:
             scheduler.step()
@@ -914,6 +998,18 @@ def main():
             if rank == 0:
                 print(f"EMA Validation: Loss {loss_avg:.4f} | bits/dim {bpd_avg:.4f} ± {std_bpd:.4f}")
                 _atomic_save(raw_model.state_dict(), os.path.join(checkpoint_dir, 'ema.pth'))
+                _atomic_save_json(
+                    _checkpoint_meta(
+                        config, args, total_epochs, "ema", seed,
+                        metrics={
+                            "val_loss": loss_avg,
+                            "val_bpd": bpd_avg,
+                            "val_bpd_std": std_bpd,
+                        },
+                        extra={"checkpoint": "ema.pth", "ema_decay": ema_decay},
+                    ),
+                    os.path.join(checkpoint_dir, 'ema.meta.json'),
+                )
                 if writer:
                     writer.add_scalar('val/ema_bpd', bpd_avg, total_epochs)
             # 还原训练末权重，给 SWA finalize 干净的输入
@@ -947,6 +1043,18 @@ def main():
             if rank == 0:
                 print(f"SWA Validation: Loss {loss_avg:.4f} | bits/dim {bpd_avg:.4f} ± {std_bpd:.4f}")
                 _atomic_save(raw_model.state_dict(), os.path.join(checkpoint_dir, 'swa.pth'))
+                _atomic_save_json(
+                    _checkpoint_meta(
+                        config, args, total_epochs, "swa", seed,
+                        metrics={
+                            "val_loss": loss_avg,
+                            "val_bpd": bpd_avg,
+                            "val_bpd_std": std_bpd,
+                        },
+                        extra={"checkpoint": "swa.pth", "swa_n": swa_n},
+                    ),
+                    os.path.join(checkpoint_dir, 'swa.meta.json'),
+                )
                 if writer:
                     writer.add_scalar('val/swa_bpd', bpd_avg, total_epochs)
         elif rank == 0:

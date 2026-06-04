@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mdl-deep-image-compression"
+version = "0.1.0"
+description = "RGB-bit-exact autoregressive image compression experiments based on MDL."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [
+  { name = "ccc" },
+]
+dependencies = [
+  "numpy>=1.24",
+  "Pillow>=10",
+  "PyYAML>=6",
+  "tensorboard>=2.14",
+  "torch>=2.1",
+  "torchvision>=0.16",
+  "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+cuda = [
+  "triton>=2.1",
+]
+demo = [
+  "fastapi>=0.110",
+  "matplotlib>=3.8",
+  "python-multipart>=0.0.9",
+  "uvicorn[standard]>=0.27",
+]
+imagenet-prep = [
+  "pyarrow>=14",
+]
+dev = [
+  "pytest>=8",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+namespaces = true

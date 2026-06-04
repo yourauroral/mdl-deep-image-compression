@@ -33,12 +33,18 @@ CC-iGPT v2 R-only **超越 PixelSNAIL 380M (2.85)、逼近 Sparse Transformer 59
 ## 快速开始
 
 ```bash
-pip install torch torchvision pyyaml numpy pillow tensorboard triton
+pip install -e ".[dev]"
+# AutoDL / CUDA kernel profiling:
+pip install -e ".[cuda,dev]"
+# Demo / ImageNet64 parquet preprocessing:
+pip install -e ".[demo,imagenet-prep]"
 ```
 
 ```bash
 # 单元测试（WSL CPU 即可）
-pytest tests/ -v
+pytest -m cpu -v
+# AutoDL CUDA kernel tests:
+pytest -m cuda -v
 
 # 训练 — 多卡 DDP (按 GPU 数调整 nproc_per_node)
 torchrun --nproc_per_node=2 scripts/train.py --config configs/igpt_cifar10_s_rgb.yaml
@@ -58,6 +64,10 @@ experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/ema.pth --tta_hflip
 # 评测 — CC-iGPT 单 ckpt (含 coarse / fine CE 分解 + bpd_total)
 python scripts/evaluate.py --config configs/ccigpt_cifar10_s_rgb_ronly_v2.yaml \
     --checkpoint experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/best.pth --tta_hflip
+# 单 ckpt per-image 统计（std / stderr / bootstrap CI；可导出 JSON）
+python scripts/evaluate.py --config configs/ccigpt_cifar10_s_rgb_ronly_v2.yaml \
+    --checkpoint experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/best.pth \
+    --tta_hflip --per_image_stats --per_image_json experiments/per_image_bpd.json
 
 # Linear Probe (各层表征分类准确率 — CC-iGPT v2 fine + α·coarse_ctx，32 层 L19 best 79.33%)
 python scripts/linear_probe.py --config configs/ccigpt_cifar10_s_rgb_ronly_v2.yaml \
@@ -92,10 +102,13 @@ python scripts/verify_lossless.py --inspect experiments/bitstreams/img0.bin   # 
 # Kernel Profiling
 python scripts/profile_kernels.py --roofline
 
+# ImageNet64 传统 codec baseline（PNG/WebP lossless bpd，默认抽样 2000 张）
+python scripts/traditional_codec_bpd.py /root/autodl-tmp/imagenet64_png/val.npy --limit 2000
+
 # Demo 前端 (9 面板可视化：①上传→bpd 热力图 / ②baseline 对比 / ③Linear Probe / ④Kernel 性能 / ⑤coarse+fine 双尺度 / ⑥OOD typicality / ⑦跨数据集 bpd / ⑧图像补全 AR inpainting / ⑨交互式无损 codec 图像⇄.bin 真实可解性验证)
 # 下游 Panel 7/8 数据由 AutoDL 跑 `bash downstream/run_downstream.sh` 带 --json_out 回填 demo/data/{ood,transfer}.json；Panel 9 实时调 /api/complete
 # ckpt 优先级: v2 (2.8296 主表) → v1 历史 (2.9035)
-pip install fastapi uvicorn python-multipart
+pip install -e ".[demo]"
 
 # 本地 / WSL: localhost 默认 8000
 uvicorn demo.server:app --reload --port 8000      # http://localhost:8000
@@ -117,6 +130,8 @@ NCCL_P2P_DISABLE=1 NCCL_IB_DISABLE=1 \
 nohup torchrun --nproc_per_node=2 scripts/train.py \
     --config configs/ccigpt_cifar10_s_rgb_ronly_v2.yaml --export_csv \
   > experiments/ccigpt_cifar10_s_rgb_ronly_v2_train.log 2>&1 &
+# 新启动的训练会在 checkpoints/ 旁路写 best.meta.json / ema.meta.json / swa.meta.json，
+# 记录 epoch、config、seed、bpd/std 等 provenance；不改变 .pth 格式或 --resume 行为。
 
 # AutoDL → 本地: 回收 checkpoint
 scp -P <port> root@<autodl-host>:/root/autodl-tmp/mdl-deep-image-compression/experiments/<exp>/checkpoints/best.pth \
@@ -285,8 +300,9 @@ src/mdlic/
 ├── ops/       7 个 Triton kernels + 1 反面案例 (fused_linear_ce)
 ├── data/      imagenet64_npy.py (mmap-backed Dataset)
 └── utils/     seed, bpd, clean_state_dict
-scripts/       train.py, evaluate.py (含 --ensemble / --dataset_override / --json_out), linear_probe.py (含 --probe_dataset transfer),
-               ood_detect.py (--json_out), complete_image.py (--scale), verify_lossless.py (--dump_dir 落盘 .bin / --inspect 只读解析), dryrun_forward.py, profile_kernels.py, prepare_imagenet64_png.py
+scripts/       train.py (checkpoint sidecar *.meta.json), evaluate.py (含 --ensemble / --dataset_override / --json_out / --per_image_stats), linear_probe.py (含 --probe_dataset transfer),
+               ood_detect.py (--json_out), complete_image.py (--scale), verify_lossless.py (--dump_dir 落盘 .bin / --inspect 只读解析), dryrun_forward.py, profile_kernels.py,
+               traditional_codec_bpd.py, prepare_imagenet64_png.py
 configs/       igpt_cifar10_s_rgb,
                ccigpt_cifar10_s_rgb_ronly      (R-only v1 历史主表 2.9035 bpd, 100ep, 已被 v2 替代),
                ccigpt_cifar10_s_rgb_ronly_v2   (深窄 N=32/d=448 + 200ep, 当前主表 ensemble+TTA 2.8296 bpd)

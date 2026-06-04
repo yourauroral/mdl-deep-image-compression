@@ -1,0 +1,6 @@
+-r requirements.txt
+pytest>=8
+
+# Keep optional dependencies explicit so CPU-only WSL checks do not try to
+# install CUDA/Triton wheels accidentally.
+#   pip install -e ".[cuda,demo,imagenet-prep,dev]"

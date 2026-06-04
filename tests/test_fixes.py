@@ -133,6 +133,31 @@ def test_forward_yields_logits():
     assert out["logits"].shape == (2, 191, 256)
 
 
+def test_per_image_bpd_matches_batch_igpt():
+    """per-image bpd 均值应与现有 IGPT batch scalar bpd 同口径。"""
+    from scripts.evaluate import _per_image_bpd
+
+    model = _build_tiny_igpt()
+    model.eval()
+    x = torch.rand(3, 3, 8, 8)
+    with torch.no_grad():
+        out = model(x)
+        per_image = _per_image_bpd(model, x, out)
+    expected = out["ce_loss"] / math.log(2.0)
+    assert torch.allclose(per_image.mean(), expected, atol=1e-6, rtol=1e-6)
+
+
+def test_per_image_summary_bootstrap_optional():
+    """bootstrap_samples=0 时只报确定性汇总，便于快速评测。"""
+    from scripts.evaluate import _summarize_per_image_bpd
+
+    summary = _summarize_per_image_bpd([1.0, 2.0, 3.0], bootstrap_samples=0)
+    assert summary["n"] == 3
+    assert summary["mean"] == pytest.approx(2.0)
+    assert summary["std"] == pytest.approx(1.0)
+    assert "ci95_bootstrap" not in summary
+
+
 # ──────────────────────────────────────────────────────────────
 # Fix #3: grad_accum 末尾 flush
 # ──────────────────────────────────────────────────────────────

@@ -86,6 +86,17 @@ def test_bpd_formula_consistency(small_ccigpt, device):
     assert abs(out["bpd"].item() - expected) < 1e-5
 
 
+def test_per_image_bpd_matches_batch_ccigpt(small_ccigpt, device):
+    """per-image bpd 均值应与 CC-iGPT coarse+fine 标量 bpd 同口径。"""
+    from scripts.evaluate import _per_image_bpd
+
+    x = torch.rand(2, 3, 32, 32, device=device)
+    with torch.no_grad():
+        out = small_ccigpt(x)
+        per_image = _per_image_bpd(small_ccigpt, x, out)
+    assert torch.allclose(per_image.mean(), out["bpd"], atol=1e-5, rtol=1e-5)
+
+
 def test_disable_ctx_equivalent_to_vanilla_igpt(device):
     """关闭 coarse_ctx (传 None) 时 fine 必须等价于 vanilla iGPT，CE 差 < 1e-5。"""
     torch.manual_seed(42)

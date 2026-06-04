@@ -78,7 +78,8 @@ ACADEMIC_BASELINES = {
 
 
 @torch.no_grad()
-def evaluate_model(model, loader, device, amp_dtype=None, tta_hflip: bool = False):
+def evaluate_model(model, loader, device, amp_dtype=None, tta_hflip: bool = False,
+                   collect_per_image: bool = False):
     """
     评估模型在数据集上的 bits/dim (bpd)。
 
@@ -86,7 +87,8 @@ def evaluate_model(model, loader, device, amp_dtype=None, tta_hflip: bool = Fals
       bpd_mean: float — 平均 bpd
       bpd_std:  float — bpd 标准差（batch-level 加权，与 train.py:validate() 同口径）
       bpd_list: list[float] — 每个 batch 的 bpd（保留供 caller 自定义聚合）
-      extras:   dict — 可选的额外字段（CC-iGPT 时含 ce_coarse / ce_fine / ctx_alpha）
+      extras:   dict — 可选的额外字段（CC-iGPT 时含 ce_coarse / ce_fine / ctx_alpha；
+                collect_per_image=True 时含 per_image_bpd）
 
     TTA (Test-Time Augmentation):
       tta_hflip=True 时对每张图同时跑 x 与 hflip(x) 两次 forward，取 bpd 均值。
@@ -97,6 +99,7 @@ def evaluate_model(model, loader, device, amp_dtype=None, tta_hflip: bool = Fals
     bpd_per_batch = []
     bpd_weighted_sum = 0.0
     bpd_sq_weighted_sum = 0.0
+    per_image_bpd = []
     n_total = 0
     use_amp = amp_dtype is not None and device.type == 'cuda'
 
@@ -117,6 +120,13 @@ def evaluate_model(model, loader, device, amp_dtype=None, tta_hflip: bool = Fals
             out = model(x)
             if tta_hflip:
                 out_flip = model(torch.flip(x, dims=[-1]))
+            if collect_per_image:
+                bpd_img = _per_image_bpd(model, x, out)
+                if tta_hflip:
+                    bpd_img_flip = _per_image_bpd(
+                        model, torch.flip(x, dims=[-1]), out_flip
+                    )
+                    bpd_img = (bpd_img + bpd_img_flip) * 0.5
 
         if "bpd" in out and out["bpd"] is not None:
             bpd = out["bpd"]
@@ -132,6 +142,8 @@ def evaluate_model(model, loader, device, amp_dtype=None, tta_hflip: bool = Fals
         bpd_weighted_sum += bpd_val * B
         bpd_sq_weighted_sum += (bpd_val ** 2) * B
         n_total += B
+        if collect_per_image:
+            per_image_bpd.extend(bpd_img.detach().cpu().tolist())
 
         if "ce_loss_coarse" in out and out["ce_loss_coarse"] is not None:
             is_ccigpt = True
@@ -156,6 +168,8 @@ def evaluate_model(model, loader, device, amp_dtype=None, tta_hflip: bool = Fals
         extras["ce_coarse"] = ce_c_sum / n_total
         extras["ce_fine"] = ce_f_sum / n_total
         extras["ctx_alpha"] = alpha_sum / n_total
+    if collect_per_image:
+        extras["per_image_bpd"] = per_image_bpd
     return bpd_mean, bpd_std, bpd_per_batch, extras
 
 
@@ -170,6 +184,89 @@ def _tokenize_targets(x: torch.Tensor) -> torch.Tensor:
     xt = (xt * 255).round().long()
     tokens = xt.permute(0, 2, 3, 1).reshape(x.size(0), -1)
     return tokens[:, 1:]
+
+
+def _ce_per_image_from_logits(logits: torch.Tensor,
+                              targets: torch.Tensor) -> torch.Tensor:
+    """Return mean NTP cross-entropy per image, matching IGPT.forward."""
+    B = targets.size(0)
+    V = logits.size(-1)
+    ce_tok = F.cross_entropy(
+        logits.float().reshape(-1, V),
+        targets.reshape(-1),
+        reduction="none",
+    )
+    return ce_tok.view(B, -1).mean(dim=1)
+
+
+def _ccigpt_coarse_forward(model, x: torch.Tensor):
+    """Recompute CC-iGPT coarse branch for per-image bpd diagnostics."""
+    raw_model = model.module if hasattr(model, "module") else model
+    x_fp32 = x.clamp(0, 1).to(torch.float32)
+    x_c_full = F.adaptive_avg_pool2d(x_fp32, raw_model.coarse_size)
+    if raw_model.coarse.in_channels < raw_model.in_channels:
+        x_c = x_c_full[:, :raw_model.coarse.in_channels]
+    else:
+        x_c = x_c_full
+    return raw_model.coarse(x_c, z_loss_weight=0.0), x_c
+
+
+def _per_image_bpd(model, x: torch.Tensor, out: dict) -> torch.Tensor:
+    """Compute per-image bpd from logits without changing default metrics.
+
+    For vanilla iGPT this is CE_i / ln2. For CC-iGPT this mirrors the existing
+    scalar formula `(CE_c*N_c + CE_f*N_f) / ln2 / N_f`, but with CE_c/CE_f
+    measured per image.
+    """
+    raw_model = model.module if hasattr(model, "module") else model
+    target_f = _tokenize_targets(x).to(out["logits"].device)
+    ce_f = _ce_per_image_from_logits(out["logits"], target_f)
+
+    if "ce_loss_coarse" not in out or out["ce_loss_coarse"] is None:
+        return ce_f / math.log(2.0)
+
+    out_c, x_c = _ccigpt_coarse_forward(raw_model, x)
+    target_c = _tokenize_targets(x_c).to(out_c["logits"].device)
+    ce_c = _ce_per_image_from_logits(out_c["logits"], target_c)
+    N_c, N_f = raw_model.coarse.seq_len, raw_model.fine.seq_len
+    return (ce_c * N_c + ce_f * N_f) / math.log(2.0) / N_f
+
+
+def _summarize_per_image_bpd(values, bootstrap_samples: int = 1000,
+                             seed: int = 0) -> dict:
+    """Summarize per-image bpd and optionally estimate a bootstrap CI."""
+    arr = np.asarray(values, dtype=np.float64)
+    if arr.size == 0:
+        raise ValueError("per-image bpd 列表为空")
+
+    ddof = 1 if arr.size > 1 else 0
+    summary = {
+        "n": int(arr.size),
+        "mean": float(arr.mean()),
+        "std": float(arr.std(ddof=ddof)),
+        "stderr": float(arr.std(ddof=ddof) / math.sqrt(arr.size)),
+    }
+    if arr.size > 1 and bootstrap_samples > 0:
+        rng = np.random.default_rng(seed)
+        means = np.empty(int(bootstrap_samples), dtype=np.float64)
+        for i in range(int(bootstrap_samples)):
+            idx = rng.integers(0, arr.size, size=arr.size)
+            means[i] = arr[idx].mean()
+        lo, hi = np.percentile(means, [2.5, 97.5])
+        summary["ci95_bootstrap"] = [float(lo), float(hi)]
+        summary["bootstrap_samples"] = int(bootstrap_samples)
+    return summary
+
+
+def _write_per_image_json(path: str, values, summary: dict) -> None:
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    payload = {
+        "summary": summary,
+        "per_image_bpd": [round(float(v), 6) for v in values],
+    }
+    with open(path, "w") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    print(f"[per_image_json] wrote {len(values)} rows → {path}")
 
 
 @torch.no_grad()
@@ -470,21 +567,42 @@ def cmd_single(args, config, device):
 
     # 基本 bits/dim 评测
     print(f"\n评测中... (AMP: {amp_dtype_str}, TTA hflip: {args.tta_hflip})")
-    bpd_mean, bpd_std, _, extras = evaluate_model(model, test_loader, device,
-                                                    amp_dtype=amp_dtype,
-                                                    tta_hflip=args.tta_hflip)
+    collect_per_image = bool(args.per_image_stats or args.per_image_json)
+    bpd_mean, bpd_std, _, extras = evaluate_model(
+        model, test_loader, device,
+        amp_dtype=amp_dtype,
+        tta_hflip=args.tta_hflip,
+        collect_per_image=collect_per_image,
+    )
     print(f"{model_type.upper()} bits/dim: {bpd_mean:.4f} ± {bpd_std:.4f}")
+    if collect_per_image:
+        per_image = extras["per_image_bpd"]
+        summary = _summarize_per_image_bpd(
+            per_image,
+            bootstrap_samples=args.bootstrap_samples,
+            seed=args.bootstrap_seed,
+        )
+        ci = summary.get("ci95_bootstrap")
+        ci_str = f", 95% bootstrap CI [{ci[0]:.4f}, {ci[1]:.4f}]" if ci else ""
+        print(
+            "  per-image: "
+            f"mean={summary['mean']:.4f}, std={summary['std']:.4f}, "
+            f"stderr={summary['stderr']:.5f}{ci_str}"
+        )
+        if args.per_image_json:
+            _write_per_image_json(args.per_image_json, per_image, summary)
     if extras:
         # CC-iGPT 多输出 CE_c / CE_f / α，便于诊断 fine 弱 vs coarse overhead 过大
-        ce_c = extras["ce_coarse"]
-        ce_f = extras["ce_fine"]
-        N_c = model.coarse.seq_len
-        N_f = model.fine.seq_len
-        bpd_c_share = ce_c * N_c / math.log(2.0) / N_f
-        bpd_f_share = ce_f * N_f / math.log(2.0) / N_f
-        print(f"  CE_coarse = {ce_c:.4f}  → bpd_share = {bpd_c_share:.4f} ({100*bpd_c_share/bpd_mean:.1f}%)")
-        print(f"  CE_fine   = {ce_f:.4f}  → bpd_share = {bpd_f_share:.4f} ({100*bpd_f_share/bpd_mean:.1f}%)")
-        print(f"  ctx_alpha = {extras['ctx_alpha']:.4f}")
+        if "ce_coarse" in extras:
+            ce_c = extras["ce_coarse"]
+            ce_f = extras["ce_fine"]
+            N_c = model.coarse.seq_len
+            N_f = model.fine.seq_len
+            bpd_c_share = ce_c * N_c / math.log(2.0) / N_f
+            bpd_f_share = ce_f * N_f / math.log(2.0) / N_f
+            print(f"  CE_coarse = {ce_c:.4f}  → bpd_share = {bpd_c_share:.4f} ({100*bpd_c_share/bpd_mean:.1f}%)")
+            print(f"  CE_fine   = {ce_f:.4f}  → bpd_share = {bpd_f_share:.4f} ({100*bpd_f_share/bpd_mean:.1f}%)")
+            print(f"  ctx_alpha = {extras['ctx_alpha']:.4f}")
 
     # 传统方法（可选）
     traditional_results = None
@@ -680,12 +798,23 @@ experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/ema.pth \\
                              'demo/data/transfer.json），供前端 /api/transfer 面板用。'
                              '按当前评测的数据集（override 或 config 默认）作 key 累积，'
                              '多次跑不同 --dataset_override 共同填满一张表。')
+    parser.add_argument('--per_image_stats', action='store_true',
+                        help='单 checkpoint 模式下额外计算 per-image bpd/std/stderr/CI；'
+                             '默认关闭以保持评测速度和旧输出口径。')
+    parser.add_argument('--per_image_json', type=str, default=None,
+                        help='导出 per-image bpd JSON；会隐式启用 --per_image_stats。')
+    parser.add_argument('--bootstrap_samples', type=int, default=1000,
+                        help='per-image 均值 bootstrap CI 抽样次数；设 0 可关闭 CI。')
+    parser.add_argument('--bootstrap_seed', type=int, default=0,
+                        help='per-image bootstrap 随机种子。')
     args = parser.parse_args()
 
     if args.ensemble and args.checkpoint:
         parser.error("--ensemble 与 --checkpoint 互斥；ensemble 路径在 --ensemble 内逗号分隔")
     if args.ensemble and args.swa:
         parser.error("--ensemble 与 --swa 互斥；ensemble 已包含多档 ckpt 评测")
+    if (args.ensemble or args.swa) and (args.per_image_stats or args.per_image_json):
+        parser.error("--per_image_stats/--per_image_json 当前仅支持单 --checkpoint 模式")
 
     with open(args.config, 'r') as f:
         config = yaml.safe_load(f)

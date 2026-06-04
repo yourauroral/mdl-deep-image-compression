@@ -1,0 +1,12 @@
+numpy>=1.24
+Pillow>=10
+PyYAML>=6
+tensorboard>=2.14
+torch>=2.1
+torchvision>=0.16
+tqdm>=4.66
+
+# Optional runtime extras:
+#   pip install -e ".[cuda]"          # Triton kernels on CUDA
+#   pip install -e ".[demo]"          # FastAPI demo
+#   pip install -e ".[imagenet-prep]" # ImageNet64 parquet preprocessing
