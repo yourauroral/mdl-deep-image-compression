@@ -8,6 +8,18 @@
 - **Phase B (v1 历史主表完成)**: CC-iGPT（Coarse-Conditioned iGPT）双尺度条件自回归 — 浅层 coarse iGPT (R-only 配置 8×8×1, 64 token, ~2% overhead) 独立编码进 bitstream，UP + 量化后通过 additive embedding（可学习标量 α）注入 fine iGPT (32×32×3, 3072 token)。CIFAR-10 RGB-bit-exact R-only v1 历史主表 **2.9035 bpd**（softmax head, 100ep + 全套正则 + TTA hflip，已被 v2 替代）
 - **Phase C (完成)**: Demo 前端可视化系统 (FastAPI + Chart.js, 7 个展示面板，含交互式无损 codec 图像⇄.bin 真实可解性验证 + 图像补全 AR inpainting 实时面板)
 - **Phase D (完成, 2026-05-27)**: 深窄 + ensemble — fine N=24/d=512 → N=32/d=448 (82.95M)、epoch 100→200、`min_lr_ratio=0.05` + SWA last 31 ckpts (start ep170) + EMA 0.9998；`evaluate.py --ensemble` 多 ckpt probability-mixture ensemble (best+SWA+EMA)。**主表 ensemble + TTA hflip = 2.8296 ± 0.0854**（超越 PixelSNAIL 380M 2.85，逼近 Sparse Transformer 59M 2.80）。详见 [future.md §4](future.md)
+- **ImageNet64 benchmark (进行中, 本地日志快照 2026-06-05)**: `configs/ccigpt_imagenet64_v1.yaml` 已启训 12ep 计划；本地日志记录到 ep10 step 4550/26690，ep9 validation = **3.4931 ± 0.3213 bpd**。最终 ep12 best / SWA / EMA 评测待 AutoDL 训练完成后回收。
+
+## 当前进度
+
+| 模块 | 状态 | 备注 |
+|---|---|---|
+| CIFAR-10 v2 主表 | 完成 | ensemble(best+SWA+EMA) + TTA hflip = **2.8296 ± 0.0854 bpd** |
+| Linear probe | 完成 | CC-iGPT v2 L19 best = **79.33%**；IN64→CIFAR transfer probe 入口保留 |
+| Demo 前端 | 完成 | 7 面板；保留 upload / metrics / probe / kernels / scales / completion / codec |
+| 下游任务 | 精简完成 | 保留 `linear_probe.py`、`complete_image.py`、`verify_lossless.py`；旧静态 JSON 下游面板已移除 |
+| ImageNet64 | 训练中 | 目标 < 3.44 bpd；以 AutoDL 当前日志为准，本 README 只记录本地同步到的快照 |
+| 本地验证 | 通过 | 最近一次清理后：`pytest -m cpu -q` 58 passed；`compileall` 与 `git diff --check` 通过 |
 
 ## Baseline 对比
 
@@ -32,100 +44,170 @@ CC-iGPT v2 R-only **超越 PixelSNAIL 380M (2.85)、逼近 Sparse Transformer 59
 
 ## 快速开始
 
+### 安装
+
 ```bash
+# WSL / 本地开发
 pip install -e ".[dev]"
-# AutoDL / CUDA kernel profiling:
+
+# AutoDL 训练、CUDA kernel 测试与 profiling
 pip install -e ".[cuda,dev]"
-# Demo / ImageNet64 parquet preprocessing:
+
+# Demo 与 ImageNet64 预处理工具
 pip install -e ".[demo,imagenet-prep]"
 ```
 
+### 本地验证
+
 ```bash
-# 单元测试（WSL CPU 即可）
-pytest -m cpu -v
-# AutoDL CUDA kernel tests:
-pytest -m cuda -v
-
-# 训练 — 多卡 DDP (按 GPU 数调整 nproc_per_node)
-torchrun --nproc_per_node=2 scripts/train.py --config configs/igpt_cifar10_s_rgb.yaml
-
-# CC-iGPT RGB-bit-exact v1 (R-only 历史主表 — softmax head, 2.9035 bpd, 100ep, 已被 v2 替代)
-torchrun --nproc_per_node=2 scripts/train.py --config configs/ccigpt_cifar10_s_rgb_ronly.yaml
-
-# CC-iGPT v2 — 深窄 N=32/d=448 + 200ep (当前主表 ensemble+TTA = 2.8296, 详见 future.md §4)
-torchrun --nproc_per_node=2 scripts/train.py --config configs/ccigpt_cifar10_s_rgb_ronly_v2.yaml
-
-# 评测 — CC-iGPT v2 主表数字 (ensemble best+SWA+EMA + TTA hflip)
-python scripts/evaluate.py --config configs/ccigpt_cifar10_s_rgb_ronly_v2.yaml \
-    --ensemble experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/best.pth,\
-experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/swa.pth,\
-experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/ema.pth --tta_hflip
-
-# 评测 — CC-iGPT 单 ckpt (含 coarse / fine CE 分解 + bpd_total)
-python scripts/evaluate.py --config configs/ccigpt_cifar10_s_rgb_ronly_v2.yaml \
-    --checkpoint experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/best.pth --tta_hflip
-# 单 ckpt per-image 统计（std / stderr / bootstrap CI；可导出 JSON）
-python scripts/evaluate.py --config configs/ccigpt_cifar10_s_rgb_ronly_v2.yaml \
-    --checkpoint experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/best.pth \
-    --tta_hflip --per_image_stats --per_image_json experiments/per_image_bpd.json
-
-# Linear Probe (各层表征分类准确率 — CC-iGPT v2 fine + α·coarse_ctx，32 层 L19 best 79.33%)
-python scripts/linear_probe.py --config configs/ccigpt_cifar10_s_rgb_ronly_v2.yaml \
-    --checkpoint experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/best.pth --layers all
-
-# ── 下游任务（论文 §5 MDL 主线；批量执行见 downstream/runbook.md）──
-# 一键跑全套（self_test 预检 + 分步计时 + 失败隔离）
-bash downstream/run_downstream.sh
-
-# 图像补全 (AR inpainting；存 原图|已知上半|补全 网格 PNG)
-python scripts/complete_image.py --config configs/ccigpt_cifar10_s_rgb_ronly_v2.yaml \
-    --checkpoint experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/best.pth \
-    --num_images 4 --keep_frac 0.5 --out experiments/completion_grid.png
-
-# 真实可解性 roundtrip (算术编解码，断言逐像素 bit-identical)
-python scripts/verify_lossless.py --config configs/ccigpt_cifar10_s_rgb_ronly_v2.yaml \
-    --checkpoint experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/best.pth --num_images 2
-python scripts/verify_lossless.py --self_test   # 仅 coder roundtrip，无需 GPU/ckpt
-# bitstream 落盘为自包含 MDLC .bin（图像→bits→文件→bits→图像 全链路），再只读解析
-python scripts/verify_lossless.py --config <yaml> --checkpoint <best.pth> --num_images 2 --dump_dir experiments/bitstreams
-python scripts/verify_lossless.py --inspect experiments/bitstreams/img0.bin   # 只读：结构/hex/码长/bpd，无需 GPU/ckpt
-
-# Kernel Profiling
-python scripts/profile_kernels.py --roofline
-
-# ImageNet64 传统 codec baseline（PNG/WebP lossless bpd，默认抽样 2000 张）
-python scripts/traditional_codec_bpd.py /root/autodl-tmp/imagenet64_png/val.npy --limit 2000
-
-# Demo 前端 (7 面板可视化：①上传→bpd 热力图 / ②baseline 对比 / ③Linear Probe / ④Kernel 性能 / ⑤coarse+fine 双尺度 / ⑥图像补全 AR inpainting / ⑦交互式无损 codec 图像⇄.bin 真实可解性验证)
-# 补全面板实时调 /api/complete；codec 面板调 /api/{encode,inspect,decode}
-# ckpt 优先级: v2 (2.8296 主表) → v1 历史 (2.9035)
-pip install -e ".[demo]"
-
-# 本地 / WSL: localhost 默认 8000
-uvicorn demo.server:app --reload --port 8000      # http://localhost:8000
-
-# AutoDL: 仅 6006 / 6008 端口可被公网映射，必须 --host 0.0.0.0
-uvicorn demo.server:app --host 0.0.0.0 --port 6006 --reload   # 见实例详情公网映射地址
+python3 -m pytest -m cpu -q
+python3 scripts/verify_lossless.py --self_test
+python3 -m compileall -q scripts demo src/mdlic
+git diff --check
 ```
 
-### AutoDL 训练流程
-
-本地 WSL 只做开发和 dry-run，训练一律在 AutoDL GPU 实例上执行。
+CUDA 相关测试只在 AutoDL 上跑：
 
 ```bash
-# 本地: 推送
-git add -A && git commit -m "sync to autodl" && git push origin dev
+python3 -m pytest -m cuda -q
+python3 scripts/profile_kernels.py --roofline
+```
 
-# AutoDL: 训练 (多卡 DDP 必须设置 NCCL_P2P_DISABLE=1 NCCL_IB_DISABLE=1)
+### CIFAR-10 v2 评测
+
+```bash
+# 主表：probability-mixture ensemble + TTA hflip
+python3 scripts/evaluate.py --config configs/ccigpt_cifar10_s_rgb_ronly_v2.yaml \
+    --ensemble experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/best.pth,\
+experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/swa.pth,\
+experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/ema.pth \
+    --tta_hflip
+
+# 单 checkpoint 评测
+python3 scripts/evaluate.py --config configs/ccigpt_cifar10_s_rgb_ronly_v2.yaml \
+    --checkpoint experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/best.pth \
+    --tta_hflip
+
+# per-image bpd 统计与导出
+python3 scripts/evaluate.py --config configs/ccigpt_cifar10_s_rgb_ronly_v2.yaml \
+    --checkpoint experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/best.pth \
+    --tta_hflip --per_image_stats --per_image_json experiments/per_image_bpd.json
+```
+
+### Linear Probe
+
+```bash
+# CIFAR-10 native probe
+python3 scripts/linear_probe.py \
+    --config configs/ccigpt_cifar10_s_rgb_ronly_v2.yaml \
+    --checkpoint experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/best.pth \
+    --layers all
+
+# IN64 -> CIFAR-10 transfer probe（待 IN64 checkpoint；32->64 resize，勿与 native 32x32 横比）
+python3 scripts/linear_probe.py \
+    --config configs/ccigpt_imagenet64_v1.yaml \
+    --checkpoint experiments/ccigpt_imagenet64_v1/checkpoints/best.pth \
+    --probe_dataset cifar10 --probe_data_root datasets/ --layers all
+```
+
+### 保留下游任务
+
+`downstream/run_downstream.sh` 现在只调度 `pre / complete / verify`，不会写静态下游 JSON。
+
+```bash
+# 一键：pre -> complete -> verify
+bash downstream/run_downstream.sh
+
+# 单步
+bash downstream/run_downstream.sh pre
+bash downstream/run_downstream.sh complete
+bash downstream/run_downstream.sh verify
+
+# 图像补全
+python3 scripts/complete_image.py --config configs/ccigpt_cifar10_s_rgb_ronly_v2.yaml \
+    --checkpoint experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/best.pth \
+    --num_images 4 --keep_frac 0.5 --temperature 1.0 --top_k 100 \
+    --out experiments/completion_grid.png
+
+# 真实可解性 roundtrip
+python3 scripts/verify_lossless.py --config configs/ccigpt_cifar10_s_rgb_ronly_v2.yaml \
+    --checkpoint experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/best.pth \
+    --num_images 2
+
+# 落盘自包含 MDLC .bin，再只读解析
+python3 scripts/verify_lossless.py --config configs/ccigpt_cifar10_s_rgb_ronly_v2.yaml \
+    --checkpoint experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/best.pth \
+    --num_images 2 --dump_dir experiments/bitstreams
+python3 scripts/verify_lossless.py --inspect experiments/bitstreams/img0.bin
+```
+
+### ImageNet64
+
+```bash
+# 传统 codec baseline（PNG/WebP lossless bpd，默认抽样 2000 张）
+python3 scripts/traditional_codec_bpd.py /root/autodl-tmp/imagenet64_png/val.npy --limit 2000
+
+# 训练（AutoDL；按机器 GPU 数调整 --nproc_per_node）
 NCCL_P2P_DISABLE=1 NCCL_IB_DISABLE=1 \
-nohup torchrun --nproc_per_node=2 scripts/train.py \
-    --config configs/ccigpt_cifar10_s_rgb_ronly_v2.yaml --export_csv \
-  > experiments/ccigpt_cifar10_s_rgb_ronly_v2_train.log 2>&1 &
-# 新启动的训练会在 checkpoints/ 旁路写 best.meta.json / ema.meta.json / swa.meta.json，
-# 记录 epoch、config、seed、bpd/std 等 provenance；不改变 .pth 格式或 --resume 行为。
+nohup torchrun --nproc_per_node=<num_gpus> scripts/train.py \
+    --config configs/ccigpt_imagenet64_v1.yaml --export_csv \
+  > experiments/ccigpt_imagenet64_v1_train.log 2>&1 &
 
-# AutoDL → 本地: 回收 checkpoint
+# 查看进度
+tail -f experiments/ccigpt_imagenet64_v1_train.log
+
+# 从完整训练状态恢复
+NCCL_P2P_DISABLE=1 NCCL_IB_DISABLE=1 \
+torchrun --nproc_per_node=<num_gpus> scripts/train.py \
+    --config configs/ccigpt_imagenet64_v1.yaml --export_csv \
+    --resume experiments/ccigpt_imagenet64_v1/checkpoints/epoch_<N>.pth
+```
+
+### Demo 前端
+
+7 个面板：上传 bpd 热力图、baseline 对比、Linear Probe、Kernel 性能、coarse/fine 双尺度、图像补全、交互式无损 codec。补全面板调用 `/api/complete`；codec 面板调用 `/api/{encode,inspect,decode}`。
+
+```bash
+pip install -e ".[demo]"
+
+# 本地 / WSL
+uvicorn demo.server:app --reload --port 8000
+
+# AutoDL: 仅 6006 / 6008 端口可公网映射
+uvicorn demo.server:app --host 0.0.0.0 --port 6006 --reload
+```
+
+## AutoDL 同步与训练
+
+本地 WSL 只做开发和 CPU 验证，训练一律在 AutoDL GPU 实例上执行。`git pull` 不会影响已经启动的 Python 训练进程；它只影响后续新启动的命令。
+
+```bash
+# 本地：提交并推送
+git status --short
+git add -A
+git commit -m "update downstream tasks and README"
+git push origin dev
+
+# AutoDL：同步代码
+cd /root/autodl-tmp/mdl-deep-image-compression
+git fetch origin
+git pull --ff-only origin dev
+```
+
+如果需要把 ignored 的 `future.md` / `CLAUDE.md` 也纳入提交：
+
+```bash
+git add -f future.md CLAUDE.md
+```
+
+回收 checkpoint：
+
+```bash
 scp -P <port> root@<autodl-host>:/root/autodl-tmp/mdl-deep-image-compression/experiments/<exp>/checkpoints/best.pth \
+    ./experiments/<exp>/checkpoints/
+scp -P <port> root@<autodl-host>:/root/autodl-tmp/mdl-deep-image-compression/experiments/<exp>/checkpoints/swa.pth \
+    ./experiments/<exp>/checkpoints/
+scp -P <port> root@<autodl-host>:/root/autodl-tmp/mdl-deep-image-compression/experiments/<exp>/checkpoints/ema.pth \
     ./experiments/<exp>/checkpoints/
 ```
 
@@ -296,7 +378,8 @@ scripts/       train.py (checkpoint sidecar *.meta.json), evaluate.py (含 --ens
                traditional_codec_bpd.py, prepare_imagenet64_png.py
 configs/       igpt_cifar10_s_rgb,
                ccigpt_cifar10_s_rgb_ronly      (R-only v1 历史主表 2.9035 bpd, 100ep, 已被 v2 替代),
-               ccigpt_cifar10_s_rgb_ronly_v2   (深窄 N=32/d=448 + 200ep, 当前主表 ensemble+TTA 2.8296 bpd)
+               ccigpt_cifar10_s_rgb_ronly_v2   (深窄 N=32/d=448 + 200ep, 当前主表 ensemble+TTA 2.8296 bpd),
+               ccigpt_imagenet64_v1            (ImageNet64 12ep benchmark, 训练中)
 downstream/    runbook.md (下游任务执行手册) + run_downstream.sh (AutoDL 批量执行)
 tests/         单元测试（含 test_ccigpt_smoke / test_arithmetic_codec）
 demo/
