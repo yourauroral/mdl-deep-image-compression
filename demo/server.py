@@ -12,10 +12,8 @@ Demo 可视化后端 — FastAPI + 静态文件。
   GET  /api/probe       — Linear Probe 各层准确率
   GET  /api/kernels     — Triton Kernel 性能数据
   GET  /api/scales      — CC-iGPT coarse/fine token 分配
-  GET  /api/ood         — OOD typicality AUROC 表（下游 §6.2，AutoDL 回填）
-  GET  /api/transfer    — 跨数据集 bpd 泛化（下游 §6.3，AutoDL 回填）
   POST /api/predict     — 上传图片 → 返回 bpd / 双尺度 CE / 热力图
-  POST /api/complete    — 上传图片 → AR 补全下半（下游 §6.4，实时采样，~20–40s）
+  POST /api/complete    — 上传图片 → AR 补全下半（下游 §6.2，实时采样，~20–40s）
   POST /api/encode      — 上传图片 → 逐 token gold 算术编码为自包含 MDLC .bin（流式 NDJSON）
   POST /api/inspect     — 上传 .bin → 即时解析容器结构/码长/bpd（无需 GPU/ckpt）
   POST /api/decode      — 上传 .bin → 流式逐 token 盲解码还原图像（NDJSON 进度）
@@ -109,29 +107,6 @@ def get_kernels():
 @app.get("/api/scales")
 def get_scales():
     return _load_json("scales.json")
-
-
-# OOD / transfer 是下游任务结果，由 AutoDL 跑 scripts/ood_detect.py /
-# scripts/evaluate.py --dataset_override 时用 --json_out 回填到 demo/data/。
-# 未回填前文件里是 generated=null 的占位，前端据此显示"待 AutoDL 跑"。
-# 缺文件不报 404（与 metrics 等不同）：占位 JSON 已 checkin，正常情况恒存在；
-# 万一被删，回退一个 pending 壳让前端面板优雅留白而非整页报错。
-@app.get("/api/ood")
-def get_ood():
-    path = DATA_DIR / "ood.json"
-    if not path.exists():
-        return JSONResponse({"generated": None, "ood": []})
-    with open(path) as f:
-        return json.load(f)
-
-
-@app.get("/api/transfer")
-def get_transfer():
-    path = DATA_DIR / "transfer.json"
-    if not path.exists():
-        return JSONResponse({"generated": None, "datasets": []})
-    with open(path) as f:
-        return json.load(f)
 
 
 def _read_upload_to_tensor(file: UploadFile, size: int = 32):
@@ -510,13 +485,13 @@ def complete(
     temperature: float = Form(1.0),
     top_k: int = Form(100),
 ):
-    """图像补全 demo（下游 §6.4）：上传图 → 保留前 keep_frac 的 raster token（≈上半）
+    """图像补全 demo（下游 §6.2）：上传图 → 保留前 keep_frac 的 raster token（≈上半）
     → AR 续采样补全下半 → 返回 原图 / 已知上半(灰=待补) / 补全 三张图。
 
     与 scripts/complete_image.py 同一套 per-step forward（无 KV-cache，causal mask
     保证 0 后缀不泄漏）。CC-iGPT 的 coarse ctx 由**整图**缩略图算 —— 故语义是"低分
     缩略图 + 上半真实像素 → 补下半"，coarse 是显式 side-channel（与压缩时独立 bitstream
-    同源），非偷看答案。详见 complete_image.py docstring 与 runbook §6.4。
+    同源），非偷看答案。详见 complete_image.py docstring 与 runbook。
 
     sync def → FastAPI 放进 threadpool，GPU 采样不阻塞 event loop（但单请求会占住
     一个 worker ~数十秒，且与 IN64 训练共享 GPU；属预期，demo 单用户场景可接受）。
@@ -548,7 +523,7 @@ def complete(
     if model is None:
         raise HTTPException(status_code=503, detail="No checkpoint available. Place a checkpoint in experiments/*/checkpoints/best.pth")
 
-    # 复用 scripts/complete_image.py 的逐步采样实现（与 runbook §6.4 完全同源），
+    # 复用 scripts/complete_image.py 的逐步采样实现（与 runbook 完全同源），
     # 避免在 demo 侧重写一份采样逻辑导致两条路径漂移。
     from scripts.complete_image import _complete_one
 

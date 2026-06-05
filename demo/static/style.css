@@ -263,14 +263,7 @@ footer {
   font-size: 0.78rem;
 }
 
-/* ── Panel 7: OOD 表格 raw_bpd < 0.5 红字（复现 Nalisnick 失败）── */
-.data-table td.ood-low { color: #ff8f8f; font-weight: 600; }
-
-/* ── Panel 8: 跨数据集是水平条形图，4 行 ── */
-#panel-transfer .chart-container { max-height: none; height: 220px; }
-#panel-ood .chart-container { max-height: none; height: 300px; }
-
-/* ── Panel 9: 图像补全 ── */
+/* ── Panel 7: 图像补全 ── */
 .cmp-left { display: flex; flex-direction: column; gap: 0.8rem; }
 
 .cmp-controls {

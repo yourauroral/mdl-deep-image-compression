@@ -106,43 +106,7 @@
   <span>下游任务 — MDL 主线：压得越好 ⇒ 学得越好</span>
 </div>
 
-<!-- Panel 7: OOD 检测 (typicality) -->
-<section class="panel" id="panel-ood">
-  <h2>OOD 检测 — typicality（密度估计侧面）</h2>
-  <p class="panel-desc">
-    把 CIFAR-10 训练的 CC-iGPT 当密度模型，用 per-image bpd 偏离做异常分，AUROC 衡量识别分布外的能力。
-    <b>raw bpd</b> 复现 Nalisnick 2019 失败（CIFAR 训的模型给 SVHN 更低 bpd，AUROC 常 &lt; 0.5）；
-    <b>typicality |z|</b> 修正之；<b>dual-scale</b>（sqrt(z<sub>coarse</sub>²+z<sub>fine</sub>²)）是本工作双尺度差异化，单尺度模型给不出。
-    虚线 0.5 = 随机基线。
-  </p>
-  <p id="ood-pending" class="pending-note" hidden></p>
-  <div class="chart-container" id="ood-chart-wrap" hidden>
-    <canvas id="chart-ood"></canvas>
-  </div>
-  <table id="table-ood" class="data-table" hidden>
-    <thead><tr><th>OOD 集</th><th>raw bpd</th><th>typicality |z|</th><th>dual-scale (Ours)</th></tr></thead>
-    <tbody></tbody>
-  </table>
-</section>
-
-<!-- Panel 8: 跨数据集 bpd 泛化 -->
-<section class="panel" id="panel-transfer">
-  <h2>跨数据集 bpd 泛化（泛化侧面）</h2>
-  <p class="panel-desc">
-    同一个 CIFAR-10 训练的模型直接评别的自然图像集 bpd（不重训）。论证学到的是自然图像统计而非数据集记忆。
-    <b>⚠ 含重采样，勿与各集官方数字横比，只看同一模型在不同集上的相对值</b>（in-domain 蓝柱为参照）。
-  </p>
-  <p id="transfer-pending" class="pending-note" hidden></p>
-  <div class="chart-container" id="transfer-chart-wrap" hidden>
-    <canvas id="chart-transfer"></canvas>
-  </div>
-  <table id="table-transfer" class="data-table" hidden>
-    <thead><tr><th>数据集</th><th>bits/dim ↓</th><th>vs in-domain</th><th>备注</th></tr></thead>
-    <tbody></tbody>
-  </table>
-</section>
-
-<!-- Panel 9: 图像补全 (AR inpainting) -->
+<!-- Panel 7: 图像补全 (AR inpainting) -->
 <section class="panel" id="panel-complete">
   <h2>图像补全 — AR inpainting（生成侧面）</h2>
   <p class="panel-desc">

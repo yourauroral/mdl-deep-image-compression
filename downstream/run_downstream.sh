@@ -4,10 +4,10 @@
 # 详见 downstream/runbook.md。
 #
 # 用法：
-#   bash downstream/run_downstream.sh                # 跑全部 ready 步骤 [0]-[4]
-#   bash downstream/run_downstream.sh ood            # 只跑 OOD
-#   bash downstream/run_downstream.sh cross complete # 跑指定若干步
-# 可选步骤名：pre(自检) | ood | cross | complete | verify
+#   bash downstream/run_downstream.sh                # 跑全部 ready 步骤
+#   bash downstream/run_downstream.sh complete       # 只跑图像补全
+#   bash downstream/run_downstream.sh verify         # 只跑真实可解性 roundtrip
+# 可选步骤名：pre(自检) | complete | verify
 # 环境变量：PY 覆盖解释器（默认 python），BEST 覆盖 ckpt 路径。
 
 set -uo pipefail
@@ -25,51 +25,29 @@ COMPLETION_OUT=experiments/completion_grid.png
 # ── 步骤定义 ──────────────────────────────────────────────────────
 
 step_pre() {
-    echo "== [0] 预检 self_test（coder + OOD 数学）=="
+    echo "== [0] 预检 self_test（coder）=="
     "$PY" scripts/verify_lossless.py --self_test
-    "$PY" scripts/ood_detect.py --self_test
-}
-
-step_ood() {
-    echo "== [1] OOD typicality（svhn,cifar100）=="
-    "$PY" scripts/ood_detect.py --config "$CFG" --checkpoint "$BEST" \
-        --ood svhn,cifar100 --ref_images 2000 \
-        --json_out demo/data/ood.json
-}
-
-step_cross() {
-    echo "== [2] 跨数据集泛化 bpd（cifar10 in-domain + cifar100 / svhn / stl10）=="
-    # cifar10 in-domain 单 ckpt 基线（无 ensemble/TTA），与各 override 同协议可比，
-    # 作前端 /api/transfer 面板的对照行
-    echo "-- in-domain → cifar10 --"
-    "$PY" scripts/evaluate.py --config "$CFG" --checkpoint "$BEST" \
-        --json_out demo/data/transfer.json
-    for ds in cifar100 svhn stl10; do
-        echo "-- override → $ds --"
-        "$PY" scripts/evaluate.py --config "$CFG" --checkpoint "$BEST" \
-            --dataset_override "$ds" --json_out demo/data/transfer.json
-    done
 }
 
 step_complete() {
-    echo "== [3] 图像补全 demo（4 张, keep_frac=0.5）=="
+    echo "== [1] 图像补全 demo（4 张, keep_frac=0.5）=="
     "$PY" scripts/complete_image.py --config "$CFG" --checkpoint "$BEST" \
         --num_images 4 --keep_frac 0.5 --temperature 1.0 --top_k 100 \
         --out "$COMPLETION_OUT"
 }
 
 step_verify() {
-    echo "== [4] 真实可解性 roundtrip（2 张, bit-identical 断言）=="
+    echo "== [2] 真实可解性 roundtrip（2 张, bit-identical 断言）=="
     "$PY" scripts/verify_lossless.py --config "$CFG" --checkpoint "$BEST" \
         --num_images 2
 }
 
 # ── 调度 ─────────────────────────────────────────────────────────
 
-# self_test 是地基：先确认 coder/数学没问题，失败就别浪费 GPU 跑后面
+# self_test 是地基：先确认 coder 没问题，失败就别浪费 GPU 跑后面
 preflight() {
     if ! step_pre; then
-        echo "!! 预检 self_test 失败，终止（coder/数学有问题，先修）"
+        echo "!! 预检 self_test 失败，终止（coder 有问题，先修）"
         exit 1
     fi
 }
@@ -80,11 +58,9 @@ run_step() {
     local rc=0
     case "$name" in
         pre)      step_pre || rc=$? ;;
-        ood)      step_ood || rc=$? ;;
-        cross)    step_cross || rc=$? ;;
         complete) step_complete || rc=$? ;;
         verify)   step_verify || rc=$? ;;
-        *) echo "!! 未知步骤: $name（可选: pre ood cross complete verify）"; return 2 ;;
+        *) echo "!! 未知步骤: $name（可选: pre complete verify）"; return 2 ;;
     esac
     local dt=$((SECONDS - t0))
     if [ "$rc" -eq 0 ]; then
@@ -99,7 +75,7 @@ run_step() {
 declare -A FAILED
 
 if [ "$#" -eq 0 ]; then
-    STEPS=(ood cross complete verify)     # 默认 ready 全套（pre 由 preflight 单独跑）
+    STEPS=(complete verify)     # 默认 ready 全套（pre 由 preflight 单独跑）
     preflight
 else
     STEPS=("$@")
