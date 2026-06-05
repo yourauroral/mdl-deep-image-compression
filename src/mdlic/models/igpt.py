@@ -169,8 +169,7 @@ class IGPT(nn.Module):
     logits = self.head(hidden)
 
     # Fused CE + z-loss: 一次 kernel launch 完成 softmax → CE → z-loss
-    # （V=256 下 Fused Linear+CE kernel 经 roofline 证伪、未采用，详见
-    #  experiments/kernel_negative_finding.md）
+    # （V=256 下 Fused Linear+CE kernel 经 profile_kernels.py --roofline 证伪、未采用）
     if _USE_FUSED_CE and logits.is_cuda and z_w > 0:
         # kernel 内 .to(tl.float32) 完成所有累加，无需在外层再 cast
         ce_loss, z_loss = _fused_ce_zloss(

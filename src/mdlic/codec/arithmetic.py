@@ -44,13 +44,15 @@ def build_cumfreq(probs: List[float], total: int = FREQ_TOTAL) -> List[int]:
       3. 余数按 (小数部分, 索引) 降序补给，保证 Σfreq == total 且可复现。
     """
     V = len(probs)
+    assert V > 0, "概率向量不能为空"
     assert total > V, f"FREQ_TOTAL ({total}) 必须 > 词表大小 ({V})"
     s = 0.0
     for p in probs:
         if p > 0.0:
             s += p
     if s <= 0.0:
-        s = 1.0  # 全 0 兜底为均匀分布
+        probs = [1.0] * V  # 全 0 / 全非正兜底为均匀分布
+        s = float(V)
 
     budget = total - V                       # 先给每符号保底 1
     freqs = [1] * V

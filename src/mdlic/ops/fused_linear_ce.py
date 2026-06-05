@@ -10,7 +10,7 @@ Fused Linear Cross-Entropy Triton Kernel.
 ║    1) 论文 §3.2 反面案例的可复现代码                                ║
 ║    2) `scripts/profile_kernels.py` 的 roofline 对照基准              ║
 ║                                                                      ║
-║  详见 `experiments/kernel_negative_finding.md`。                     ║
+║  复现: `scripts/profile_kernels.py --kernel fused_linear_ce --roofline`。 ║
 ║                                                                      ║
 ║  训练栈实际使用 `PyTorch Linear + fused_ce_zloss` 组合。            ║
 ╚══════════════════════════════════════════════════════════════════════╝

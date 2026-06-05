@@ -186,6 +186,14 @@ def _tokenize_targets(x: torch.Tensor) -> torch.Tensor:
     return tokens[:, 1:]
 
 
+def _ensemble_log_probs(log_probs_stack: list[torch.Tensor]) -> torch.Tensor:
+    """Log-probs for p_ens(y|x) = mean_k p_k(y|x), computed stably."""
+    if not log_probs_stack:
+        raise ValueError("log_probs_stack must contain at least one tensor")
+    stacked = torch.stack(log_probs_stack, dim=0)
+    return torch.logsumexp(stacked, dim=0) - math.log(stacked.size(0))
+
+
 def _ce_per_image_from_logits(logits: torch.Tensor,
                               targets: torch.Tensor) -> torch.Tensor:
     """Return mean NTP cross-entropy per image, matching IGPT.forward."""
@@ -271,21 +279,18 @@ def _write_per_image_json(path: str, values, summary: dict) -> None:
 
 @torch.no_grad()
 def evaluate_ensemble(models, loader, device, amp_dtype=None, tta_hflip: bool = False):
-    """多 ckpt logit ensemble 评测（log-prob 域平均）。
+    """多 ckpt probability-mixture ensemble 评测（log-prob 域稳定实现）。
 
     每 batch：K 个 model 各 forward 拿 fine logits → log-softmax → K 档逐元素
-    平均 → gather target → fine NLL；coarse 走每档 ce_coarse 数值平均（每档 coarse
-    架构相同、训自同一轨迹的不同平滑，数值平均近似 coarse-ensemble bpd）。
+    logsumexp - log(K) → gather target → fine NLL。这对应
+    p_ens(y|x)=mean_k p_k(y|x)，不是 logit averaging，也不是各模型 NLL 均值。
+    coarse 走每档 ce_coarse 数值平均（每档 coarse 架构相同、训自同一轨迹的
+    不同平滑，数值平均近似 coarse-ensemble bpd）。
     bpd_total = (CE_c_avg·N_c + CE_f_ens·N_f) / ln2 / N_f，与 cc_igpt.forward 同口径。
 
     与 --tta_hflip 正交：TTA 路径在 evaluate_model 上是"x 与 hflip(x) 各跑一次取
     batch-mean CE 均值"；ensemble 路径同口径——hflip(x) 也跑 K 档 ensemble 取
     fine NLL，再与原序 NLL 取均值。
-
-    Why log-prob 域而非 prob 域：log-prob 平均对应 ensemble likelihood 的
-    geometric mean，更接近真 ensemble 似然下界（Jensen 收紧）；prob 域算术平均
-    会产生过自信误差，文献 (Hinton et al., "Distilling the Knowledge in a NN"
-    2015) 已证 log-prob 域更稳。
     """
     for m in models:
         m.eval()
@@ -301,7 +306,7 @@ def evaluate_ensemble(models, loader, device, amp_dtype=None, tta_hflip: bool = 
     ce_c_sum = ce_f_sum = alpha_sum = 0.0
 
     def _ensemble_fine_nll(x_in, target):
-        """K 档 forward → log-softmax 平均 → gather target → mean NLL (scalar tensor)。
+        """K 档 forward → probability mixture → gather target → mean NLL。
 
         副作用：把每档 ce_coarse / ctx_alpha 通过 closure 写进 ce_c_local / alpha_local
         以便外层做 batch-mean 累加。
@@ -321,8 +326,8 @@ def evaluate_ensemble(models, loader, device, amp_dtype=None, tta_hflip: bool = 
                 ce_c_local.append(out["ce_loss_coarse"].item())
                 if "ctx_alpha" in out and out["ctx_alpha"] is not None:
                     alpha_local.append(out["ctx_alpha"].item())
-        log_probs_avg = torch.stack(log_probs_stack, dim=0).mean(dim=0)   # (B, T-1, V)
-        nll_per_tok = -log_probs_avg.gather(-1, target.unsqueeze(-1)).squeeze(-1)
+        log_probs_ens = _ensemble_log_probs(log_probs_stack)   # (B, T-1, V)
+        nll_per_tok = -log_probs_ens.gather(-1, target.unsqueeze(-1)).squeeze(-1)
         return nll_per_tok.mean(), ce_c_local, alpha_local
 
     for batch in loader:
@@ -707,7 +712,7 @@ def cmd_swa(args, config, device):
 
 
 def cmd_ensemble(args, config, device):
-    """多 ckpt logit ensemble 评测（log-prob 域平均，best/swa/ema 等同源平滑组合）。"""
+    """多 ckpt probability-mixture ensemble 评测（best/swa/ema 等同源平滑组合）。"""
     test_dataset, dataset_name = _load_dataset(config, getattr(args, "dataset_override", None))
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size,
                              shuffle=False, num_workers=2, pin_memory=True)
@@ -764,7 +769,7 @@ def main():
   python scripts/evaluate.py --config configs/ccigpt_cifar10_s_rgb_ronly_v2.yaml \\
       --checkpoint experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/best.pth --swa
 
-  # 多 ckpt logit ensemble (log-prob 域平均；best/swa/ema 三档同源平滑组合)
+  # 多 ckpt probability-mixture ensemble (best/swa/ema 三档同源平滑组合)
   python scripts/evaluate.py --config configs/ccigpt_cifar10_s_rgb_ronly_v2.yaml \\
       --ensemble experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/best.pth,\\
 experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/swa.pth,\\
@@ -777,7 +782,7 @@ experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/ema.pth \\
     parser.add_argument('--checkpoint', type=str, default=None,
                         help='模型 checkpoint 路径（best.pth）')
     parser.add_argument('--ensemble', type=str, default=None,
-                        help='多 ckpt logit ensemble，逗号分隔 ckpt 路径列表 '
+                        help='多 ckpt probability-mixture ensemble，逗号分隔 ckpt 路径列表 '
                              '（与 --checkpoint 互斥；至少 2 个 ckpt）')
     parser.add_argument('--traditional', action='store_true',
                         help='同时计算 PNG/WebP 传统方法 bits/dim')

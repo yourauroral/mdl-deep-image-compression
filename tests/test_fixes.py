@@ -158,6 +158,24 @@ def test_per_image_summary_bootstrap_optional():
     assert "ci95_bootstrap" not in summary
 
 
+def test_ensemble_log_probs_uses_probability_mixture():
+    """Ensemble must average probabilities, not per-model NLL values."""
+    from scripts.evaluate import _ensemble_log_probs
+
+    probs_a = torch.tensor([[[0.9, 0.1]]], dtype=torch.float32)
+    probs_b = torch.tensor([[[0.1, 0.9]]], dtype=torch.float32)
+    log_probs = _ensemble_log_probs([probs_a.log(), probs_b.log()])
+
+    expected = ((probs_a + probs_b) * 0.5).log()
+    assert torch.allclose(log_probs, expected, atol=1e-7, rtol=1e-7)
+
+    target = torch.tensor([[0]])
+    mixture_nll = -log_probs.gather(-1, target.unsqueeze(-1)).squeeze(-1)
+    mean_member_nll = -torch.stack([probs_a.log(), probs_b.log()], dim=0).mean(dim=0) \
+        .gather(-1, target.unsqueeze(-1)).squeeze(-1)
+    assert mixture_nll.item() < mean_member_nll.item()
+
+
 # ──────────────────────────────────────────────────────────────
 # Fix #3: grad_accum 末尾 flush
 # ──────────────────────────────────────────────────────────────
@@ -193,9 +211,29 @@ def test_grad_accum_no_sync_releases_at_last_step():
     assert no_sync_steps == [1, 2, 3, 5, 6, 7, 9]
 
 
+def test_grad_accum_residual_window_uses_residual_denominator():
+    """残余窗口里的每个 micro-batch 都应除以余数，而不是固定 accum 长度。"""
+    from scripts.train import _grad_accum_window_size
+
+    steps, grad_accum_steps = 10, 4
+    denominators = [
+        _grad_accum_window_size(i, steps, grad_accum_steps)
+        for i in range(steps)
+    ]
+    assert denominators == [4, 4, 4, 4, 4, 4, 4, 4, 2, 2]
+
+
 def test_grad_accum_divisible_case_unchanged():
     """整除情况下行为应与修复前完全一致（向后兼容）。"""
     steps, grad_accum_steps = 12, 4
+    from scripts.train import _grad_accum_window_size
+
+    denominators = [
+        _grad_accum_window_size(i, steps, grad_accum_steps)
+        for i in range(steps)
+    ]
+    assert denominators == [4] * 12
+
     sync_steps = []
     for i in range(steps):
         is_last_step = (i + 1) == steps

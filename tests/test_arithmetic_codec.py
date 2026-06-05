@@ -118,6 +118,22 @@ def test_build_cumfreq_sums_to_total():
             assert cum[i + 1] > cum[i]
 
 
+def test_build_cumfreq_all_zero_falls_back_to_uniform():
+    cum = build_cumfreq([0.0] * 256)
+    assert cum[0] == 0
+    assert cum[-1] == FREQ_TOTAL
+    for i in range(256):
+        assert cum[i + 1] > cum[i]
+
+
+def test_build_cumfreq_non_positive_falls_back_to_uniform():
+    cum = build_cumfreq([-1.0, 0.0, -0.5, 0.0])
+    assert cum[0] == 0
+    assert cum[-1] == FREQ_TOTAL
+    for i in range(4):
+        assert cum[i + 1] > cum[i]
+
+
 def test_pack_bits_roundtrip_len():
     bits = [1, 0, 1, 1, 0, 0, 1, 0, 1]
     packed = pack_bits(bits)
@@ -162,4 +178,3 @@ def test_encode_pack_file_roundtrip(tmp_path):
     dec = ArithmeticDecoder(bits_back)
     out = [dec.decode(build_cumfreq(p)) for p in tables]
     assert out == syms
-

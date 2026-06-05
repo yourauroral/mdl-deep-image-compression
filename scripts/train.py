@@ -273,6 +273,16 @@ def _checkpoint_meta(config: dict, args, epoch: int, kind: str, seed: int,
     }
 
 
+def _grad_accum_window_size(step_index: int, steps: int, grad_accum_steps: int) -> int:
+    """Actual micro-batch count in the accumulation window containing step_index."""
+    assert 0 <= step_index < steps, f"step_index={step_index} out of range for steps={steps}"
+    assert grad_accum_steps >= 1, f"grad_accum_steps must be >= 1, got {grad_accum_steps}"
+    remainder = steps % grad_accum_steps
+    if remainder and step_index >= steps - remainder:
+        return remainder
+    return grad_accum_steps
+
+
 def train_one_epoch(model, loader, optimizers, scaler, device,
                     epoch, log_freq, writer, clip_max_norm,
                     amp_dtype=torch.float16, grad_accum_steps=1,
@@ -309,6 +319,7 @@ def train_one_epoch(model, loader, optimizers, scaler, device,
         # 因此最后一步一律视为同步步：执行 step + zero_grad，并打开 AllReduce。
         is_last_step = (i + 1) == steps
         is_accumulating = ((i + 1) % grad_accum_steps != 0) and (not is_last_step)
+        current_accum_steps = _grad_accum_window_size(i, steps, grad_accum_steps)
         sync_context = model.no_sync() if (distributed and is_accumulating) else nullcontext()
 
         with sync_context:
@@ -327,7 +338,8 @@ def train_one_epoch(model, loader, optimizers, scaler, device,
                     bpd = out["bpd"]
                 else:
                     bpd = compute_bpd(ce_loss)
-            loss_scaled = loss / grad_accum_steps
+            # 残余窗口内的每个 micro-batch 都除以该窗口实际长度，保持梯度均值口径。
+            loss_scaled = loss / current_accum_steps
             if scaler is not None:
                 scaler.scale(loss_scaled).backward()
             else:
