@@ -7,9 +7,9 @@
 %   Gated PixelCNN      3.57   van den Oord et al., NeurIPS 2016
 %   SPN (Subscale)      3.52   Menick & Kalchbrenner, ICLR 2019 (coarse-to-fine 最近邻)
 %   Sparse Transformer  3.44   Child et al., 2019  ← 目标线
-%   CC-iGPT (Ours)      3.4994 本工作，IN64 v1 in-training ep8（占位，ep9 训练中、退火尾段未走完，最终待回填）
+%   CC-iGPT (Ours)      3.4931 本工作，IN64 v1 in-training ep9（占位，ep10-12 退火尾段未走完，最终待回填）
 %
-% ！占位说明：3.4994 是 ep8/12 末 val（cosine 退火 ep9-12 尚未走完），非最终数字。已低于 SPN 3.52、距目标 3.44 剩 0.0594。
+% ！占位说明：3.4931 是 ep9/12 末 val（cosine 退火 ep10-12 尚未走完），非最终数字。已低于 SPN 3.52、距目标 3.44 剩 0.0531。
 %   训练完成后用最终 val/ensemble 数字替换 Ours 柱高与标注。
 \documentclass[tikz,border=8pt]{standalone}
 \usepackage{tikz}
@@ -49,9 +49,9 @@
     (PixelRNN,    3.63)
 };
 
-% 第5个橘黄柱子（Ours，占位 ep8 val 3.4994）
+% 第5个橘黄柱子（Ours，占位 ep9 val 3.4931）
 \addplot[draw=orange!70!black, fill=orange!30!yellow!80, bar shift=0pt] coordinates {
-    (Ours, 3.4994)
+    (Ours, 3.4931)
 };
 
 % --- 参考线 1：SPN 3.52（coarse-to-fine 最近邻）---
@@ -73,7 +73,7 @@
 \node[font=\scriptsize, align=center, yshift=4pt] at (axis cs:SPN, 3.52) {3.52};
 \node[font=\scriptsize, align=center, yshift=4pt] at (axis cs:GatedPCNN, 3.57) {3.57};
 \node[font=\scriptsize, align=center, yshift=4pt] at (axis cs:PixelRNN, 3.63) {3.63};
-\node[font=\scriptsize, align=center, orange!70!black, yshift=4pt] at (axis cs:Ours, 3.4994) {\textbf{3.50}\,\scriptsize ep8*};
+\node[font=\scriptsize, align=center, orange!70!black, yshift=4pt] at (axis cs:Ours, 3.4931) {\textbf{3.49}\,\scriptsize ep9*};
 
 \end{axis}
 
@@ -84,7 +84,7 @@
 % --- 占位脚注 (ASCII only, pdflatex 可编译) ---
 \node[font=\scriptsize\itshape, gray!50!black, anchor=north, yshift=-2pt]
     at (current bounding box.south)
-    {* CC-iGPT v1 in-training ep8/12 (cosine anneal tail ep9--12 not yet run); final number TBD};
+    {* CC-iGPT v1 in-training ep9/12 (cosine anneal tail ep10--12 not yet run); final number TBD};
 
 \end{tikzpicture}
 \end{document}
