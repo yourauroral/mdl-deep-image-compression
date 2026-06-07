@@ -13,6 +13,43 @@ const $ = (id) => document.getElementById(id);
 Chart.defaults.color = "#8b8fa3";
 Chart.defaults.borderColor = "#2a2d3a";
 
+// ── 全局数据集状态 ──
+// 顶栏 toggle 在 CIFAR-10 / ImageNet64 间切换。数据面板 (3 bpd / 4 probe / 6 scales)
+// 重新拉取并重渲染；交互面板 (predict/encode/decode/complete) 在各自 FormData 带上
+// currentDataset，由后端按 dataset lazy-load 对应 ckpt（IN64 显存约 2×，64×64 解码慢约 4×）。
+let currentDataset = "cifar10";
+
+function renderDataPanels(dataset) {
+  renderMetrics(dataset);
+  renderProbe(dataset);
+  renderScales(dataset);
+}
+
+// IN64 交互面板很慢（64×64 解码 ~12500 步/图），切到 IN64 时显示警示条
+function updateDatasetWarnings(dataset) {
+  document.querySelectorAll(".dataset-warning").forEach(el => {
+    el.hidden = (dataset !== "imagenet64");
+  });
+}
+
+function onDatasetChange(dataset) {
+  currentDataset = dataset;
+  renderDataPanels(dataset);
+  updateDatasetWarnings(dataset);
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  // 顶栏 toggle 绑定
+  document.querySelectorAll('input[name="dataset-toggle"]').forEach(radio => {
+    radio.addEventListener("change", (e) => {
+      if (e.target.checked) onDatasetChange(e.target.value);
+    });
+  });
+  // 首屏渲染默认 CIFAR
+  renderDataPanels(currentDataset);
+  updateDatasetWarnings(currentDataset);
+});
+
 // ── Panel 1: 图片上传 + 预测 ──
 (function initUpload() {
   const area = $("upload-area");
@@ -53,6 +90,7 @@ Chart.defaults.borderColor = "#2a2d3a";
 
     const form = new FormData();
     form.append("file", file);
+    form.append("dataset", currentDataset);
     try {
       const res = await fetch(API + "/api/predict", { method: "POST", body: form });
       if (!res.ok) {
@@ -91,46 +129,50 @@ Chart.defaults.borderColor = "#2a2d3a";
 })();
 
 // ── Panel 3: bits/dim 对比 ──
-// 设计：聚焦神经 AR 方法之间的 bits/dim 差异（~2.81-2.97）。
-// 横轴聚焦 2.70-3.05，数值标签贴在点末端。
-(async function initMetrics() {
-  const data = await fetchJSON("/api/metrics");
+// 设计：聚焦神经 AR 方法之间的 bits/dim 差异。横轴自适应数据范围，数值标签贴在点末端。
+// dataset 感知：CIFAR (~2.7-3.0) / ImageNet64 (~3.4-3.6) 横轴范围不同，按数据动态算。
+let _metricsChart = null;
+async function renderMetrics(dataset) {
+  const data = await fetchJSON("/api/metrics?dataset=" + dataset);
   if (!data) return;
 
   const isOurs = (n) => n.includes("(Ours)");
-  const isOursMain = (n) => n.includes("v2 (Ours)");   // 主表数字（突出 v2，v1 作历史对照）
   // 过滤掉 bpd=null 的占位行，lollipop 图只画已落地结果
   const neural = data.methods.filter(m => m.bpd !== null)
                              .sort((a, b) => a.bpd - b.bpd);
+  // 主表 = Ours 行里 bpd 最低者（dataset-agnostic，取代写死 "v2 (Ours)"）
+  const ourBest = neural.filter(m => isOurs(m.name)).sort((a, b) => a.bpd - b.bpd)[0] || null;
+  const isOursMain = (n) => ourBest && n === ourBest.name;
 
   const labels = neural.map(m => m.name);
   const values = neural.map(m => m.bpd);
 
   const colorFor = (m) => {
-    if (isOursMain(m.name)) return "#6c8cff";          // v2 主表：亮蓝
-    if (isOurs(m.name)) return "#8a9bd0";              // v1 历史 Ours：淡蓝
+    if (isOursMain(m.name)) return "#6c8cff";          // 主表：亮蓝
+    if (isOurs(m.name)) return "#8a9bd0";              // 其它 Ours：淡蓝
     return "#5a5d72";                                   // baseline：灰
   };
   const colors = neural.map(colorFor);
 
-  const ourBest = neural.find(m => isOursMain(m.name)) || neural.find(m => isOurs(m.name));
-
   // 副标题：仅展示主结果（取 Ours 中 bpd 最低的一行）
-  const desc = document.createElement("p");
-  desc.className = "panel-desc";
+  const panel = document.getElementById("panel-metrics");
+  const chartCt = panel.querySelector(".chart-container");
+  let desc = panel.querySelector(".panel-desc");
+  if (!desc) {
+    desc = document.createElement("p");
+    desc.className = "panel-desc";
+    panel.insertBefore(desc, chartCt);
+  }
   desc.innerHTML =
-    `聚焦神经自回归方法 (bits/dim ∈ [2.7, 3.0])。` +
+    `${data.dataset} — 聚焦神经自回归方法。` +
     (ourBest
       ? `<span style="color:#6c8cff">${ourBest.name} <b>${ourBest.bpd.toFixed(4)}</b> bits/dim</span>`
       : "");
-  const panel = document.getElementById("panel-metrics");
-  const chartCt = panel.querySelector(".chart-container");
-  if (!panel.querySelector(".panel-desc")) panel.insertBefore(desc, chartCt);
 
-  // Lollipop: 用一条从 xMin 起的细线 + 末端粗点表示
-  // Chart.js 没有原生 lollipop，用 bar(很细) + scatter 叠加
-  const X_MIN = 2.70;
-  const X_MAX = 3.05;
+  // Lollipop: 细线 + 末端粗点。横轴范围按数据自适应（留 ±0.1 余量并对齐 0.05）
+  const dataMin = Math.min(...values), dataMax = Math.max(...values);
+  const X_MIN = Math.floor((dataMin - 0.10) / 0.05) * 0.05;
+  const X_MAX = Math.ceil((dataMax + 0.12) / 0.05) * 0.05;
 
   // 自定义 plugin: 在每个点末端绘制数值标签
   const overlayPlugin = {
@@ -152,7 +194,8 @@ Chart.defaults.borderColor = "#2a2d3a";
     }
   };
 
-  new Chart(document.getElementById("chart-metrics"), {
+  if (_metricsChart) _metricsChart.destroy();
+  _metricsChart = new Chart(document.getElementById("chart-metrics"), {
     type: "bar",
     data: {
       labels,
@@ -225,8 +268,9 @@ Chart.defaults.borderColor = "#2a2d3a";
     plugins: [overlayPlugin]
   });
 
-  // 表格保留 TBD 占位行作为完整数据展示
+  // 表格保留 TBD 占位行作为完整数据展示（重渲染前清空避免累积）
   const tbody = document.querySelector("#table-metrics tbody");
+  tbody.innerHTML = "";
   data.methods.forEach(m => {
     const tr = document.createElement("tr");
     const main = isOursMain(m.name);
@@ -237,14 +281,16 @@ Chart.defaults.borderColor = "#2a2d3a";
       <td>${m.note}</td>`;
     tbody.appendChild(tr);
   });
-})();
+}
 
 // ── Panel 4: Linear Probe ──
-(async function initProbe() {
-  const data = await fetchJSON("/api/probe");
+let _probeChart = null;
+async function renderProbe(dataset) {
+  const data = await fetchJSON("/api/probe?dataset=" + dataset);
   if (!data) return;
 
-  new Chart(document.getElementById("chart-probe"), {
+  if (_probeChart) _probeChart.destroy();
+  _probeChart = new Chart(document.getElementById("chart-probe"), {
     type: "line",
     data: {
       labels: data.layers.map(l => "L" + l),
@@ -257,6 +303,8 @@ Chart.defaults.borderColor = "#2a2d3a";
         tension: 0.3,
         pointRadius: 3,
         pointBackgroundColor: "#6c8cff",
+        // 稀疏锚点（IN64 transfer 仅 3 点）用虚线区分完整曲线
+        borderDash: data.sparse ? [6, 4] : [],
       }]
     },
     options: {
@@ -264,7 +312,10 @@ Chart.defaults.borderColor = "#2a2d3a";
       maintainAspectRatio: false,
       plugins: {
         legend: { display: false },
-        title: { display: true, text: `${data.model} — ${data.dataset} (${data.num_classes} classes)`, color: "#e1e4ed" }
+        title: { display: true,
+                 text: `${data.model} — ${data.dataset} (${data.num_classes} classes)`
+                       + (data.sparse ? "　[稀疏锚点，完整 32 层待回填]" : ""),
+                 color: "#e1e4ed" }
       },
       scales: {
         x: { title: { display: true, text: "Transformer Layer" } },
@@ -272,7 +323,7 @@ Chart.defaults.borderColor = "#2a2d3a";
       }
     }
   });
-})();
+}
 
 // ── Panel 5: Kernel 性能 ──
 // kernels.json schema：嵌套 `{forward_only: {kernels:[...]}, forward_backward: {kernels:[...]}}`。
@@ -331,15 +382,17 @@ Chart.defaults.borderColor = "#2a2d3a";
 })();
 
 // ── Panel 6: CC-iGPT 双尺度 ──
-(async function initScales() {
-  const data = await fetchJSON("/api/scales");
+let _scalesChart = null;
+async function renderScales(dataset) {
+  const data = await fetchJSON("/api/scales?dataset=" + dataset);
   if (!data) return;
 
   const labels = data.scales.map(s => `${s.scale} (${s.resolution})`);
   const tokens = data.scales.map(s => s.tokens);
   const total = data.total_tokens;
 
-  new Chart(document.getElementById("chart-scales"), {
+  if (_scalesChart) _scalesChart.destroy();
+  _scalesChart = new Chart(document.getElementById("chart-scales"), {
     type: "doughnut",
     data: {
       labels,
@@ -355,7 +408,7 @@ Chart.defaults.borderColor = "#2a2d3a";
       maintainAspectRatio: false,
       plugins: {
         legend: { position: "right" },
-        title: { display: true, text: `总计 ${total} tokens (coarse + fine)`, color: "#e1e4ed" },
+        title: { display: true, text: `${data.bpd_total} bpd · 总计 ${total} tokens (coarse + fine)`, color: "#e1e4ed" },
         tooltip: {
           callbacks: {
             label: (item) => {
@@ -371,6 +424,7 @@ Chart.defaults.borderColor = "#2a2d3a";
   });
 
   const tbody = document.querySelector("#table-scales tbody");
+  tbody.innerHTML = "";
   data.scales.forEach(s => {
     const tokenPct = (s.tokens / total * 100).toFixed(1);
     const bpdPct = s.share_pct !== undefined ? `${s.share_pct}%` : "—";
@@ -378,7 +432,7 @@ Chart.defaults.borderColor = "#2a2d3a";
     tr.innerHTML = `<td>${s.scale}</td><td>${s.resolution}</td><td>${s.tokens}</td><td>${tokenPct}%</td><td>${bpdPct}</td>`;
     tbody.appendChild(tr);
   });
-})();
+}
 
 // ── Panel 7: 图像补全 (AR inpainting) ──
 // 实时 POST /api/complete（无 KV-cache，~20–40s）。上传后 enable 按钮，点击才跑（避免误触长采样）。
@@ -433,6 +487,7 @@ Chart.defaults.borderColor = "#2a2d3a";
     form.append("keep_frac", (keepSlider.value / 100).toFixed(2));
     form.append("temperature", (tempSlider.value / 10).toFixed(1));
     form.append("top_k", "100");
+    form.append("dataset", currentDataset);
     try {
       const res = await fetch(API + "/api/complete", { method: "POST", body: form });
       if (!res.ok) {
@@ -511,6 +566,7 @@ Chart.defaults.borderColor = "#2a2d3a";
 
     const form = new FormData();
     form.append("file", encFile);
+    form.append("dataset", currentDataset);
     try {
       const res = await fetch(API + "/api/encode", { method: "POST", body: form });
       if (!res.ok) {
@@ -668,6 +724,7 @@ Chart.defaults.borderColor = "#2a2d3a";
 
     const form = new FormData();
     form.append("file", decFile);
+    form.append("dataset", currentDataset);
     try {
       const res = await fetch(API + "/api/decode", { method: "POST", body: form });
       if (!res.ok) {

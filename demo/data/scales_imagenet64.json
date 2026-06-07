@@ -1,0 +1,13 @@
+{
+  "model": "CC-iGPT (R-only) ImageNet64 v1",
+  "image_size": 64,
+  "scales": [
+    {"scale": "Coarse (R-only)", "resolution": "16x16x1",   "tokens": 256,   "role": "灰度先验，独立编码进 bitstream",                                       "ce_nats": 3.8960, "bpd_share": 0.1171, "share_pct": 3.4},
+    {"scale": "Fine",            "resolution": "64x64x3", "tokens": 12288, "role": "条件 fine NTP（注入 α·coarse_ctx）+ pixel-first AR 自学 G/B 偏色", "ce_nats": 2.3310, "bpd_share": 3.3631, "share_pct": 96.6}
+  ],
+  "total_tokens": 12544,
+  "bpd_total": 3.4800,
+  "bpd_std": 0.1161,
+  "ctx_alpha": 0.1991,
+  "note": "softmax head IN64 主表 v1 (2026-06-07, image_size=64, pool_factor=4, 4 卡 DDP 12ep + ensemble best/SWA/EMA + TTA hflip)。bpd_total 3.4800 = ensemble+TTA 主表；± 0.1161 为 batch-level std（4 卡口径）。"
+}

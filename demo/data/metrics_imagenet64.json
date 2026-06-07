@@ -1,0 +1,9 @@
+{
+  "dataset": "ImageNet 64x64",
+  "methods": [
+    {"name": "Gated PixelCNN",      "category": "Autoregressive density models", "bpd": 3.57,   "std": null,   "note": "van den Oord 2016"},
+    {"name": "SPN (Subscale)",      "category": "Autoregressive density models", "bpd": 3.52,   "std": null,   "note": "Menick & Kalchbrenner, ICLR 2019, coarse-to-fine 最近邻"},
+    {"name": "Sparse Transformer",  "category": "Autoregressive density models", "bpd": 3.44,   "std": null,   "note": "Child 2019, 152M, strided sparse attention"},
+    {"name": "CC-iGPT R-only (Ours)", "category": "Autoregressive density models", "bpd": 3.4800, "std": 0.1161, "note": "softmax head, 82.95M, 12ep + 4 卡 DDP + ensemble (best+SWA+EMA) + TTA hflip (主表)。± 为 batch-level std（随 GPU 数变化，非 per-image 口径）；单 ckpt best+TTA = 3.4810"}
+  ]
+}

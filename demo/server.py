@@ -49,6 +49,35 @@ sys.path.insert(0, str(ROOT))
 
 DATA_DIR = Path(__file__).resolve().parent / "data"
 
+# 数据集注册表：前端全局 toggle 的两个轨道。每个 dataset 给出
+#   - configs: 按优先级尝试的主路径 ckpt 配置（首个 best.pth 在位者胜）
+#   - suffix:  数据 JSON 后缀（"" = metrics.json，"_imagenet64" = metrics_imagenet64.json）
+# CIFAR 默认；IN64 模型显存翻倍且 64×64 解码 ~12500 步/图，故按需 lazy-load（见 _get_cached_model）。
+_DATASETS = {
+    "cifar10": {
+        "configs": ["ccigpt_cifar10_s_rgb_ronly_v2.yaml", "ccigpt_cifar10_s_rgb_ronly.yaml"],
+        "suffix": "",
+    },
+    "imagenet64": {
+        "configs": ["ccigpt_imagenet64_v1.yaml"],
+        "suffix": "_imagenet64",
+    },
+}
+
+
+def _norm_dataset(dataset: str) -> str:
+    """校验并归一化 dataset 参数；非法值 → 400（不静默回退，避免前端拼错时悄悄给错数据集）。"""
+    d = (dataset or "cifar10").lower()
+    if d not in _DATASETS:
+        raise HTTPException(status_code=400,
+                            detail=f"unknown dataset {dataset!r}; expected one of {list(_DATASETS)}")
+    return d
+
+
+def _dataset_json(stem: str, dataset: str) -> str:
+    """('metrics', 'imagenet64') → 'metrics_imagenet64.json'；cifar10 → 'metrics.json'。"""
+    return f"{stem}{_DATASETS[_norm_dataset(dataset)]['suffix']}.json"
+
 # 上传图片大小上限（10 MB）和允许的 MIME 类型，防止 /api/predict 被恶意大文件
 # 或非图片文件耗尽内存。
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
@@ -89,14 +118,15 @@ def _load_json(name: str) -> dict:
 
 # JSON 端点用 sync def：FastAPI 自动放进 threadpool，避免 open()/json.load()
 # 同步 IO 阻塞 event loop（前端 4 个端点并发拉取时尤为重要）。
+# dataset query 参数选数据集轨道（cifar10 默认 / imagenet64）。
 @app.get("/api/metrics")
-def get_metrics():
-    return _load_json("metrics.json")
+def get_metrics(dataset: str = "cifar10"):
+    return _load_json(_dataset_json("metrics", dataset))
 
 
 @app.get("/api/probe")
-def get_probe():
-    return _load_json("probe.json")
+def get_probe(dataset: str = "cifar10"):
+    return _load_json(_dataset_json("probe", dataset))
 
 
 @app.get("/api/kernels")
@@ -105,8 +135,15 @@ def get_kernels():
 
 
 @app.get("/api/scales")
-def get_scales():
-    return _load_json("scales.json")
+def get_scales(dataset: str = "cifar10"):
+    return _load_json(_dataset_json("scales", dataset))
+
+
+def _model_image_size(model, model_type) -> int:
+    """模型的输入边长：CC-iGPT 取 fine 分支，单尺度 iGPT 取自身。
+    用于把上传图 resize 到该 dataset 模型期望的尺寸（CIFAR 32 / IN64 64），
+    取代旧的写死 32。"""
+    return model.fine.image_size if model_type == "ccigpt" else model.image_size
 
 
 def _read_upload_to_tensor(file: UploadFile, size: int = 32):
@@ -137,7 +174,7 @@ def _read_upload_to_tensor(file: UploadFile, size: int = 32):
 
 
 @app.post("/api/predict")
-def predict(file: UploadFile = File(...)):
+def predict(file: UploadFile = File(...), dataset: str = Form("cifar10")):
     """
     上传一张图片，返回:
       - bpd: 整体 bits/dim（CC-iGPT 为 bpd_total，iGPT 由 CE 推算）
@@ -153,12 +190,13 @@ def predict(file: UploadFile = File(...)):
     except ImportError:
         raise HTTPException(status_code=500, detail="torch/torchvision not installed")
 
-    x, _ = _read_upload_to_tensor(file, size=32)
-
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model, model_type = _get_cached_model(device)
+    model, model_type = _get_cached_model(device, dataset)
     if model is None:
         raise HTTPException(status_code=503, detail="No checkpoint available. Place a checkpoint in experiments/*/checkpoints/best.pth")
+
+    # 先加载模型再按其几何 resize 上传图（CIFAR 32 / IN64 64），避免写死 32 在 IN64 下喂错尺寸
+    x, _ = _read_upload_to_tensor(file, size=_model_image_size(model, model_type))
 
     x = x.to(device)
     model.eval()
@@ -247,7 +285,7 @@ def _drive_coder(gen, stage, base, total):
 
 
 @app.post("/api/encode")
-def encode(file: UploadFile = File(...)):
+def encode(file: UploadFile = File(...), dataset: str = Form("cifar10")):
     """上传图 → **逐 token gold 算术编码** → 自包含 MDLC .bin（流式 NDJSON 进度）。
 
     编码必须与 /api/decode 走**同一**逐 token 路径（verify_lossless._encode_sequence_iter
@@ -263,11 +301,13 @@ def encode(file: UploadFile = File(...)):
     except ImportError:
         raise HTTPException(status_code=500, detail="torch/torchvision not installed")
 
-    x, _ = _read_upload_to_tensor(file, size=32)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model, model_type = _get_cached_model(device)
+    model, model_type = _get_cached_model(device, dataset)
     if model is None:
         raise HTTPException(status_code=503, detail="No checkpoint available. Place a checkpoint in experiments/*/checkpoints/best.pth")
+
+    # 先加载模型再按其几何 resize（CIFAR 32 / IN64 64）
+    x, _ = _read_upload_to_tensor(file, size=_model_image_size(model, model_type))
 
     from scripts.verify_lossless import _build_container_bytes, _encode_sequence_iter
 
@@ -369,7 +409,7 @@ def inspect(file: UploadFile = File(...)):
 
 
 @app.post("/api/decode")
-def decode(file: UploadFile = File(...)):
+def decode(file: UploadFile = File(...), dataset: str = Form("cifar10")):
     """上传 .bin → 流式逐 token 盲解码还原图像（NDJSON 进度行）。
 
     真实 decoder 视角：只给文件，无原图。逐 token 重跑完整 forward（无 KV-cache,
@@ -387,7 +427,7 @@ def decode(file: UploadFile = File(...)):
 
     blob = _read_bin_upload(file)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model, model_type = _get_cached_model(device)
+    model, model_type = _get_cached_model(device, dataset)
     if model is None:
         raise HTTPException(status_code=503, detail="No checkpoint available. Place a checkpoint in experiments/*/checkpoints/best.pth")
 
@@ -484,6 +524,7 @@ def complete(
     keep_frac: float = Form(0.6),
     temperature: float = Form(1.0),
     top_k: int = Form(100),
+    dataset: str = Form("cifar10"),
 ):
     """图像补全 demo（下游 §6.2）：上传图 → 保留前 keep_frac 的 raster token（≈上半）
     → AR 续采样补全下半 → 返回 原图 / 已知上半(灰=待补) / 补全 三张图。
@@ -517,11 +558,13 @@ def complete(
         raise HTTPException(status_code=400, detail="temperature 需 ∈ [0, 2]")
     top_k = max(0, min(top_k, 256))
 
-    x, _ = _read_upload_to_tensor(file, size=32)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model, model_type = _get_cached_model(device)
+    model, model_type = _get_cached_model(device, dataset)
     if model is None:
         raise HTTPException(status_code=503, detail="No checkpoint available. Place a checkpoint in experiments/*/checkpoints/best.pth")
+
+    # 先加载模型再按其几何 resize（CIFAR 32 / IN64 64）
+    x, _ = _read_upload_to_tensor(file, size=_model_image_size(model, model_type))
 
     # 复用 scripts/complete_image.py 的逐步采样实现（与 runbook 完全同源），
     # 避免在 demo 侧重写一份采样逻辑导致两条路径漂移。
@@ -548,35 +591,37 @@ def complete(
     })
 
 
-_MODEL_CACHE = {"model": None, "type": None}
-_MODEL_CACHE_LOCK = threading.Lock()
+# 每个数据集一个 cache slot；交互端点首次带该 dataset 请求时才 lazy-load
+# （IN64 模型显存约 2× CIFAR，不预加载，避免常驻双份）。每 dataset 一把锁，
+# double-checked locking 防并发首请求重复 torch.load。
+_MODEL_CACHE = {d: {"model": None, "type": None} for d in _DATASETS}
+_MODEL_CACHE_LOCKS = {d: threading.Lock() for d in _DATASETS}
 
 
-def _get_cached_model(device):
+def _get_cached_model(device, dataset: str = "cifar10"):
     """线程安全的延迟加载：double-checked locking 防止并发首请求重复 torch.load
-    同一份 ckpt 造成显存峰值翻倍。
+    同一份 ckpt 造成显存峰值翻倍。按 dataset 分槽（cifar10 / imagenet64）。
 
     返回 (model, model_type)：model_type ∈ {"ccigpt", "igpt"}。
     """
-    if _MODEL_CACHE["model"] is not None:
-        return _MODEL_CACHE["model"], _MODEL_CACHE["type"]
+    dataset = _norm_dataset(dataset)
+    slot = _MODEL_CACHE[dataset]
+    if slot["model"] is not None:
+        return slot["model"], slot["type"]
 
-    with _MODEL_CACHE_LOCK:
-        if _MODEL_CACHE["model"] is not None:
-            return _MODEL_CACHE["model"], _MODEL_CACHE["type"]
+    with _MODEL_CACHE_LOCKS[dataset]:
+        if slot["model"] is not None:
+            return slot["model"], slot["type"]
 
         import yaml
         import torch
 
-        # 按优先级尝试主路径 ckpt：v2 深窄当前主表 (2.8296) → R-only softmax v1 历史主表 (2.9035)。
-        # iGPT 单尺度 baseline 已退出主线（Phase A 历史），不再作为 fallback。
+        # 按优先级尝试该 dataset 的主路径 ckpt（首个 best.pth 在位者胜）。
+        # iGPT 单尺度 baseline 已退出主线（Phase A 历史），不作 fallback。
         configs_dir = ROOT / "configs"
         experiments_dir = ROOT / "experiments"
 
-        for cfg_name in [
-            "ccigpt_cifar10_s_rgb_ronly_v2.yaml",
-            "ccigpt_cifar10_s_rgb_ronly.yaml",
-        ]:
+        for cfg_name in _DATASETS[dataset]["configs"]:
             cfg_path = configs_dir / cfg_name
             if not cfg_path.exists():
                 continue
@@ -608,8 +653,8 @@ def _get_cached_model(device):
                 model.load_state_dict(clean_state_dict(ckpt))
             model.eval()
 
-            _MODEL_CACHE["model"] = model
-            _MODEL_CACHE["type"] = model_type
+            slot["model"] = model
+            slot["type"] = model_type
             return model, model_type
 
         return None, None

@@ -1,0 +1,11 @@
+{
+  "model": "CC-iGPT IN64 fine (N=32, d=448) -> CIFAR-10 transfer probe",
+  "dataset": "ImageNet64 -> CIFAR-10 (transfer)",
+  "num_classes": 10,
+  "layers": [0, 15, 31],
+  "accuracy": [41.70, 73.13, 64.90],
+  "best_layer": 15,
+  "best_accuracy": 73.13,
+  "sparse": true,
+  "note": "ImageNet64 ep12 best.pth 冻结，在 CIFAR-10 上做 transfer linear probe（32->64 resize）。当前仅 3 个锚点（L0 41.70 / L15 73.13 / L31 64.90），完整 32 层数组待 AutoDL 回填。中层峰 L15 73.13% 胜 iGPT-S native 66.93% (+6.2pp)；低于 CC-iGPT v2 CIFAR native 79.33%（transfer + resize 域偏移代价）。transfer 口径，勿与 native 32x32 横比。"
+}

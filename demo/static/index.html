@@ -12,6 +12,16 @@
 <header>
   <h1>MDL 深度图像压缩系统</h1>
   <p class="subtitle">基于最小描述长度原则的自回归无损图像压缩 — 毕业设计演示</p>
+  <div class="dataset-toggle" role="radiogroup" aria-label="数据集切换">
+    <label class="dataset-opt">
+      <input type="radio" name="dataset-toggle" value="cifar10" checked>
+      <span>CIFAR-10 <small>2.8296 bpd</small></span>
+    </label>
+    <label class="dataset-opt">
+      <input type="radio" name="dataset-toggle" value="imagenet64">
+      <span>ImageNet64 <small>3.4800 bpd</small></span>
+    </label>
+  </div>
 </header>
 
 <main>
@@ -109,6 +119,7 @@
 <!-- Panel 7: 图像补全 (AR inpainting) -->
 <section class="panel" id="panel-complete">
   <h2>图像补全 — AR inpainting（生成侧面）</h2>
+  <p class="dataset-warning" hidden>⚠ ImageNet64 模式：64×64 共 12288 fine token，补全采样数分钟，请耐心等待（首次还需 lazy-load IN64 ckpt，显存约 2×）。</p>
   <p class="panel-desc">
     给前 keep% 比例的 raster token（≈上半若干行），AR 续采样补全其余（Sparse Transformer 同款定性下游，AR 模型天然支持、不重训）。
     <b>诚实声明</b>：CC-iGPT 的 coarse ctx 由<b>整图</b>缩略图算 → 语义是"低分缩略图 + 上半真实像素 → 补下半"，coarse 是显式 side-channel（与压缩时独立 bitstream 同源），非偷看答案。
@@ -167,6 +178,7 @@
 <!-- Panel: 交互式无损 codec — 图像 ⇄ .bin（真实可解性验证）-->
 <section class="panel" id="panel-codec">
   <h2>真实可解性验证 — 无损 codec 图像 ⇄ .bin 文件</h2>
+  <p class="dataset-warning" hidden>⚠ ImageNet64 模式：64×64 编/解各 ~12500 步，单向约 4–8 分钟（CIFAR 的 ~4×）。.bin 容器记录图像几何，只能用同款 IN64 模型解码（CIFAR↔IN64 互解会被几何校验拒绝）。</p>
   <p class="panel-desc">
     把模型当真实无损 codec：上传图 → <b>逐 token gold 算术编码</b>下载真实<b>自包含 .bin</b>（MDLC 容器，与 CLI
     <code>verify_lossless.py --dump_dir</code> 逐字节一致）；再把 .bin 传回 → <b>仅凭文件</b>即时解析结构，
