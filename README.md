@@ -31,17 +31,27 @@
 | PixelSNAIL | Autoregressive | 380M | 2.85 | RGB-bit-exact | Chen et al., ICML 2018 |
 | Sparse Transformer | Autoregressive | 59M | 2.80 | RGB-bit-exact | Child et al., 2019 (128 层 strided sparse attention) |
 | **CC-iGPT v2 (Ours, R-only)** | Autoregressive | 82.95M | **2.8296** ± 0.0854 | RGB-bit-exact | `coarse_in_channels=1`，coarse 仅压 R 8×8（64 token），fine 通过 sub-pixel AR 自学 G/B，**主表**（200ep + RandomCrop + DropPath 0.1 + EMA 0.9998 + SWA last 31 ckpts + ensemble best/SWA/EMA + TTA hflip）|
-| CC-iGPT v1 (Ours, R-only) | Autoregressive | ~81M | 2.9035 ± 0.0854 | RGB-bit-exact | v1 历史主表（100ep + EMA 0.9995 + TTA hflip）|
 | PNG | Classical codec | — | 5.87 | RGB-bit-exact | Hoogeboom et al., NeurIPS 2019 报告 |
 | WebP (lossless) | Classical codec | — | 4.61 | RGB-bit-exact | Hoogeboom et al., NeurIPS 2019 报告 |
 
-CC-iGPT v2 R-only **超越 PixelSNAIL 380M (2.85)、逼近 Sparse Transformer 59M (2.80)**，参数预算 82.95M。主表 ensemble (best+SWA+EMA) + TTA hflip = **2.8296 ± 0.0854**（vs PixelSNAIL gap -0.020 / vs Sparse Trans gap +0.030）。SOTA 路线靠 ImageNet 64×64 < 3.44（Sparse Transformer 152M strided）benchmark 支撑。
+CC-iGPT v2 R-only **超越 PixelSNAIL 380M (2.85)、逼近 Sparse Transformer 59M (2.80)**，参数预算 82.95M。主表 ensemble (best+SWA+EMA) + TTA hflip = **2.8296 ± 0.0854**（vs PixelSNAIL gap -0.020 / vs Sparse Trans gap +0.030）。
+
+### ImageNet 64×64 对比
+
+| 方法 | 类别 | Params | ImageNet64 bits/dim ↓ | 域 | 来源 |
+|------|------|--------|-----------------------|----|------|
+| PixelCNN | Autoregressive | — | 3.57 | RGB-bit-exact | van den Oord et al., 2016 |
+| SPN (Subscale Pixel Network) | Autoregressive | — | 3.52 | RGB-bit-exact | Menick & Kalchbrenner, ICLR 2019 |
+| Sparse Transformer | Autoregressive | 152M | 3.44 | RGB-bit-exact | Child et al., 2019 (strided sparse attention) |
+| **CC-iGPT (Ours, R-only)** | Autoregressive | 82.95M | **3.4800** ± 0.1161 | RGB-bit-exact | `configs/ccigpt_imagenet64_v1.yaml`，coarse 16×16=256 token / fine 12288 token，4 卡 DDP 12ep，**主表**（ensemble best/SWA/EMA + TTA hflip）|
+
+ImageNet64 R-only **超越 SPN 3.52（-0.040）、逼近但未达 Sparse Transformer 152M 3.44（+0.040）**。主表 ensemble (best+SWA+EMA) + TTA hflip = **3.4800**（单 ckpt best+TTA = 3.4810；CE_c 3.8960 share 3.4% / CE_f 2.3310 96.6% / α 0.1991）。注：4 卡评测的 ± 0.1161 是 batch-level std（随 GPU 数变化），与 CIFAR 主表 per-image ± 口径不同；mean 与单卡 bit-exact 一致。
 
 ### 创新点定位
 
 1. **方法 — 零新参数的双尺度条件注入**：coarse iGPT 量化 token 经 bit-exact 反量化/上采样/重 tokenize 后，复用 `fine.token_embed` 得到 `coarse_ctx`，再以可学习标量 α 做 additive 注入。整个 ctx 通路只引入 1 个标量参数；encoder/decoder 共用同一函数，bitstream 真实可解码。回避了多尺度联合 AR 的 loss 平衡难题。
 2. **工程 — 8 个手写 Triton kernel + 1 个 roofline 证伪的反面案例**：7 个进入训练栈，1 个 `fused_linear_ce` 在 V=256 下经 `scripts/profile_kernels.py --kernel fused_linear_ce --roofline` 分析判定为负收益（compute-bound + 三重循环失去 cuBLAS GEMM 利用率），保留作工程严谨性的反向证据。
-3. **分析 — RGB-bit-exact 主表 + 多 benchmark SOTA 对比**：CIFAR-10 R-only v2 主表 **2.8296 bpd**（超越 PixelSNAIL 380M 2.85）；ImageNet 64×64 benchmark（目标 < 3.44）；Linear Probe 逐层表征曲线；roofline forward 与 fwd+bwd 双视角。
+3. **分析 — RGB-bit-exact 主表 + 多 benchmark SOTA 对比**：CIFAR-10 R-only v2 主表 **2.8296 bpd**（超越 PixelSNAIL 380M 2.85）；ImageNet 64×64 主表 **3.4800 bpd**（超 SPN 3.52、逼近未达 Sparse Transformer 152M 3.44）；Linear Probe 逐层表征曲线；roofline forward 与 fwd+bwd 双视角。
 
 ## 快速开始
 

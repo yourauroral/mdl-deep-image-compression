@@ -173,12 +173,13 @@ p_\theta(x) \;=\; \prod_t p_\theta(x_t \mid x_{<t}),
 {\scriptsize vs PixelSNAIL 380M (2.85) \textbf{$-0.020$} \;\; $\cdot$ \;\; vs Sparse Transformer 59M (2.80) $+0.020$}
 \end{frame}
 
-% ============================== 3b. ImageNet64 第二轨道（in-training） ==============================
-\begin{frame}{第二轨道：ImageNet 64$\times$64（训练中）}
+% ============================== 3b. ImageNet64 第二轨道（完成 2026-06-07） ==============================
+\begin{frame}{第二轨道：ImageNet 64$\times$64（主表 3.4800 bpd）}
 \centering
 \includegraphics[width=0.92\linewidth]{ImageNet64baseline.pdf}
 
-\
+\medskip
+{\small 主表 ensemble (best+SWA+EMA) + TTA hflip = \textbf{3.4800 bpd}：超 SPN 3.52、逼近未达 Sparse Transformer 152M 3.44}
 \end{frame}
 
 % ============================== 4. 模型架构总览（图） ==============================
