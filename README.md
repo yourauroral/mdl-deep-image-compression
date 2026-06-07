@@ -18,7 +18,8 @@
 | Linear probe | 完成 | CC-iGPT v2 native L19 best = **79.33%**；IN64→CIFAR-10 transfer probe best L15 = **73.13%**（32→64 resize，胜 iGPT-S native 66.93%，不与 native 横比） |
 | Demo 前端 | 完成 | 7 面板；保留 upload / metrics / probe / kernels / scales / completion / codec |
 | 下游任务 | 精简完成 | 保留 `linear_probe.py`、`complete_image.py`、`verify_lossless.py`；旧静态 JSON 下游面板已移除 |
-| ImageNet64 | 训练中 | 目标 < 3.44 bpd；以 AutoDL 当前日志为准，本 README 只记录本地同步到的快照 |
+| ImageNet64 | 完成 (2026-06-07) | 12ep 训练 + 4 卡 DDP 评测；主表 ensemble + TTA = **3.4800 bpd**（超 SPN 3.52、逼近未达 Sparse Transformer 152M 3.44） |
+| 表征理论 | 文档完成 | [theory.md](theory.md)：linear probe 为何有效（MDL + LRH + MDL probing 三段论），含阅读清单与实验菜单 |
 | 本地验证 | 通过 | 最近一次清理后：`pytest -m cpu -q` 58 passed；`compileall` 与 `git diff --check` 通过 |
 
 ## Baseline 对比
@@ -103,12 +104,14 @@ python3 scripts/linear_probe.py \
     --checkpoint experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/best.pth \
     --layers all
 
-# IN64 -> CIFAR-10 transfer probe（待 IN64 checkpoint；32->64 resize，勿与 native 32x32 横比）
+# IN64 -> CIFAR-10 transfer probe（IN64 ep12 best.pth；32->64 resize，勿与 native 32x32 横比；实测 best L15 = 73.13%）
 python3 scripts/linear_probe.py \
     --config configs/ccigpt_imagenet64_v1.yaml \
     --checkpoint experiments/ccigpt_imagenet64_v1/checkpoints/best.pth \
     --probe_dataset cifar10 --probe_data_root datasets/ --layers all
 ```
+
+> 为什么 linear probe 能从纯压缩模型里线性读出语义？理论见 [theory.md](theory.md)（MDL → LRH → MDL probing 三段论 + 阅读清单 + E1–E6 实验菜单）。
 
 ### 保留下游任务
 
@@ -379,7 +382,7 @@ scripts/       train.py (checkpoint sidecar *.meta.json), evaluate.py (含 --ens
 configs/       igpt_cifar10_s_rgb,
                ccigpt_cifar10_s_rgb_ronly      (R-only v1 历史主表 2.9035 bpd, 100ep, 已被 v2 替代),
                ccigpt_cifar10_s_rgb_ronly_v2   (深窄 N=32/d=448 + 200ep, 当前主表 ensemble+TTA 2.8296 bpd),
-               ccigpt_imagenet64_v1            (ImageNet64 12ep benchmark, 训练中)
+               ccigpt_imagenet64_v1            (ImageNet64 12ep benchmark, 完成 2026-06-07, ensemble+TTA 3.4800 bpd)
 downstream/    runbook.md (下游任务执行手册) + run_downstream.sh (AutoDL 批量执行)
 tests/         单元测试（含 test_ccigpt_smoke / test_arithmetic_codec）
 demo/
@@ -402,3 +405,5 @@ demo/
 **训练**: SWA (Izmailov 2018), Cosine + Warmup (OLMo 2 2025)
 
 **理论**: Shannon (1948), MDL (Rissanen 1978), Language Modeling Is Compression (Delétang 2024)
+
+**表征 / 可解释性**（probe 为何有效，详见 [theory.md](theory.md)）: Control Tasks (Hewitt & Liang 2019), Info-Theoretic Probing (Pimentel 2020), MDL Probing (Voita & Titov 2020), Description Length of DL Models (Blier & Ollivier 2018), V-information (Xu 2020), Linear Representation Hypothesis (Park, Choe & Veitch 2024), Toy Models of Superposition (Elhage 2022)

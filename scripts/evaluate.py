@@ -122,14 +122,13 @@ def _progress(loader, desc):
     return tqdm(loader, desc=desc, total=len(loader), dynamic_ncols=True)
 
 
-def _dist_reduce_sum(values: dict, device) -> dict:
+def _dist_reduce_sum(values: dict) -> dict:
     """对一组标量做跨 rank all-reduce(SUM)。单卡时原样返回。
 
     用于把各 rank 的加权累加量（bpd_weighted_sum / n_total / ce_*_sum 等）汇总成全局量，
     再在 caller 里除以全局 n_total 得到与单卡一致的均值/方差。
 
     后端是 gloo，all_reduce 张量必须在 **CPU**（gloo 不走 GPU）；标量量小，CPU 归约无开销。
-    device 参数保留仅为签名兼容，不再用于建张量。
     """
     if not _is_dist():
         return values
@@ -255,7 +254,7 @@ def evaluate_model(model, loader, device, amp_dtype=None, tta_hflip: bool = Fals
         "ce_c": ce_c_sum,
         "ce_f": ce_f_sum,
         "alpha": alpha_sum,
-    }, device)
+    })
     n_global = agg["n"]
     bpd_mean = agg["wsum"] / n_global
     bpd_var = max(agg["sqsum"] / n_global - bpd_mean ** 2, 0.0)
@@ -484,7 +483,7 @@ def evaluate_ensemble(models, loader, device, amp_dtype=None, tta_hflip: bool = 
         "ce_c": ce_c_sum,
         "ce_f": ce_f_sum,
         "alpha": alpha_sum,
-    }, device)
+    })
     n_global = agg["n"]
     bpd_mean = agg["wsum"] / n_global
     bpd_var = max(agg["sqsum"] / n_global - bpd_mean ** 2, 0.0)
