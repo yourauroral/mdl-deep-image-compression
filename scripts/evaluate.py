@@ -65,13 +65,18 @@ def _init_distributed():
     """从 torchrun 环境变量初始化分布式。返回 (rank, world_size, local_rank, is_dist)。
 
     未经 torchrun 启动（无 RANK/WORLD_SIZE 环境变量）时返回单卡占位，不初始化进程组。
+
+    后端固定用 **gloo**（CPU/TCP socket）：评测 forward 是各 rank 独立的（无 GPU-GPU
+    通信），只在末尾归约 6 个标量 + gather per-image 列表。AutoDL 等容器里 NCCL 的
+    GPU P2P/SHM 常不通，会让哪怕 6-float 的 all_reduce 卡死超时（实测 ALLREDUCE
+    NumelIn=6 hang 600s）；gloo 走 socket、在单机多卡容器里稳定，且标量通信无性能损失。
+    模型仍各自跑在 cuda:local_rank 上（PG 后端只管集合通信、不决定张量所在设备）。
     """
     if "RANK" in os.environ and "WORLD_SIZE" in os.environ and int(os.environ["WORLD_SIZE"]) > 1:
         rank = int(os.environ["RANK"])
         world_size = int(os.environ["WORLD_SIZE"])
         local_rank = int(os.environ.get("LOCAL_RANK", rank))
-        backend = "nccl" if torch.cuda.is_available() else "gloo"
-        dist.init_process_group(backend=backend)
+        dist.init_process_group(backend="gloo")
         if torch.cuda.is_available():
             torch.cuda.set_device(local_rank)
         return rank, world_size, local_rank, True
@@ -101,11 +106,14 @@ def _dist_reduce_sum(values: dict, device) -> dict:
 
     用于把各 rank 的加权累加量（bpd_weighted_sum / n_total / ce_*_sum 等）汇总成全局量，
     再在 caller 里除以全局 n_total 得到与单卡一致的均值/方差。
+
+    后端是 gloo，all_reduce 张量必须在 **CPU**（gloo 不走 GPU）；标量量小，CPU 归约无开销。
+    device 参数保留仅为签名兼容，不再用于建张量。
     """
     if not _is_dist():
         return values
     keys = list(values.keys())
-    t = torch.tensor([values[k] for k in keys], dtype=torch.float64, device=device)
+    t = torch.tensor([values[k] for k in keys], dtype=torch.float64)  # CPU tensor for gloo
     dist.all_reduce(t, op=dist.ReduceOp.SUM)
     return {k: t[i].item() for i, k in enumerate(keys)}
 
