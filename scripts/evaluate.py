@@ -55,10 +55,17 @@ from scripts.train import _build_model_from_config, _build_ccigpt_from_config
 
 # ── 多卡评测（DDP）──
 # 评测是纯 forward（无梯度、无参数同步），不需要 DDP wrap model。做法：
-#   1. torchrun 拉起 N 个进程，每进程 _init_distributed() 初始化 NCCL + 绑定一张卡
+#   1. torchrun 拉起 N 个进程，每进程 _init_distributed() 初始化 gloo 进程组 + 绑定一张卡
 #   2. _shard_dataset() 用 stride 切片把 val 集分成 N 份不相交子集（并集 = 全集，无 padding）
 #   3. 每 rank 独立 build+load ckpt 到自己的卡、只跑自己那份
-#   4. evaluate_* 末尾 all-reduce(SUM) 加权累加量 → 全局 bpd_mean/std 与单卡 bit 一致
+#   4. evaluate_* 末尾 all-reduce(SUM) 加权累加量 → 全局 bpd_mean
+# ⚠ 精度说明（bpd_mean vs bpd_std）：
+#   - bpd_mean **与单卡一致**（到打印精度）：wsum = Σ batch_mean·B 在分批/分片下 telescoping 到
+#     Σ_所有图 bpd_i，再除以全局 N，与切分方式无关（仅浮点求和顺序的末位抖动）。
+#   - bpd_std **不保证与单卡 bit-exact**：sqsum 累加的是 (batch_mean)²·B，是"batch 均值的二阶矩"，
+#     不是 per-image 二阶矩。stride 分片把图重新分组到不同 batch → sqsum 随 GPU 数/batch 边界变化，
+#     故 ± std 在单卡 vs 多卡会有差异。主表 ± 数字若要与历史单卡可比，请用单卡评测；
+#     或用 --per_image_stats（gather 真 per-image 列表，顺序无关、可复现的 CI）。
 # 单卡运行（不经 torchrun）时所有 helper 退化为 no-op，行为与改造前完全相同。
 
 def _init_distributed():
@@ -91,7 +98,9 @@ def _shard_dataset(dataset):
     """分布式时按 stride 把 dataset 切成 world_size 份不相交子集，返回本 rank 那份。
 
     indices = range(rank, N, world_size)：各 rank 子集不相交、并集 = 全集、无重复 padding，
-    因此 all-reduce(SUM) 后 n_total == 原始 N，bpd 与单卡 bit-exact。单卡时原样返回。
+    因此 all-reduce(SUM) 后 n_total == 原始 N，bpd_mean 与单卡一致（到打印精度）。
+    ⚠ bpd_std 不保证与单卡 bit-exact（见模块顶部 DDP 注释：std 是 batch 均值二阶矩，随分片变化）。
+    单卡时原样返回。
     """
     if not _is_dist():
         return dataset
@@ -235,10 +244,10 @@ def evaluate_model(model, loader, device, amp_dtype=None, tta_hflip: bool = Fals
             if "ctx_alpha" in out and out["ctx_alpha"] is not None:
                 alpha_sum += out["ctx_alpha"].item() * B
 
-    bpd_mean = bpd_weighted_sum / n_total
     # batch-level 加权 std，与 train.py:validate() 同公式：avoid np.std(batch_means)
     # 在末尾不足 batch 时给小 batch 过高权重。
-    # 分布式：先 all-reduce(SUM) 各 rank 加权累加量，再除以全局 n_total → 与单卡 bit-exact。
+    # 分布式：all-reduce(SUM) 各 rank 加权累加量，再除以全局 n_total。bpd_mean 与单卡一致（到打印
+    # 精度）；bpd_std 不保证 bit-exact（sqsum 是 batch 均值二阶矩，随分片/batch 边界变化，见模块注释）。
     agg = _dist_reduce_sum({
         "wsum": bpd_weighted_sum,
         "sqsum": bpd_sq_weighted_sum,
@@ -465,11 +474,9 @@ def evaluate_ensemble(models, loader, device, amp_dtype=None, tta_hflip: bool = 
         bpd_sq_weighted_sum += (bpd_val ** 2) * B
         n_total += B
 
-    bpd_mean = bpd_weighted_sum / n_total
-    bpd_var = max(bpd_sq_weighted_sum / n_total - bpd_mean ** 2, 0.0)
-    bpd_std = float(math.sqrt(bpd_var))
-
     # 分布式：与 evaluate_model 同口径，all-reduce(SUM) 后用全局 n 归一。
+    # bpd_mean 与单卡一致（到打印精度）；bpd_std 不保证 bit-exact（sqsum 是 batch 均值二阶矩，
+    # 随分片/batch 边界变化，见模块顶部 DDP 注释）。
     agg = _dist_reduce_sum({
         "wsum": bpd_weighted_sum,
         "sqsum": bpd_sq_weighted_sum,
@@ -675,7 +682,9 @@ def cmd_single(args, config, device):
             f"mean={summary['mean']:.4f}, std={summary['std']:.4f}, "
             f"stderr={summary['stderr']:.5f}{ci_str}"
         )
-        if args.per_image_json:
+        if args.per_image_json and (not _is_dist() or dist.get_rank() == 0):
+            # 只 rank0 落盘：DDP 下各 rank 经 all_gather_object 持有相同全集列表，
+            # 若不 gate，N 个进程并发 open('w') 同一路径会交错/损坏 JSON。
             _write_per_image_json(args.per_image_json, per_image, summary)
     if extras:
         # CC-iGPT 多输出 CE_c / CE_f / α，便于诊断 fine 弱 vs coarse overhead 过大

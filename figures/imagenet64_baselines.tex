@@ -7,11 +7,11 @@
 %   Gated PixelCNN      3.57   van den Oord et al., NeurIPS 2016
 %   SPN (Subscale)      3.52   Menick & Kalchbrenner, ICLR 2019 (coarse-to-fine 最近邻)
 %   Sparse Transformer  3.44   Child et al., 2019  ← 目标线
-%   CC-iGPT (Ours)      3.4807 本工作，IN64 v1 12ep 训练完成，EMA0.9998 in-training val（占位；主表 ensemble+TTA 数字待评测后替换）
+%   CC-iGPT (Ours)      3.4800 本工作，IN64 v1 12ep，主表 ensemble(best+SWA+EMA)+TTA hflip（4卡实测 2026-06-07）
 %
-% ！占位说明：3.4807 是 12ep 训练完成后 EMA 变体 in-training val（三变体 raw 3.4810 / EMA 3.4807 / SWA 3.4811，取最优 EMA）。
-%   主表口径是 ensemble(best+swa+ema)+TTA hflip，数字待 AutoDL 评测后替换 Ours 柱高与标注。
-%   已超 SPN 3.52 约 0.039、距 3.44 约 0.041；预期 ensemble+TTA 增益 -0.0016~-0.005 补不上 gap → 叙事"超 SPN、逼近 Sparse Transformer 3.44"。
+% 主表数字 3.4800 ± 0.1161（ensemble best/SWA/EMA + TTA hflip；单 ckpt best+TTA=3.4810）。
+%   超 SPN 3.52 by 0.040、逼近但未达 Sparse Transformer 152M 3.44（差 0.040）。叙事"超 SPN、逼近 Sparse Transformer"。
+%   注：± 0.1161 是 4卡 batch-level std，与 CIFAR 主表 per-image 口径不同（要可比需单卡 --per_image_stats 重取）。
 \documentclass[tikz,border=8pt]{standalone}
 \usepackage{tikz}
 \usepackage{pgfplots}
@@ -50,9 +50,9 @@
     (PixelRNN,    3.63)
 };
 
-% 第5个橘黄柱子（Ours，占位 EMA in-training val 3.4807）
+% 第5个橘黄柱子（Ours，主表 ensemble+TTA 3.4800）
 \addplot[draw=orange!70!black, fill=orange!30!yellow!80, bar shift=0pt] coordinates {
-    (Ours, 3.4807)
+    (Ours, 3.4800)
 };
 
 % --- 参考线 1：SPN 3.52（coarse-to-fine 最近邻）---
@@ -74,7 +74,7 @@
 \node[font=\scriptsize, align=center, yshift=4pt] at (axis cs:SPN, 3.52) {3.52};
 \node[font=\scriptsize, align=center, yshift=4pt] at (axis cs:GatedPCNN, 3.57) {3.57};
 \node[font=\scriptsize, align=center, yshift=4pt] at (axis cs:PixelRNN, 3.63) {3.63};
-\node[font=\scriptsize, align=center, orange!70!black, yshift=4pt] at (axis cs:Ours, 3.4807) {\textbf{3.48}\,\scriptsize EMA*};
+\node[font=\scriptsize, align=center, orange!70!black, yshift=4pt] at (axis cs:Ours, 3.4800) {\textbf{3.48}};
 
 \end{axis}
 
@@ -85,7 +85,7 @@
 % --- 占位脚注 (ASCII only, pdflatex 可编译) ---
 \node[font=\scriptsize\itshape, gray!50!black, anchor=north, yshift=-2pt]
     at (current bounding box.south)
-    {* CC-iGPT v1 12ep done, EMA in-training val; main-table ensemble+TTA number TBD};
+    {CC-iGPT v1 12ep: ensemble(best+SWA+EMA)+TTA = 3.4800 bpd (4-GPU)};
 
 \end{tikzpicture}
 \end{document}

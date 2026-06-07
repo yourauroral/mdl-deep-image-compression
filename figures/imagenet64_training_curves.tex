@@ -18,8 +18,8 @@
 %   12 |   3.4124  |  3.4810 | 2.08e-05
 %
 % 末 epoch 三变体 in-training 验证（无 TTA/ensemble）：raw(best) 3.4810 / EMA0.9998 3.4807 / SWA(2ckpt) 3.4811。
-% raw-val 已趋平（ep10->11->12 -0.0022/-0.0036，cosine LR 到底），超 SPN 3.52 约 0.039、距 3.44 约 0.041。
-% 主表 ensemble(best+swa+ema)+TTA 数字待评测（预期补不上 0.041 gap，叙事：超 SPN、逼近 Sparse Transformer 3.44）。
+% raw-val 已趋平（ep10->11->12 -0.0022/-0.0036，cosine LR 到底），单 ckpt best+TTA=3.4810。
+% 主表 ensemble(best+SWA+EMA)+TTA hflip = 3.4800（4卡实测 2026-06-07）；超 SPN 3.52 by 0.040、逼近但未达 Sparse Transformer 152M 3.44（差 0.040）。
 \documentclass[tikz,border=8pt]{standalone}
 \usepackage{tikz}
 \usepackage{pgfplots}
