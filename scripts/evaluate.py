@@ -101,6 +101,18 @@ def _shard_dataset(dataset):
     return Subset(dataset, indices)
 
 
+def _progress(loader, desc):
+    """tqdm 进度条，只在 rank0（或单卡）显示；其余 rank 原样返回 loader 不打印。
+
+    分布式时各 rank 跑等量 batch（stride 切分 + 同 batch_size），rank0 的进度条
+    即代表整体进度。total 用本 rank 的 batch 数（len(loader)）。
+    """
+    if _is_dist() and dist.get_rank() != 0:
+        return loader
+    from tqdm import tqdm
+    return tqdm(loader, desc=desc, total=len(loader), dynamic_ncols=True)
+
+
 def _dist_reduce_sum(values: dict, device) -> dict:
     """对一组标量做跨 rank all-reduce(SUM)。单卡时原样返回。
 
@@ -174,7 +186,7 @@ def evaluate_model(model, loader, device, amp_dtype=None, tta_hflip: bool = Fals
     is_ccigpt = False
     ce_c_sum = ce_f_sum = alpha_sum = 0.0
 
-    for batch in loader:
+    for batch in _progress(loader, "eval"):
         if isinstance(batch, (list, tuple)):
             x = batch[0]
         else:
@@ -413,7 +425,7 @@ def evaluate_ensemble(models, loader, device, amp_dtype=None, tta_hflip: bool = 
         nll_per_tok = -log_probs_ens.gather(-1, target.unsqueeze(-1)).squeeze(-1)
         return nll_per_tok.mean(), ce_c_local, alpha_local
 
-    for batch in loader:
+    for batch in _progress(loader, "ensemble"):
         x = batch[0] if isinstance(batch, (list, tuple)) else batch
         x = x.to(device)
         B = x.size(0)
@@ -507,7 +519,11 @@ def compute_traditional_bpd(dataset, method="png"):
     save_kwargs = {"lossless": True} if method == "webp" else {}
 
     bpd_list = []
-    for i in range(len(dataset)):
+    _rng = range(len(dataset))
+    if not (_is_dist() and dist.get_rank() != 0):
+        from tqdm import tqdm
+        _rng = tqdm(_rng, desc=f"traditional/{method}", dynamic_ncols=True)
+    for i in _rng:
         img_tensor, _ = dataset[i]
         # tensor (C, H, W) [0,1] → PIL Image
         img_np = (img_tensor.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
