@@ -231,8 +231,11 @@ def main():
                         help="线性分类器训练轮数 (default: 100)")
     parser.add_argument("--lr", type=float, default=0.1,
                         help="SGD 学习率 (default: 0.1)")
-    parser.add_argument("--batch_size", type=int, default=256,
-                        help="特征提取和分类器训练 batch size (default: 256)")
+    parser.add_argument("--batch_size", type=int, default=None,
+                        help="特征提取和分类器训练 batch size。默认 None=按模型 fine seq 自适应"
+                             "（CIFAR seq=3072 → 256；IN64 seq=12288 → 64），避免长序列下 "
+                             "fused projection 的 B·T·3d 偏移溢出 int32 → CUDA illegal memory access。"
+                             "显式指定可覆盖。")
     parser.add_argument("--export_csv", type=str, default=None,
                         help="导出结果到 CSV 文件")
     parser.add_argument("--no_coarse_ctx", action="store_true",
@@ -263,9 +266,23 @@ def main():
         # CC-iGPT 的 probe 在 fine 子模型的各层 hidden 上做（encode 内部已注入 coarse_ctx）
         N = model.fine.N_layers
         d_model = model.fine.d_model
+        fine_seq = model.fine.seq_len
     else:
         N = mcfg["N"]
         d_model = mcfg["d_model"]
+        fine_seq = model.seq_len
+
+    # --- batch_size 自适应 ---
+    # 默认 None → 按 fine 序列长度反推一个 token 预算（256×3072=CIFAR 老默认），
+    # 使 B·seq 维持常量。CIFAR seq=3072 → 256；IN64 seq=12288 → 64。
+    # 动机：长序列 + 大 batch 下，fused QKV projection 的 flat 偏移 B·seq·(3·d_model)
+    # 会溢出 int32（IN64 batch256：256·12287·1344 ≈ 4.2e9 > 2.1e9）→ CUDA illegal
+    # memory access（非 OOM）。token 预算法把 IN64 自动压到 batch 64（实测可跑）。
+    if args.batch_size is None:
+        TOKEN_BUDGET = 256 * 3072
+        args.batch_size = max(8, min(256, TOKEN_BUDGET // fine_seq))
+        print(f"[probe] batch_size 自适应 = {args.batch_size}（fine seq={fine_seq}，"
+              f"token 预算 {TOKEN_BUDGET}）")
 
     # --- 解析层索引 ---
     if args.layers == "all":
