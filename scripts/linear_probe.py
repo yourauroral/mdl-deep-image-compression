@@ -92,7 +92,7 @@ def load_checkpoint(model, ckpt_path, device):
 
 @torch.no_grad()
 def extract_features(model, dataloader, layer_indices, device, amp_dtype=None,
-                     use_coarse_ctx: bool = True):
+                     use_coarse_ctx: bool = True, desc: str = "extract"):
     """
     提取指定层的 hidden states，全局平均池化后返回。
 
@@ -123,7 +123,8 @@ def extract_features(model, dataloader, layer_indices, device, amp_dtype=None,
     # CC-iGPT 的 encode 接受 use_coarse_ctx；普通 iGPT 没有这个参数。
     is_ccigpt = hasattr(model, "fine") and hasattr(model, "coarse")
 
-    for batch in dataloader:
+    from tqdm import tqdm
+    for batch in tqdm(dataloader, desc=desc, total=len(dataloader), dynamic_ncols=True):
         images, targets = batch
         images = images.to(device)
 
@@ -352,14 +353,14 @@ def main():
     print("\n[1/3] 提取训练集特征 ...")
     train_features, train_labels = extract_features(
         model, train_loader, layer_indices, device, amp_dtype,
-        use_coarse_ctx=use_coarse_ctx)
+        use_coarse_ctx=use_coarse_ctx, desc="train feats")
     print(f"      训练集: {train_labels.shape[0]} 样本, "
           f"每层特征 shape: ({train_labels.shape[0]}, {d_model})")
 
     print("[2/3] 提取测试集特征 ...")
     test_features, test_labels = extract_features(
         model, test_loader, layer_indices, device, amp_dtype,
-        use_coarse_ctx=use_coarse_ctx)
+        use_coarse_ctx=use_coarse_ctx, desc="test feats")
     print(f"      测试集: {test_labels.shape[0]} 样本")
 
     # --- 训练线性分类器 ---

@@ -15,7 +15,7 @@
 | 模块 | 状态 | 备注 |
 |---|---|---|
 | CIFAR-10 v2 主表 | 完成 | ensemble(best+SWA+EMA) + TTA hflip = **2.8296 ± 0.0854 bpd** |
-| Linear probe | 完成 | CC-iGPT v2 L19 best = **79.33%**；IN64→CIFAR transfer probe 入口保留 |
+| Linear probe | 完成 | CC-iGPT v2 native L19 best = **79.33%**；IN64→CIFAR-10 transfer probe best L15 = **73.13%**（32→64 resize，胜 iGPT-S native 66.93%，不与 native 横比） |
 | Demo 前端 | 完成 | 7 面板；保留 upload / metrics / probe / kernels / scales / completion / codec |
 | 下游任务 | 精简完成 | 保留 `linear_probe.py`、`complete_image.py`、`verify_lossless.py`；旧静态 JSON 下游面板已移除 |
 | ImageNet64 | 训练中 | 目标 < 3.44 bpd；以 AutoDL 当前日志为准，本 README 只记录本地同步到的快照 |
