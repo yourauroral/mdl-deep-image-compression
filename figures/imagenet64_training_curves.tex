@@ -1,8 +1,8 @@
-% ImageNet 64x64 训练曲线 — CC-iGPT v1 (12ep cosine, in-training)
+% ImageNet 64x64 训练曲线 — CC-iGPT v1 (12ep cosine, 训练完成)
 % 编译: pdflatex imagenet64_training_curves.tex   (或 latexmk -pdf)
 % 嵌入论文: \input{figures/imagenet64_training_curves.tex}
 %
-% 数据来源: experiments/ccigpt_imagenet64_v1_train.log（截至 ep9/12 完成，2026-06-05）
+% 数据来源: experiments/ccigpt_imagenet64_v1_train.log（12/12 ep 训练完成，2026-06-07）
 %   ep | train_bpd | val_bpd | LR
 %    1 |   4.3969  |  3.6624 | 3.00e-04
 %    2 |   3.5751  |  3.5834 | 3.00e-04
@@ -13,9 +13,13 @@
 %    7 |   3.4429  |  3.5048 | 1.78e-04
 %    8 |   3.4368  |  3.4994 | 1.37e-04
 %    9 |   3.4268  |  3.4931 | 9.83e-05
+%   10 |   3.4224  |  3.4868 | 6.42e-05
+%   11 |   3.4159  |  3.4846 | 3.76e-05
+%   12 |   3.4124  |  3.4810 | 2.08e-05
 %
-% ！进行中：ep10-12 待回填（ep9 已完成）。val 已低于 SPN 3.52，距目标 3.44 剩 0.0531；
-%   cosine 退火尾段在走（ep5→9 LR 2.51→0.983e-4），最终 3.44 判定待 ep12（ETA 06-08~10）。
+% 末 epoch 三变体 in-training 验证（无 TTA/ensemble）：raw(best) 3.4810 / EMA0.9998 3.4807 / SWA(2ckpt) 3.4811。
+% raw-val 已趋平（ep10->11->12 -0.0022/-0.0036，cosine LR 到底），超 SPN 3.52 约 0.039、距 3.44 约 0.041。
+% 主表 ensemble(best+swa+ema)+TTA 数字待评测（预期补不上 0.041 gap，叙事：超 SPN、逼近 Sparse Transformer 3.44）。
 \documentclass[tikz,border=8pt]{standalone}
 \usepackage{tikz}
 \usepackage{pgfplots}
@@ -49,24 +53,13 @@
     clip=false,
 ]
 
-% --- 退火尾段区间底纹 (ep10-12，待回填) ---
-\fill[purple!6] (axis cs:9,3.35) rectangle (axis cs:12.5,4.5);
-\node[font=\scriptsize, purple!45!black, anchor=north, align=center]
-    at (axis cs:10.75, 4.45) {cosine anneal tail\\(ep10--12, not yet run)};
-
-% --- 当前进度竖虚线 (ep9 done) ---
-\draw[densely dashed, gray!45!orange, line width=0.4pt]
-    (axis cs:9, 3.35) -- (axis cs:9, 4.5);
-\node[font=\scriptsize, orange!55!black, anchor=south west, rotate=90]
-    at (axis cs:9, 3.55) {\,now: ep9 done};
-
 % --- 目标线 3.44 (Sparse Transformer) ---
 \draw[densely dashed, purple!45, line width=0.5pt]
     (axis cs:0,3.44) -- (axis cs:12.5,3.44);
 \node[font=\scriptsize, purple!55!black, anchor=west]
     at (axis cs:0.2, 3.40) {target 3.44 (Sparse Trans.)};
 
-% --- train_bpd 曲线 (9 点) ---
+% --- train_bpd 曲线 (12 点) ---
 \addplot+[
     mark=square*, mark size=1.3pt, line width=0.9pt, color=blue!70!black,
 ] coordinates {
@@ -79,10 +72,13 @@
     (7, 3.4429)
     (8, 3.4368)
     (9, 3.4268)
+    (10, 3.4224)
+    (11, 3.4159)
+    (12, 3.4124)
 };
 \addlegendentry{train bpd}
 
-% --- val_bpd 曲线 (9 点) ---
+% --- val_bpd 曲线 (12 点) ---
 \addplot+[
     mark=*, mark size=1.3pt, line width=0.9pt, color=orange!80!black,
 ] coordinates {
@@ -95,24 +91,27 @@
     (7, 3.5048)
     (8, 3.4994)
     (9, 3.4931)
+    (10, 3.4868)
+    (11, 3.4846)
+    (12, 3.4810)
 };
 \addlegendentry{val bpd}
 
-% --- ep9 末点标注 ---
+% --- ep12 末点标注（最终 raw val）---
 \node[font=\scriptsize, orange!80!black, anchor=south west]
-    at (axis cs:9.05, 3.4931) {ep9 val \textbf{3.4931}};
+    at (axis cs:9.3, 3.495) {ep12 val \textbf{3.4810} (EMA 3.4807)};
 
 \end{axis}
 
 % --- 标题 ---
 \node[font=\footnotesize\bfseries, anchor=south]
     at (current bounding box.north)
-    {CC-iGPT ImageNet64 training curve (in-training)};
+    {CC-iGPT ImageNet64 training curve (12ep, 训练完成)};
 
 % --- 副标题（配置） ---
 \node[font=\scriptsize, gray!50!black, anchor=north, yshift=-2pt]
     at (current bounding box.south)
-    {\textit{N=32/d=448 $\cdot$ 12ep cosine $\cdot$ warmup 1ep $\cdot$ effective batch 288 $\cdot$ 4-GPU DDP $\cdot$ as of ep9/12 done (2026-06-05)}};
+    {\textit{N=32/d=448 $\cdot$ 12ep cosine $\cdot$ warmup 1ep $\cdot$ effective batch 288 $\cdot$ 4-GPU DDP $\cdot$ 训练完成 (2026-06-07)}};
 
 \end{tikzpicture}
 \end{document}

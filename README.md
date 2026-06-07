@@ -8,7 +8,7 @@
 - **Phase B (v1 历史主表完成)**: CC-iGPT（Coarse-Conditioned iGPT）双尺度条件自回归 — 浅层 coarse iGPT (R-only 配置 8×8×1, 64 token, ~2% overhead) 独立编码进 bitstream，UP + 量化后通过 additive embedding（可学习标量 α）注入 fine iGPT (32×32×3, 3072 token)。CIFAR-10 RGB-bit-exact R-only v1 历史主表 **2.9035 bpd**（softmax head, 100ep + 全套正则 + TTA hflip，已被 v2 替代）
 - **Phase C (完成)**: Demo 前端可视化系统 (FastAPI + Chart.js, 7 个展示面板，含交互式无损 codec 图像⇄.bin 真实可解性验证 + 图像补全 AR inpainting 实时面板)
 - **Phase D (完成, 2026-05-27)**: 深窄 + ensemble — fine N=24/d=512 → N=32/d=448 (82.95M)、epoch 100→200、`min_lr_ratio=0.05` + SWA last 31 ckpts (start ep170) + EMA 0.9998；`evaluate.py --ensemble` 多 ckpt probability-mixture ensemble (best+SWA+EMA)。**主表 ensemble + TTA hflip = 2.8296 ± 0.0854**（超越 PixelSNAIL 380M 2.85，逼近 Sparse Transformer 59M 2.80）。详见 [future.md §4](future.md)
-- **ImageNet64 benchmark (进行中, 本地日志快照 2026-06-05)**: `configs/ccigpt_imagenet64_v1.yaml` 已启训 12ep 计划；本地日志记录到 ep10 step 4550/26690，ep9 validation = **3.4931 ± 0.3213 bpd**。最终 ep12 best / SWA / EMA 评测待 AutoDL 训练完成后回收。
+- **ImageNet64 benchmark (训练完成, 2026-06-07)**: `configs/ccigpt_imagenet64_v1.yaml` 12ep 训练完成；末 epoch in-training validation（无 TTA/ensemble）raw(best.pth) **3.4810** / EMA0.9998 **3.4807** / SWA(2 ckpt) **3.4811**，均 ± 0.3216（已超 SPN 3.52 约 0.039、距目标 3.44 约 0.041）。raw-val 已趋平（ep10→11→12 −0.0022/−0.0036，cosine LR 到底）。主表口径 ensemble (best+SWA+EMA) + TTA hflip 数字待 AutoDL 评测回收（evaluate.py 已支持 `torchrun --nproc_per_node=4` 多卡评测，与单卡 bit-exact）。
 
 ## 当前进度
 

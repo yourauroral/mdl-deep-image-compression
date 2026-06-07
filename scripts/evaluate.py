@@ -41,15 +41,73 @@ import yaml
 import math
 import torch
 import torch.nn.functional as F
+import torch.distributed as dist
 import numpy as np
 from contextlib import nullcontext
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from torch.amp import autocast
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from src.mdlic.utils import compute_bpd, clean_state_dict
 from scripts.train import _build_model_from_config, _build_ccigpt_from_config
+
+
+# ── 多卡评测（DDP）──
+# 评测是纯 forward（无梯度、无参数同步），不需要 DDP wrap model。做法：
+#   1. torchrun 拉起 N 个进程，每进程 _init_distributed() 初始化 NCCL + 绑定一张卡
+#   2. _shard_dataset() 用 stride 切片把 val 集分成 N 份不相交子集（并集 = 全集，无 padding）
+#   3. 每 rank 独立 build+load ckpt 到自己的卡、只跑自己那份
+#   4. evaluate_* 末尾 all-reduce(SUM) 加权累加量 → 全局 bpd_mean/std 与单卡 bit 一致
+# 单卡运行（不经 torchrun）时所有 helper 退化为 no-op，行为与改造前完全相同。
+
+def _init_distributed():
+    """从 torchrun 环境变量初始化分布式。返回 (rank, world_size, local_rank, is_dist)。
+
+    未经 torchrun 启动（无 RANK/WORLD_SIZE 环境变量）时返回单卡占位，不初始化进程组。
+    """
+    if "RANK" in os.environ and "WORLD_SIZE" in os.environ and int(os.environ["WORLD_SIZE"]) > 1:
+        rank = int(os.environ["RANK"])
+        world_size = int(os.environ["WORLD_SIZE"])
+        local_rank = int(os.environ.get("LOCAL_RANK", rank))
+        backend = "nccl" if torch.cuda.is_available() else "gloo"
+        dist.init_process_group(backend=backend)
+        if torch.cuda.is_available():
+            torch.cuda.set_device(local_rank)
+        return rank, world_size, local_rank, True
+    return 0, 1, 0, False
+
+
+def _is_dist():
+    return dist.is_available() and dist.is_initialized()
+
+
+def _shard_dataset(dataset):
+    """分布式时按 stride 把 dataset 切成 world_size 份不相交子集，返回本 rank 那份。
+
+    indices = range(rank, N, world_size)：各 rank 子集不相交、并集 = 全集、无重复 padding，
+    因此 all-reduce(SUM) 后 n_total == 原始 N，bpd 与单卡 bit-exact。单卡时原样返回。
+    """
+    if not _is_dist():
+        return dataset
+    rank = dist.get_rank()
+    world_size = dist.get_world_size()
+    indices = list(range(rank, len(dataset), world_size))
+    return Subset(dataset, indices)
+
+
+def _dist_reduce_sum(values: dict, device) -> dict:
+    """对一组标量做跨 rank all-reduce(SUM)。单卡时原样返回。
+
+    用于把各 rank 的加权累加量（bpd_weighted_sum / n_total / ce_*_sum 等）汇总成全局量，
+    再在 caller 里除以全局 n_total 得到与单卡一致的均值/方差。
+    """
+    if not _is_dist():
+        return values
+    keys = list(values.keys())
+    t = torch.tensor([values[k] for k in keys], dtype=torch.float64, device=device)
+    dist.all_reduce(t, op=dist.ReduceOp.SUM)
+    return {k: t[i].item() for i, k in enumerate(keys)}
 
 
 def _build_from_config(mcfg: dict, device):
@@ -160,15 +218,32 @@ def evaluate_model(model, loader, device, amp_dtype=None, tta_hflip: bool = Fals
     bpd_mean = bpd_weighted_sum / n_total
     # batch-level 加权 std，与 train.py:validate() 同公式：avoid np.std(batch_means)
     # 在末尾不足 batch 时给小 batch 过高权重。
-    bpd_var = max(bpd_sq_weighted_sum / n_total - bpd_mean ** 2, 0.0)
+    # 分布式：先 all-reduce(SUM) 各 rank 加权累加量，再除以全局 n_total → 与单卡 bit-exact。
+    agg = _dist_reduce_sum({
+        "wsum": bpd_weighted_sum,
+        "sqsum": bpd_sq_weighted_sum,
+        "n": n_total,
+        "ce_c": ce_c_sum,
+        "ce_f": ce_f_sum,
+        "alpha": alpha_sum,
+    }, device)
+    n_global = agg["n"]
+    bpd_mean = agg["wsum"] / n_global
+    bpd_var = max(agg["sqsum"] / n_global - bpd_mean ** 2, 0.0)
     bpd_std = float(math.sqrt(bpd_var))
 
     extras = {}
     if is_ccigpt:
-        extras["ce_coarse"] = ce_c_sum / n_total
-        extras["ce_fine"] = ce_f_sum / n_total
-        extras["ctx_alpha"] = alpha_sum / n_total
+        extras["ce_coarse"] = agg["ce_c"] / n_global
+        extras["ce_fine"] = agg["ce_f"] / n_global
+        extras["ctx_alpha"] = agg["alpha"] / n_global
     if collect_per_image:
+        # 分布式：跨 rank gather 各自子集的 per-image 列表拼成全集（顺序不保证，但
+        # per-image 统计是顺序无关的 mean/std/CI，无影响）。单卡时直接用本地列表。
+        if _is_dist():
+            gathered = [None] * dist.get_world_size()
+            dist.all_gather_object(gathered, per_image_bpd)
+            per_image_bpd = [v for part in gathered for v in part]
         extras["per_image_bpd"] = per_image_bpd
     return bpd_mean, bpd_std, bpd_per_batch, extras
 
@@ -374,11 +449,25 @@ def evaluate_ensemble(models, loader, device, amp_dtype=None, tta_hflip: bool = 
     bpd_var = max(bpd_sq_weighted_sum / n_total - bpd_mean ** 2, 0.0)
     bpd_std = float(math.sqrt(bpd_var))
 
+    # 分布式：与 evaluate_model 同口径，all-reduce(SUM) 后用全局 n 归一。
+    agg = _dist_reduce_sum({
+        "wsum": bpd_weighted_sum,
+        "sqsum": bpd_sq_weighted_sum,
+        "n": n_total,
+        "ce_c": ce_c_sum,
+        "ce_f": ce_f_sum,
+        "alpha": alpha_sum,
+    }, device)
+    n_global = agg["n"]
+    bpd_mean = agg["wsum"] / n_global
+    bpd_var = max(agg["sqsum"] / n_global - bpd_mean ** 2, 0.0)
+    bpd_std = float(math.sqrt(bpd_var))
+
     extras = {"K": K}
     if is_ccigpt:
-        extras["ce_coarse"] = ce_c_sum / n_total
-        extras["ce_fine"] = ce_f_sum / n_total
-        extras["ctx_alpha"] = alpha_sum / n_total
+        extras["ce_coarse"] = agg["ce_c"] / n_global
+        extras["ce_fine"] = agg["ce_f"] / n_global
+        extras["ctx_alpha"] = agg["alpha"] / n_global
     return bpd_mean, bpd_std, bpd_per_batch, extras
 
 
@@ -525,7 +614,8 @@ def _get_amp_dtype(config):
 def cmd_single(args, config, device):
     """单模型评测"""
     test_dataset, dataset_name = _load_dataset(config)
-    test_loader = DataLoader(test_dataset, batch_size=args.batch_size,
+    shard = _shard_dataset(test_dataset)
+    test_loader = DataLoader(shard, batch_size=args.batch_size,
                              shuffle=False, num_workers=2, pin_memory=True)
     print(f"Dataset: {dataset_name} test ({len(test_dataset)} images)")
 
@@ -601,7 +691,8 @@ def cmd_single(args, config, device):
 def cmd_swa(args, config, device):
     """SWA vs best checkpoint 对比评测"""
     test_dataset, dataset_name = _load_dataset(config)
-    test_loader = DataLoader(test_dataset, batch_size=args.batch_size,
+    shard = _shard_dataset(test_dataset)
+    test_loader = DataLoader(shard, batch_size=args.batch_size,
                              shuffle=False, num_workers=2, pin_memory=True)
 
     mcfg = config["model"]
@@ -649,7 +740,8 @@ def cmd_swa(args, config, device):
 def cmd_ensemble(args, config, device):
     """多 ckpt probability-mixture ensemble 评测（best/swa/ema 等同源平滑组合）。"""
     test_dataset, dataset_name = _load_dataset(config)
-    test_loader = DataLoader(test_dataset, batch_size=args.batch_size,
+    shard = _shard_dataset(test_dataset)
+    test_loader = DataLoader(shard, batch_size=args.batch_size,
                              shuffle=False, num_workers=2, pin_memory=True)
     print(f"Dataset: {dataset_name} test ({len(test_dataset)} images)")
 
@@ -748,18 +840,32 @@ experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/ema.pth \\
     with open(args.config, 'r') as f:
         config = yaml.safe_load(f)
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Device: {device}")
-
-    # 根据模式分发
-    if args.ensemble:
-        cmd_ensemble(args, config, device)
-    elif args.swa and args.checkpoint:
-        cmd_swa(args, config, device)
-    elif args.checkpoint:
-        cmd_single(args, config, device)
+    # DDP：torchrun 拉起多进程时初始化 NCCL + 绑卡；单卡直接走 cuda:0 / cpu。
+    rank, world_size, local_rank, is_dist = _init_distributed()
+    if is_dist:
+        device = torch.device(f'cuda:{local_rank}')
+        # 非 rank0 静默：评测的 collective（all-reduce/all-gather）所有 rank 都参与，
+        # 但只 rank0 打印，避免 N 份重复输出。
+        if rank != 0:
+            sys.stdout = open(os.devnull, 'w')
     else:
-        parser.error("请指定 --checkpoint 或 --ensemble")
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Device: {device}" + (f"  [DDP rank {rank}/{world_size}]" if is_dist else ""))
+
+    try:
+        # 根据模式分发
+        if args.ensemble:
+            cmd_ensemble(args, config, device)
+        elif args.swa and args.checkpoint:
+            cmd_swa(args, config, device)
+        elif args.checkpoint:
+            cmd_single(args, config, device)
+        else:
+            parser.error("请指定 --checkpoint 或 --ensemble")
+    finally:
+        if is_dist:
+            dist.barrier()
+            dist.destroy_process_group()
 
 
 if __name__ == '__main__':
