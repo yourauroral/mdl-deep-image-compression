@@ -395,12 +395,42 @@ def main():
     # --- 导出 CSV ---
     if args.export_csv:
         os.makedirs(os.path.dirname(args.export_csv) or ".", exist_ok=True)
+        # coarse_ctx 模式直接决定数字含义（主线 vs 消融），必须随结果一并落盘，
+        # 避免回填时把 --no_coarse_ctx 的消融跑误当主线数字。
+        ctx_mode = (("with" if use_coarse_ctx else "without (ablation)")
+                    if model_type == "ccigpt" else "n/a")
+        # 元信息头（每行以 # 开头）：记录出处与 best 层，便于人工复制粘贴回填
+        # probe_*.json；标准 csv 解析器可按 # 前缀跳过这些注释行。
+        meta = [
+            ("config", args.config),
+            ("checkpoint", args.checkpoint),
+            ("model_type", model_type),
+            ("probe_dataset", dataset_name),
+            ("num_classes", num_classes),
+            ("N_layers", N),
+            ("d_model", d_model),
+            ("model_image_size", model_img_size),
+            ("coarse_ctx", ctx_mode),
+            ("epochs", args.epochs),
+            ("lr", args.lr),
+            ("batch_size", args.batch_size),
+            ("best_layer", best_layer),
+            ("best_accuracy", f"{best_acc:.2f}"),
+        ]
         with open(args.export_csv, "w", newline="") as f:
+            for k, v in meta:
+                f.write(f"# {k},{v}\n")
             writer = csv.writer(f)
             writer.writerow(["layer", "accuracy"])
             for idx, acc in results:
                 writer.writerow([idx, f"{acc:.2f}"])
         print(f"\n结果已导出: {args.export_csv}")
+        # 控制台再打印一行 JSON-ready 数组：可直接粘进 probe_*.json 的 accuracy 字段
+        acc_arr = ", ".join(f"{acc:.2f}" for _, acc in results)
+        print(f"[backfill] layers       = {layer_indices}")
+        print(f"[backfill] accuracy     = [{acc_arr}]")
+        print(f"[backfill] best_layer   = {best_layer}")
+        print(f"[backfill] best_accuracy= {best_acc:.2f}")
 
 
 if __name__ == "__main__":
