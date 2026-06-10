@@ -152,7 +152,7 @@ mid-layer probe accuracy by +12.4 pp** (CIFAR v2: L19 79.33% vs iGPT-S L22
 Measured layer-wise accuracy rises then falls:
 
 - **CIFAR v2 native:** peak at **L19 = 79.33%** (32 layers).
-- **IN64→CIFAR transfer:** L0 41.7% → **L15 73.13%** → L31 64.9%.
+- **IN64→CIFAR transfer:** L0 41.69% → **L16 73.19%** → L31 64.79% (full 32 layers; L15–L17 plateau).
 
 The shape is the fingerprint that ties this model to both iGPT and LLMs:
 

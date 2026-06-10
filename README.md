@@ -15,7 +15,7 @@
 | 模块 | 状态 | 备注 |
 |---|---|---|
 | CIFAR-10 v2 主表 | 完成 | ensemble(best+SWA+EMA) + TTA hflip = **2.8296 ± 0.0854 bpd** |
-| Linear probe | 完成 | CC-iGPT v2 native L19 best = **79.33%**；IN64→CIFAR-10 transfer probe best L15 = **73.13%**（32→64 resize，胜 iGPT-S native 66.93%，不与 native 横比） |
+| Linear probe | 完成 | CC-iGPT v2 native L19 best = **79.33%**；IN64→CIFAR-10 transfer probe best L16 = **73.19%**（32 层完整，32→64 resize，胜 iGPT-S native 66.93%，不与 native 横比） |
 | Demo 前端 | 完成 | 7 面板；保留 upload / metrics / probe / kernels / scales / completion / codec |
 | 下游任务 | 精简完成 | 保留 `linear_probe.py`、`complete_image.py`、`verify_lossless.py`；旧静态 JSON 下游面板已移除 |
 | ImageNet64 | 完成 (2026-06-07) | 12ep 训练 + 4 卡 DDP 评测；主表 ensemble + TTA = **3.4800 bpd**（超 SPN 3.52、逼近未达 Sparse Transformer 152M 3.44） |
@@ -114,7 +114,7 @@ python3 scripts/linear_probe.py \
     --checkpoint experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/best.pth \
     --layers all
 
-# IN64 -> CIFAR-10 transfer probe（IN64 ep12 best.pth；32->64 resize，勿与 native 32x32 横比；实测 best L15 = 73.13%）
+# IN64 -> CIFAR-10 transfer probe（IN64 ep12 best.pth；32->64 resize，勿与 native 32x32 横比；32 层完整实测 best L16 = 73.19%）
 python3 scripts/linear_probe.py \
     --config configs/ccigpt_imagenet64_v1.yaml \
     --checkpoint experiments/ccigpt_imagenet64_v1/checkpoints/best.pth \
