@@ -217,7 +217,6 @@ class FusedCrossEntropyZLossFunction(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_ce: torch.Tensor, grad_zloss: torch.Tensor):
         logits, targets = ctx.saved_tensors
-        z_loss_weight = ctx.z_loss_weight
         M = ctx.M
         V = ctx.V
         BLOCK_V = ctx.BLOCK_V

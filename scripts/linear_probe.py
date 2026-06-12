@@ -30,7 +30,6 @@ Ref:
 
 import argparse
 import csv
-import math
 import os
 import sys
 
@@ -111,7 +110,6 @@ def extract_features(model, dataloader, layer_indices, device, amp_dtype=None,
     """
     model.eval()
     max_layer = max(layer_indices)
-    wanted = set(layer_indices)
 
     all_features = {idx: [] for idx in layer_indices}
     all_labels = []

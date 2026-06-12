@@ -200,7 +200,7 @@ def evaluate_model(model, loader, device, amp_dtype=None, tta_hflip: bool = Fals
         else:
             x = batch
         x = x.to(device)
-        B, C, _, _ = x.shape
+        B = x.shape[0]
 
         with autocast(device_type="cuda", dtype=amp_dtype) if use_amp else nullcontext():
             out = model(x)
@@ -722,13 +722,13 @@ def cmd_single(args, config, device):
 
 def cmd_swa(args, config, device):
     """SWA vs best checkpoint 对比评测"""
-    test_dataset, dataset_name = _load_dataset(config)
+    test_dataset, _ = _load_dataset(config)
     shard = _shard_dataset(test_dataset)
     test_loader = DataLoader(shard, batch_size=args.batch_size,
                              shuffle=False, num_workers=2, pin_memory=True)
 
     mcfg = config["model"]
-    amp_dtype, amp_dtype_str = _get_amp_dtype(config)
+    amp_dtype, _ = _get_amp_dtype(config)
 
     # best.pth
     ckpt_dir = os.path.dirname(args.checkpoint)

@@ -88,8 +88,8 @@ def _validate_config(config: dict):
     )
 
     lr_schedule = tcfg.get('lr_schedule', 'cosine')
-    assert lr_schedule in ('cosine', 'wsd', 'multistep', 'constant'), (
-        f"train.lr_schedule 必须是 cosine/wsd/multistep/constant，got '{lr_schedule}'"
+    assert lr_schedule in ('cosine', 'wsd'), (
+        f"train.lr_schedule 必须是 cosine/wsd，got '{lr_schedule}'"
     )
 
     # SWA 与 epochs 交叉校验：start_epoch > epochs 时训练不会触发任何 SWA 更新，
@@ -695,13 +695,8 @@ def main():
                 progress = float(epoch - stable_epochs) / float(decay_length)
                 return max(0.0, (1.0 - progress) ** decay_beta)
         scheduler = optim.lr_scheduler.LambdaLR(optimizers[0], lr_lambda_wsd)
-    elif lr_schedule == "multistep":
-        scheduler = optim.lr_scheduler.MultiStepLR(
-            optimizers[0],
-            milestones=config["train"]["lr_milestones"],
-            gamma=config["train"].get("lr_gamma", 0.1),
-        )
     else:
+        # 经 _validate_config 限定 ∈ {cosine, wsd}；此分支理论不可达，留作防御性兜底
         scheduler = None
 
     # Mixed precision: None/"none"/"fp32" → 禁用 AMP 走 fp32（数值敏感场景兜底）
