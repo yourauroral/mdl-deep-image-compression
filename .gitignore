@@ -30,6 +30,7 @@ assets/
 CLAUDE.md
 future.md
 .claude/
+cv_template.tex
 
 # 论文 PDF/DOCX
 *.docx
