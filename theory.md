@@ -1,338 +1,199 @@
+# 理论：为什么线性探针在压缩训练的 AR 模型上有效
 # Theory: Why Linear Probing Works in a Compression-Trained AR Model
 
-This note ties the project's empirical results to the theory behind them. It
-answers one research question — **why does a linear probe recover semantic
-classes from a model that was only ever trained to compress pixels?** — and
-frames it the way LLM interpretability frames the *linear representation
-hypothesis* (LRH).
+本文将项目实验结果与其背后的理论联系起来，回答一个研究问题——**为什么一个仅以压缩像素为目标训练的模型，能让线性探针恢复语义类别？**——并以 LLM 可解释性领域的**线性表征假设（LRH, Linear Representation Hypothesis）**为框架加以阐释。
 
-The argument has three legs:
+论证分三条支柱：
 
-1. **MDL (what the model learns).** A compression objective forces the model to
-   discover the generative structure of images. *Compress better → learn better.*
-2. **LRH (why it's linearly readable).** The architecture (linear weight-tied
-   head + additive residual stream) pushes that structure onto **linear
-   directions**, so a linear classifier suffices.
-3. **MDL probing (how to measure it honestly).** Raw probe accuracy is a weak
-   signal; **codelength** of the labels given the features is the rigorous
-   metric — and it is the *same* MDL ruler used for the main table.
+1. **MDL（模型学到了什么）**：压缩目标迫使模型发现图像的生成结构。*压缩越好 → 学习越好。*
+2. **LRH（为什么是线性可读的）**：架构（线性权重共享 head + 加性残差流）把这种结构压到**线性方向**上，因此线性分类器就够了。
+3. **MDL probing（如何诚实地度量）**：原始探针准确率是弱信号；**标签的编码长度（codelength）** 才是严格度量——且与主表使用的是*同一把* MDL 标尺（比特）。
 
-The slogan is **"MDL all the way down"**: the main task compresses pixels, the
-probe evaluation compresses labels, and both are measured in bits.
+一句话纲领：**"MDL all the way down"**：主任务压缩像素，探针评估压缩标签，两者均以比特度量。
 
 ---
 
-## 0. The project in one paragraph
+## 0. 项目一段话概览
 
-**CC-iGPT** is a dual-scale, conditional autoregressive (AR) lossless image
-compressor operating directly on RGB uint8 (no color front-end, no lossy
-codec). A small **coarse** iGPT compresses a downsampled image into an
-independent bitstream; its quantized tokens are dequantized, bilinearly
-upsampled, re-tokenized, and injected **additively** into the **fine** iGPT's
-residual stream as `α · coarse_ctx`. The fine model predicts every sub-pixel
-token `p(x_t | x_{<t})` with a 256-way softmax. Cross-entropy *is* the optimal
-code length, so:
+**CC-iGPT** 是一个双尺度、条件式自回归（AR）无损图像压缩模型，直接在 RGB uint8 域上建模（无色彩前端、无有损 codec）。一个小型 **coarse** iGPT 将下采样后的图像压入独立 bitstream；其量化 token 经反量化、双线性上采样、重新 tokenize 后，以 `α · coarse_ctx` 的形式**加性注入** **fine** iGPT 的残差流。fine 模型用 256-way softmax 预测每个子像素 token `p(x_t | x_{<t})`。交叉熵*即*最优编码长度，因此：
 
 ```
 bpd_total = (CE_coarse · N_coarse + CE_fine · N_fine) / ln2 / N_fine
 ```
 
-Architecture (fine): N=32 layers, d=448, h=7, SwiGLU FFN, RoPE base=500000,
-QK-Norm, OLMo2 post-norm (`x = x + RMSNorm(sublayer(x))`), weight-tied 256-way
-output head, sub-pixel AR (pixel-first `[R0,G0,B0,R1,...]`), z-loss. Total
-≈ 82.95M params (fine ≈ 78M + coarse ≈ 4.81M + α).
+fine 架构：N=32 层，d=448，h=7，SwiGLU FFN，RoPE base=500000，QK-Norm，OLMo2 后归一化
+（`x = x + RMSNorm(sublayer(x))`），权重共享 256-way 输出头，子像素 AR（pixel-first `[R0,G0,B0,R1,...]`），z-loss。总参数约 82.95M（fine ≈ 78M + coarse ≈ 4.81M + α）。
 
-**Main-table results:**
+**主表结果：**
 
-| Dataset  | Setting                              | bpd     | Position |
-|----------|--------------------------------------|---------|----------|
-| CIFAR-10 | ensemble(best+SWA+EMA) + TTA hflip   | **2.8296** | beats PixelSNAIL 380M (2.85); approaches Sparse Transformer 59M (2.80) |
-| ImageNet64 | ensemble(best+SWA+EMA) + TTA hflip | **3.4800** | beats SPN (3.52); approaches (not reaches) Sparse Transformer 152M (3.44) |
+| 数据集     | 设置                                   | bpd        | 位次                                                          |
+|------------|----------------------------------------|------------|---------------------------------------------------------------|
+| CIFAR-10   | ensemble(best+SWA+EMA) + TTA hflip     | **2.8296** | 超越 PixelSNAIL 380M (2.85)；逼近 Sparse Transformer 59M (2.80) |
+| ImageNet64 | ensemble(best+SWA+EMA) + TTA hflip     | **3.4800** | 超 SPN (3.52)；逼近但未达 Sparse Transformer 152M (3.44)       |
 
-**Downstream evidence (MDL main line, paper §5):** linear probe, image
-completion (AR inpainting), and a real lossless arithmetic-codec roundtrip
-(bit-identical). This document is the theory behind the **first** of those.
+**下游证据（MDL 主线，论文 §5）**：线性探针、图像补全（AR inpainting）、真实无损算术编解码 roundtrip（bit-identical）。本文是**第一项**的理论支撑。
 
 ---
 
-## 1. What a linear probe actually measures
+## 1. 线性探针实际度量的是什么
 
-A frozen model maps an image `x` to a hidden state `h`. A linear probe trains
-`W` to predict class `y` from `h` and reports top-1 accuracy.
+冻结模型将图像 `x` 映射为隐状态 `h`，线性探针训练 `W` 从 `h` 预测类别 `y` 并报告 top-1 准确率。
 
-The naive reading — "high accuracy means the class is *in* the representation" —
-is wrong, and the reason matters. Because `h` is a deterministic function of
-`x`, and `x` already determines `y`, the **data-processing inequality** says `h`
-can never contain *more* information about `y` than the raw pixels do
-(Pimentel et al. 2020). The information is *always* there. So the probe does not
-test **presence**; it tests **extractability** — specifically, extractability
-under a *linear* predictor family (V-usable information, Xu et al. 2020).
+直觉的解读——"高准确率意味着类别*存在于*表征中"——是错的，而且错的方式很重要。因为 `h` 是 `x` 的确定性函数，`x` 已经决定了 `y`，**数据处理不等式（data-processing inequality）**表明 `h` 关于 `y` 的信息永远不可能多于原始像素（Pimentel et al. 2020）。信息*始终*都在。所以探针不检验**信息是否存在**，而是检验**可提取性（extractability）**——具体地说，是在*线性*预测族下的可提取性（V-usable information，Xu et al. 2020）。
 
-That reframes the research question precisely:
+这将研究问题精确地重新表述为：
 
-> Not "is the class present?" (trivially yes), but
-> **"why has a pixel-compression objective reorganized raw RGB so that class
-> lies along *linearly accessible* directions?"**
+> 不是"类别信息是否存在？"（显然是），而是
+> **"为什么像素压缩目标重新组织了原始 RGB，使类别落在*线性可读*的方向上？"**
 
-This splits into two halves. §2 (MDL) explains why *semantics* emerge at all.
-§3 (LRH) explains why they emerge *linearly* — the genuinely interesting half,
-and the one shared with LLM interpretability.
+这拆分为两半。§2（MDL）解释为什么*语义*会涌现。§3（LRH）解释为什么它们*线性地*涌现——这才是真正有趣的一半，也是与 LLM 可解释性共享的一半。
 
 ---
 
-## 2. Why semantics emerge — the MDL half
+## 2. 为什么语义会涌现——MDL 部分
 
-To minimize the description length of `p(x_t | x_{<t})`, the model must capture
-the structure that *makes pixels predictable*: object boundaries, surfaces,
-lighting, texture, global layout. The shortest code for a dataset is achieved by
-modeling its true generative factors — and those factors are exactly what also
-determine class. Hence the project's thesis, **compress better → learn better**,
-which is the Minimum Description Length principle (Rissanen) instantiated:
-the best compressor is the best learner.
+为最小化 `p(x_t | x_{<t})` 的描述长度，模型必须捕捉*使像素可预测的*结构：物体边界、表面、光照、纹理、全局布局。一个数据集的最短编码，由对其真实生成因子的建模实现——而这些因子恰好也决定了类别。由此得到项目的核心论断：**压缩越好 → 学习越好**，这正是最小描述长度原则（MDL，Rissanen）的具体实例：最好的压缩器就是最好的学习器。
 
-Two project-specific amplifiers:
+两个项目特有的放大因素：
 
-- **Sub-pixel AR.** The layout `[R,G,B]` per pixel forces `p(G|R, ctx)` and
-  `p(B|R,G, ctx)`. Modeling intra-pixel channel dependence pushes the model
-  toward the physical factors (illumination, material) that generate color —
-  the same factors that carry semantics.
-- **Coarse conditioning.** `α · coarse_ctx` hands the fine model a low-frequency
-  global prior (a blurred thumbnail). To exploit it, the fine model organizes
-  its computation around global scene structure, not just local pixel
-  statistics.
+- **子像素 AR**：布局 `[R,G,B]` 迫使模型学 `p(G|R, ctx)` 和 `p(B|R,G, ctx)`。对像素内通道依赖建模，将模型推向产生颜色的物理因子（光照、材质）——而这些因子正好携带语义。
+- **粗尺度条件注入（coarse conditioning）**：`α · coarse_ctx` 给 fine 模型一个低频全局先验（模糊缩略图）。为了利用它，fine 模型将计算组织在全局场景结构上，而不只是局部像素统计。
 
-This half is standard and defensible; it is already the project's §6 narrative.
-It explains **semantics**, but says nothing about **linearity**.
+这一半是标准且有据可查的，已是项目 §6 叙述的主轴。它解释了**语义**，但对**线性性**只字未提。
 
 ---
 
-## 3. Why it's linearly readable — the LRH half (the heart)
+## 3. 为什么是线性可读的——LRH 部分（核心）
 
-The linear representation hypothesis: high-level concepts are encoded as
-**linear directions** in activation space; concept presence ≈ projection onto a
-direction; concept strength ≈ magnitude. In this model, four pressures produce
-that geometry — and the first three are **architecture-specific**, which is what
-makes this a contribution rather than a citation.
+线性表征假设：高层概念以**线性方向**编码在激活空间中；概念的存在 ≈ 在某方向上的投影；概念强度 ≈ 幅值。在本模型中，四种压力产生了这种几何结构——前三种是**架构特有的**，这正是本文构成一个贡献而非仅是引用的原因。
 
-**1. Linear, weight-tied readout.** The output head is a single
-`nn.Linear(d, 256)` whose weight is *tied* to `token_embed` — there is **zero
-nonlinearity** between the final hidden state and the logits (`igpt.py:74`). For
-the model to emit correct next-pixel distributions, prediction-relevant
-structure must be made **linearly** readable at the last layer. Since class is
-strongly predictive of pixel statistics, gradient descent pushes
-class-correlated structure onto linear directions. This is the image-domain
-analogue of the "linear unembedding ⇒ linear concept directions" pressure in
-LLMs (Park, Choe & Veitch 2024). Weight-tying makes embedding ≡ unembedding — a
-clean special case of their causal-inner-product geometry.
+**1. 线性权重共享输出头（Linear, weight-tied readout）**：输出头是一个 `nn.Linear(d, 256)`，其权重与 `token_embed` *绑定共享*——最终隐状态到 logit 之间**零非线性**（`igpt.py:74`）。为了让模型输出正确的下一像素分布，预测相关的结构必须在最后一层被线性可读。由于类别对像素统计有强预测力，梯度下降将类别相关结构推到线性方向上。这是 LLM 中"线性 unembedding ⇒ 线性概念方向"压力在图像域的类比（Park, Choe & Veitch 2024）。权重共享使 embedding ≡ unembedding——他们因果内积几何的一个干净特例。
 
-**2. Additive residual stream.** OLMo2 post-norm means every layer *adds* into a
-shared stream: the representation is literally a running sum of layer
-contributions. Linear directions are therefore the **native format** of the
-stream, and a linear probe reads that format directly. This is exactly the
-Anthropic residual-stream / superposition picture (Elhage et al. 2021/2022),
-and the stream here is structurally identical to a Transformer LM's — so the
-same geometry should, and apparently does, emerge.
+**2. 加性残差流（Additive residual stream）**：OLMo2 后归一化意味着每一层都*加入*共享流：表征字面上是各层贡献的累积和。线性方向因此是流的**原生格式**，线性探针直接读取该格式。这正是 Anthropic 残差流/叠加图景（Elhage et al. 2021/2022），本模型的流在结构上与 Transformer LM 的完全相同——所以同样的几何应该、且显然确实涌现了。
 
-**3. Superposition.** d=448, but the number of useful "concepts" far exceeds
-448. In high dimensions random vectors are near-orthogonal, so the model packs
-many features as near-orthogonal linear directions (Toy Models of
-Superposition). The probe recovers one of them.
+**3. 叠加（Superposition）**：d=448，但有用"概念"的数量远超 448。在高维空间中随机向量近似正交，模型将许多特征以近正交线性方向打包（Toy Models of Superposition）。探针恢复其中之一。
 
-**4. `α · coarse_ctx` is a literal linear concept vector.** The coarse pathway's
-output is *added* to the token embedding at layer 0 (`cc_igpt.py:164`,
-`igpt.py:134`). It injects a global semantic prior **additively into the
-residual stream** — i.e. it is an *engineered* steering vector that also happens
-to improve compression. This is the project's single strongest LRH talking
-point, and it predicts the empirical fact that coarse-ctx injection **raises
-mid-layer probe accuracy by +12.4 pp** (CIFAR v2: L19 79.33% vs iGPT-S L22
-66.93%).
+**4. `α · coarse_ctx` 是字面意义上的线性概念向量**：粗尺度通路的输出被*加入*第 0 层的 token embedding（`cc_igpt.py:164`，`igpt.py:134`）。它以**加性方式注入残差流**——即一个工程化的 steering vector，同时还改善了压缩性能。这是项目最强的 LRH 论点，也预测了 coarse_ctx 注入在中层探针准确率上**提升 +12.4 pp** 这一实验事实（CIFAR v2: L19 79.33% vs iGPT-S L22 66.93%）。
 
-### 3.1 The mid-layer peak (the inverted-U)
+### 3.1 中层峰值（倒 U 形曲线）
 
-Measured layer-wise accuracy rises then falls:
+逐层准确率的实测：先升后降——
 
-- **CIFAR v2 native:** peak at **L19 = 79.33%** (32 layers).
-- **IN64→CIFAR transfer:** L0 41.69% → **L16 73.19%** → L31 64.79% (full 32 layers; L15–L17 plateau).
+- **CIFAR v2 native**：峰值 **L19 = 79.33%**（共 32 层）。
+- **IN64→CIFAR transfer**：L0 41.69% → **L16 73.19%** → L31 64.79%（完整 32 层；L15–L17 平台区）。
 
-The shape is the fingerprint that ties this model to both iGPT and LLMs:
+这个曲线形状是将本模型与 iGPT 及 LLM 联系起来的指纹：
 
-- **Early layers** hold local pixel statistics → low abstraction → low accuracy.
-- **Middle layers** reach maximal task-agnostic semantic abstraction → peak
-  linear separability.
-- **Late layers re-specialize** toward the 256-way *output* distribution,
-  discarding class-general semantics to sharpen local next-pixel prediction →
-  accuracy falls.
+- **浅层**保存局部像素统计 → 低抽象级 → 准确率低。
+- **中间层**达到最大任务无关语义抽象 → 线性可分性峰值。
+- **深层重新专化（re-specialize）**为 256-way *输出*分布，丢弃类别通用语义以锐化局部下一像素预测 → 准确率下降。
 
-This is the information-bottleneck / "tunnel" dynamic (Tishby; Shwartz-Ziv &
-Tishby 2017). The **same inverted-U** appears in iGPT (Chen et al. 2020) and in
-LLM probing (mid-layers probe best for semantic tasks). That cross-modal
-coincidence is the answer to *"why is this like LLM interpretation?"*:
+这是信息瓶颈（Information Bottleneck）/"隧道（tunnel）"动态（Tishby；Shwartz-Ziv & Tishby 2017）。**同样的倒 U** 出现在 iGPT（Chen et al. 2020）和 LLM probing 中（中间层对语义任务探针效果最好）。这种跨模态巧合回答了*"为什么这像 LLM 解释性？"*：
 
-> The representational geometry is driven by the **form of the objective**
-> (next-token prediction + linear head) and the **architecture** (additive
-> residual stream), **not by the modality**. Pixels and tokens converge on the
-> same structure.
+> 表征几何由**目标的形式**（下一 token 预测 + 线性头）和**架构**（加性残差流）驱动，**而非由模态决定**。像素和 token 收敛到相同的结构。
 
 ---
 
-## 4. How to measure it honestly — the MDL probing half
+## 4. 如何诚实地度量——MDL probing 部分
 
-Raw accuracy is a weak metric: a sufficiently expressive probe can *memorize*
-the task, so high accuracy need not reflect the representation
-(Hewitt & Liang 2019). The fix that aligns perfectly with this project's MDL
-thesis is to measure the **description length of the labels given the
-features** (Voita & Titov 2020).
+原始准确率是弱度量：足够强的探针可以*记忆*任务，因此高准确率不一定反映表征质量（Hewitt & Liang 2019）。与本项目 MDL 论点完美契合的修正方案，是度量**特征条件下标签的描述长度**（Voita & Titov 2020）。
 
-**Decomposition.** A representation is good if it lets labels be transmitted in
-few bits:
+**分解**：表征好 ↔ 标签能用少比特传输：
 
 ```
 L_total = L_model + L_data
-        = (complexity of the probe) + (remaining label uncertainty)
+        = （探针的复杂度）+（剩余标签不确定性）
 ```
 
-Two standard estimators:
+两种标准估计器：
 
-- **Variational code.** Learn a posterior `q(θ)` over probe weights against a
-  prior `p(θ)`; the codelength is an **upper bound**
-  `L_var = KL(q‖p) + E[-log p(y|x,θ)]` (this is the negative ELBO). KL = model
-  description length; cross-entropy = data description length. A task solvable
-  with simple weights keeps the posterior near the prior (small KL); a task
-  requiring memorization blows KL up.
-- **Online (prequential) code** (Blier & Ollivier 2018). Train on a small data
-  fraction, encode the next chunk with the current probe (accumulate `-log p`),
-  enlarge, repeat. A good representation needs little data and encodes future
-  examples cheaply → small total codelength. This measures **learning
-  efficiency** / *effort to extract*, and is the most hand-implementable
-  variant — one loop over growing data fractions, no new dependency.
+- **变分编码（Variational code）**：对探针权重在先验 `p(θ)` 下学一个后验 `q(θ)`；编码长度为**上界**
+  `L_var = KL(q‖p) + E[-log p(y|x,θ)]`（即负 ELBO）。KL = 模型描述长度；交叉熵 = 数据描述长度。一个仅需简单权重就能解的任务，后验会靠近先验（KL 小）；需要记忆才能解的任务，KL 爆炸。
+- **在线（prequential）编码**（Blier & Ollivier 2018）：用小数据子集训练，用当前探针编码下一批数据（累计 `-log p`），扩大数据，重复。好的表征只需少量数据就能廉价编码未来样本 → 总编码长度小。这度量的是**学习效率**/**提取代价**，是最易手工实现的变体——一个在增长数据子集上的循环，无需新依赖。
 
-**Why MDL beats accuracy.** Under a control task (random labels), accuracy can
-stay high (the probe memorizes) but **codelength explodes**, because random
-labels are incompressible while real structure is captured by a small probe
-from few examples. MDL therefore cleanly separates *"information in the
-representation"* from *"information memorized by the probe"* — the exact
-distinction §1 demanded.
+**为什么 MDL 优于准确率**：在对照任务（随机标签）下，准确率可以保持高位（探针在记忆），但**编码长度爆炸**，因为随机标签不可压缩而真实结构能被少量数据的小探针捕获。MDL 因此能干净地将*"表征中的信息"*与*"探针记忆的信息"*分离——正是 §1 所要求的区分。
 
-**Why this fits the project.** The main table reports bits-per-dim (compressing
-pixels). Replacing probe accuracy with label codelength means the *downstream
-evaluation is measured on the same MDL ruler* (compressing labels). The whole
-story closes: **main task = MDL, probe = MDL, both in bits.**
+**为什么这契合项目**：主表报告 bits-per-dim（压缩像素）。把探针准确率替换成标签编码长度，意味着*下游评估与主表使用同一把 MDL 标尺*（压缩标签）。整个故事闭环：**主任务 = MDL，探针 = MDL，均以比特度量。**
 
 ---
 
-## 5. The unified view
+## 5. 统一视角
 
-For the pipeline `x → h → y`, a total description length is
+对流水线 `x → h → y`，总描述长度为
 
 ```
 L(h) + L(model) + L(y | h, model)
 ```
 
-and different research programs target different terms — all the same
-information-theoretic question, *"where is the task information stored, and how
-cheaply can it be described?"*:
+不同研究方向关注不同项——本质上是同一个信息论问题：*"任务信息存在哪里，能以多少比特描述？"*
 
-| Term            | Program                          | This project |
-|-----------------|----------------------------------|--------------|
-| `L(h)`          | Sparse coding / **SAEs**         | tangential (context only) |
-| `L(model)`      | Pruning / **Bayesian Compression** (Louizos 2017) | tangential (context only) |
-| `L(y\|h,model)` | **MDL probing**                  | **this is the corner we work in** |
+| 项               | 方向                                      | 本项目                      |
+|------------------|-------------------------------------------|-----------------------------|
+| `L(h)`           | 稀疏编码 / **SAE**                         | 旁支（仅作背景）             |
+| `L(model)`       | 剪枝 / **Bayesian Compression**（Louizos 2017） | 旁支（仅作背景）         |
+| `L(y\|h,model)`  | **MDL probing**                           | **本文工作所在的角落**       |
 
-SAEs (sparsity in *representation* space) and Bayesian Compression (sparsity in
-*parameter* space) are useful background but **orthogonal** to a linear-probe
-thesis. The project's contribution lives in `L(y|h,model)` — and §3 explains why
-the `h` it conditions on makes that term **linearly** small.
+SAE（*表征*空间中的稀疏性）和 Bayesian Compression（*参数*空间中的稀疏性）是有用的背景，但与线性探针论文**正交**。项目的贡献在 `L(y|h,model)`——而 §3 解释了为何其所条件化的 `h` 使这一项**线性地**变小。
 
 ---
 
-## 6. Reading list
+## 6. 阅读清单 (Reading List)
 
-⭐ = core 5 that most directly answer the research question. Titles/years are
-reliable from memory; **verify exact venue/arXiv IDs before citing.**
+与 `future.md §10` 阅读路径使用同一 **★（易）→ ★★★★★（难）** 标准，两份清单可在一个量表上读。**⭐ = 直接回答研究问题的核心 5 篇**；**粗体** = 对应节的主干引用。标题/年份来自记忆，可信度高——**引用进论文前务必核对 venue/arXiv 编号**（本清单未经引用核查）。
 
-**A. What a probe measures (methodology — read first)**
-- ⭐ Alain & Bengio 2017, *Understanding intermediate layers using linear
-  classifier probes* (ICLR-W). Origin of the technique; already cited in
-  `linear_probe.py`.
-- ⭐ Hewitt & Liang 2019, *Designing and Interpreting Probes with Control Tasks*
-  (EMNLP). The critique to address; introduces **selectivity / control tasks**.
-- Pimentel et al. 2020, *Information-Theoretic Probing for Linguistic Structure*
-  (ACL). Probing as mutual information; the extractability-not-presence point.
-- **Voita & Titov 2020, *Information-Theoretic Probing with MDL* (EMNLP).** The
-  backbone of §4 — codelength probing, variational + online codes.
-- Blier & Ollivier 2018, *The Description Length of Deep Learning Models*
-  (NeurIPS). Source of the **online/prequential code**.
-- Xu et al. 2020, *A Theory of Usable Information / V-information* (ICLR). Linear
-  probe accuracy = V-usable info under the linear family.
+**A. 探针度量的是什么（方法论——先读）**
 
-**B. Why concepts are linear (LRH half — the heart)**
-- ⭐ Elhage et al. 2021, *A Mathematical Framework for Transformer Circuits* +
-  2022 *Toy Models of Superposition* (Anthropic). Residual stream as linear
-  superposition; structurally identical to this model's additive stream.
-- ⭐ Park, Choe & Veitch 2024, *The Linear Representation Hypothesis and the
-  Geometry of LLMs* (ICML). Formal LRH; weight-tying = embedding ≡ unembedding
-  special case.
-- Jiang et al. 2024, *On the Origins of Linear Representations in LLMs*. Argues
-  linearity arises from the NTP objective — transfers directly to pixel NTP.
-- Engels et al. 2024, *Not All Language Model Features Are Linear*. Honest
-  counterpoint (some features are circular/manifold); cite so the claim reads
-  as "strong approximation," not law.
+| 论文 | 回答什么 · 项目关联 | 难度 |
+|---|---|---|
+| ⭐ Alain & Bengio 2017, *Understanding intermediate layers using linear classifier probes* (ICLR-W) | 技术来源——字面意义上就是 `linear_probe.py` 的实现 | ★★ |
+| ⭐ Hewitt & Liang 2019, *Designing and Interpreting Probes with Control Tasks* (EMNLP) | 必须回答的批评；**selectivity / control tasks** = 实验 **E3** | ★★★ |
+| Pimentel et al. 2020, *Information-Theoretic Probing for Linguistic Structure* (ACL) | 探针即互信息 → §1 "**可提取性而非存在性**" | ★★★★ |
+| **Voita & Titov 2020, *Information-Theoretic Probing with MDL* (EMNLP)** | §4 主干——标签**编码长度** = 与 bpd 相同的 MDL 标尺；驱动 **E6** | ★★★ |
+| Blier & Ollivier 2018, *The Description Length of Deep Learning Models* (NeurIPS) | E6 中实现的**在线/prequential 编码**来源 | ★★★★ |
+| Xu et al. 2020, *A Theory of Usable Information (V-information)* (ICLR) | 为什么线性探针数字 = 线性族下的 **V-usable info**（§1）| ★★★★ |
 
-**C. The mid-layer peak (inverted-U)**
-- ⭐ Chen et al. 2020, *Generative Pretraining from Pixels (iGPT)* (ICML). Direct
-  lineage; its mid-layer probe peak is the same curve measured here.
-- Tishby & Zaslavsky 2015 / Shwartz-Ziv & Tishby 2017, Information Bottleneck.
-  The compress-then-specialize dynamic behind the inverted-U.
-- 2024 work on *"intermediate layers give the best representations in LLMs"*
-  (search the phrase). Confirms the peak is cross-modal.
+**B. 为什么概念是线性的（LRH 部分——核心）**
 
-**D. Linear directions are causal (steering)**
-- Turner et al. 2023, *Activation Addition (ActAdd)*; Zou et al. 2023,
-  *Representation Engineering*; Anthropic 2024, *Scaling Monosemanticity*.
-  Justify treating `α · coarse_ctx` as an engineered steering vector and
-  motivate the steering experiment (E4).
+| 论文 | 回答什么 · 项目关联 | 难度 |
+|---|---|---|
+| ⭐ Elhage et al. 2021 *A Mathematical Framework for Transformer Circuits* + 2022 *Toy Models of Superposition*（Anthropic）| 残差流叠加——与本模型 OLMo2 加性流**结构相同**（§3 压力 #2–#3）| ★★★ |
+| ⭐ Park, Choe & Veitch 2024, *The Linear Representation Hypothesis and the Geometry of LLMs* (ICML) | 正式 LRH；**权重共享头** = 他们 embedding ≡ unembedding 的特例（§3 压力 #1）| ★★★★ |
+| Jiang et al. 2024, *On the Origins of Linear Representations in LLMs* | 线性性源于 **NTP 目标**——直接迁移到像素 NTP | ★★★ |
+| Engels et al. 2024, *Not All Language Model Features Are Linear* | 诚实的反例（有些特征是圆形/流形的）——引用让 LRH 论断读起来是"强近似"而非定律 | ★★★ |
 
-**Read only four to crack the question:** Jiang 2024 (NTP→linear) + Elhage 2022
-(residual stream/superposition) + iGPT 2020 (pixel-domain mid-layer peak) +
-Hewitt & Liang 2019 (prove it's real, not memorized).
+**C. 中层峰值（倒 U 形）**
+
+| 论文 | 回答什么 · 项目关联 | 难度 |
+|---|---|---|
+| ⭐ Chen et al. 2020, *Generative Pretraining from Pixels (iGPT)* (ICML) | 直系祖先；其中层探针峰值**就是实测曲线**（L19 native / L16 transfer）| ★★ |
+| Tishby & Zaslavsky 2015 / Shwartz-Ziv & Tishby 2017, *Information Bottleneck* | **深层准确率下降**背后的"压缩—再专化"动态（§3.1）| ★★★★ |
+| 2024 work, *"intermediate layers give the best representations in LLMs"*（搜此短语）| 确认峰值是**跨模态**的，不是像素特有的偶然 | ★★ |
+
+**D. 线性方向是因果的（Steering）**
+
+| 论文 | 回答什么 · 项目关联 | 难度 |
+|---|---|---|
+| Turner et al. 2023 *ActAdd* · Zou et al. 2023 *Representation Engineering* · Anthropic 2024 *Scaling Monosemanticity* | 支持将 `α · coarse_ctx` 视为工程化 **steering vector**（§3 压力 #4）；激励实验 **E4** | ★★★ |
+
+**最短路径——只读这四篇即可破题**：Jiang 2024（NTP→线性）+ Elhage 2022（残差流/叠加）+ iGPT 2020（像素域中层峰值）+ Hewitt & Liang 2019（证明是真信息，不是记忆）。评为 ★★★★ 的是*深度，不是前提*——第一轮可以跳过。
 
 ---
 
-## 7. Experiment menu (assertion → evidence)
+## 7. 实验菜单（断言 → 证据）
 
-All reuse `scripts/linear_probe.py`, are cheap, and run on AutoDL (written on
-WSL — never run training/probe on WSL). Ordered by narrative value.
+所有实验复用 `scripts/linear_probe.py`，成本低廉，在 AutoDL 上运行（本文在 WSL 编写——绝不在 WSL 上运行训练/探针）。按叙事价值排序。
 
-- **E2 — compression ↔ probe correlation across checkpoints** *(highest value).*
-  Using `epoch_6..12.pth`, plot val bpd vs best-layer probe accuracy per
-  checkpoint. A tight monotone anti-correlation is **direct empirical proof** of
-  *compress better → learn better*. One figure, large payoff.
-- **E6 — MDL / online-code probe** *(best thesis fit).* Replace probe accuracy
-  with **label codelength** (online code: encode growing data fractions, sum
-  `-log p`). Report for v2 / iGPT-S / random-init + a random-label control.
-  Hand-implementable, no new dependency, and puts the probe on the **same MDL
-  ruler** as the main table — "MDL all the way down."
-- **E1 — linear vs MLP probe gap.** Add a 1-hidden-layer probe. Small gap ⇒ info
-  is genuinely *linearly* encoded (LRH holds); large gap ⇒ entangled. The
-  headline LRH evidence.
-- **E3 — control task / selectivity** (Hewitt & Liang). Probe random labels;
-  report selectivity = real − control. Rebuts "the probe just learns the task."
-- **E5 — coarse_ctx ablation** *(already runnable — `--no_coarse_ctx` exists).*
-  Quantify the additive direction's per-layer contribution. Tests pressure #4.
-- **E4 — steering** *(most work, best interpretability story).* Use a probe
-  weight vector as a class direction, add it to the residual stream during image
-  completion, and check whether the output shifts toward the class. If yes, the
-  direction is **causal** — the image-domain analogue of LLM activation
-  steering.
+- **E2 — 压缩与探针准确率的跨 checkpoint 相关性**（*最高价值*）：使用 `epoch_6..12.pth`，绘制各 checkpoint 的 val bpd vs 最优层探针准确率。紧密单调反相关 = **"压缩越好 → 学习越好"的直接实证**。一张图，收益大。
+- **E6 — MDL / 在线编码探针**（*最契合论文主线*）：用**标签编码长度**替代探针准确率（在线编码：对增长数据子集编码，累计 `-log p`）。对 v2 / iGPT-S / 随机初始化 + 随机标签对照各报告。手工可实现，无新依赖，且将探针置于**与主表相同的 MDL 标尺**上——"MDL all the way down"。
+- **E1 — 线性 vs MLP 探针差距**：加一层单隐层探针。差距小 ⇒ 信息确实*线性*编码（LRH 成立）；差距大 ⇒ 纠缠。核心 LRH 证据。
+- **E3 — 对照任务 / 选择性（selectivity）**（Hewitt & Liang）：对随机标签做探针；报告 selectivity = 真实准确率 - 对照准确率。反驳"探针只是学了任务"。
+- **E5 — coarse_ctx 消融**（*已可直接跑——`--no_coarse_ctx` 已存在*）：逐层量化加性方向的贡献。检验压力 #4。
+- **E4 — Steering**（*工作量最大，可解释性故事最好*）：用探针权重向量作为类别方向，在图像补全时将其加入残差流，检查输出是否向该类别偏移。若是，方向具有**因果性**——图像域的 LLM activation steering 类比。
 
 ---
 
-## 8. One-line summary
+## 8. 一句话总结
 
-The model is trained only to compress pixels, but a linear, weight-tied head
-over an additive residual stream forces the generative factors it must learn
-(MDL) onto **linear directions** (LRH), peaking in the middle layers — so a
-linear probe reads class for free; and because the honest way to score that
-probe is **label codelength**, the downstream evaluation lands on the very same
-MDL ruler as the main table. *Compress better → learn better → read it off
-linearly → measure it in bits.*
+模型仅以压缩像素为目标训练，但加性残差流上的线性权重共享头迫使它必须学习的生成因子（MDL）落在**线性方向**上（LRH），在中间层达到峰值——因此线性探针免费读出类别；而诚实评分该探针的方式是**标签编码长度**，下游评估因此落在与主表完全相同的 MDL 标尺上。
+
+*压缩越好 → 学习越好 → 线性读出 → 以比特度量。*

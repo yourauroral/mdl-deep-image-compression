@@ -416,4 +416,6 @@ demo/
 
 **理论**: Shannon (1948), MDL (Rissanen 1978), Language Modeling Is Compression (Delétang 2024)
 
-**表征 / 可解释性**（probe 为何有效，详见 [theory.md](theory.md)）: Control Tasks (Hewitt & Liang 2019), Info-Theoretic Probing (Pimentel 2020), MDL Probing (Voita & Titov 2020), Description Length of DL Models (Blier & Ollivier 2018), V-information (Xu 2020), Linear Representation Hypothesis (Park, Choe & Veitch 2024), Toy Models of Superposition (Elhage 2022)
+**表征 / 可解释性**: 详见 [theory.md](theory.md)（MDL + LRH + MDL probing 三段论 + 阅读清单）
+
+> 完整阅读路径（7 阶，从信息论地基到「超越压缩」）见本地 `future.md §10`（git-ignored）。
