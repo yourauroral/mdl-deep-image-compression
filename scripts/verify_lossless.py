@@ -353,7 +353,6 @@ def _verify_image(model, model_type, x, device, log_every, dump_path=None):
     故无需再跑一次昂贵 forward）。
     """
     import torch
-    import torch.nn.functional as F
 
     x = x.to(device).clamp(0, 1).float()
     C = model.in_channels       # CCIGPT 与 IGPT 都暴露 in_channels / image_size
@@ -362,8 +361,7 @@ def _verify_image(model, model_type, x, device, log_every, dump_path=None):
     with torch.amp.autocast(device_type=device.type, enabled=False):
         if model_type == "ccigpt":
             # ---- coarse 路径（R-only，独立 bitstream）----
-            x_c_full = F.adaptive_avg_pool2d(x, model.coarse_size)
-            x_c = x_c_full[:, :model.coarse.in_channels]
+            x_c = model._coarse_input(x)                          # bit-exact coarse 源头（单点推导）
             coarse_tokens = model.coarse._tokenize(x_c)           # (1, N_c)
             c_bits, c_ideal = _encode_sequence(
                 model.coarse, coarse_tokens, None, device, "coarse", log_every)

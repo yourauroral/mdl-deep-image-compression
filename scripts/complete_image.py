@@ -72,7 +72,6 @@ def _sample(logits_row, temperature, top_k):
 def _complete_one(model, model_type, x, keep_frac, temperature, top_k, device):
     """x (1,C,H,W) float[0,1] → (orig_u8, masked_u8, completed_u8) 三张 (C,H,W) uint8。"""
     import torch
-    import torch.nn.functional as F
 
     x = x.to(device).clamp(0, 1).float()
     igpt = model.fine if model_type == "ccigpt" else model
@@ -83,7 +82,7 @@ def _complete_one(model, model_type, x, keep_frac, temperature, top_k, device):
     with torch.amp.autocast(device_type=device.type, enabled=False):
         coarse_ctx = None
         if model_type == "ccigpt":
-            x_c = F.adaptive_avg_pool2d(x, model.coarse_size)[:, :model.coarse.in_channels]
+            x_c = model._coarse_input(x)                  # bit-exact coarse 源头（单点推导）
             coarse_tokens = model.coarse._tokenize(x_c)
             coarse_ctx = model.ctx_alpha * model._compute_coarse_ctx(coarse_tokens)
 

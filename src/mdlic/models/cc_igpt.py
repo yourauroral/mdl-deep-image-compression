@@ -88,6 +88,20 @@ class CCIGPT(nn.Module):
         # 避免 ctx 过强压制 fine 自身的 token embed。
         self.ctx_alpha = nn.Parameter(torch.ones(1))
 
+    def _coarse_input(self, x: torch.Tensor) -> torch.Tensor:
+        """整图 (B, C, H, W) → coarse 子模型输入 x_c (B, C_coarse, S, S)。
+
+        DOWN(adaptive_avg_pool2d) + R-only 通道切分。它是 bit-exact ctx 管线的
+        **源头**：forward / encode / 下游脚本 (complete_image, verify_lossless) /
+        前端 codec (demo/server /api/encode) 全部经此单点推导，避免多处手抄漂移
+        导致 encoder/decoder coarse 输入不一致、bitstream 不可解。调用方负责在需要
+        时套 autocast(enabled=False)。
+        """
+        x_c = F.adaptive_avg_pool2d(x, self.coarse_size)
+        if self.coarse.in_channels < self.in_channels:
+            x_c = x_c[:, :self.coarse.in_channels]
+        return x_c
+
     def _compute_coarse_ctx(self, coarse_tokens: torch.Tensor) -> torch.Tensor:
         """coarse 量化 token (B, N_c) → fine 用 additive coarse context (B, T_fine-1, d_model)。
 
@@ -150,11 +164,7 @@ class CCIGPT(nn.Module):
           ctx_alpha (detached) / logits (fine 分支 (B, T_f-1, V) fp32)
         """
         x = x.clamp(0, 1).to(torch.float32)              # encoder/decoder 一致性
-        x_c_full = F.adaptive_avg_pool2d(x, self.coarse_size)
-        if self.coarse.in_channels < self.in_channels:
-            x_c_float = x_c_full[:, :self.coarse.in_channels]
-        else:
-            x_c_float = x_c_full
+        x_c_float = self._coarse_input(x)
 
         out_c = self.coarse(x_c_float, z_loss_weight=z_loss_weight)
         # bit-exact: ctx 走 coarse 量化 token 重建路径（decoder 同款）
@@ -189,12 +199,7 @@ class CCIGPT(nn.Module):
         x = x.clamp(0, 1).to(torch.float32)
         coarse_ctx = None
         if use_coarse_ctx:
-            x_c_full = F.adaptive_avg_pool2d(x, self.coarse_size)
-            if self.coarse.in_channels < self.in_channels:
-                x_c_float = x_c_full[:, :self.coarse.in_channels]
-            else:
-                x_c_float = x_c_full
-            coarse_tokens = self.coarse._tokenize(x_c_float)
+            coarse_tokens = self.coarse._tokenize(self._coarse_input(x))
             coarse_ctx = self.ctx_alpha * self._compute_coarse_ctx(coarse_tokens)
         return self.fine.encode(x, max_layer=max_layer, pool=pool,
                                 coarse_ctx=coarse_ctx)

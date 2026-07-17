@@ -312,7 +312,6 @@ def encode(file: UploadFile = File(...), dataset: str = Form("cifar10")):
     from scripts.verify_lossless import _build_container_bytes, _encode_sequence_iter
 
     def _gen():
-        import torch.nn.functional as F
         model.eval()
         try:
             with torch.no_grad(), torch.amp.autocast(device_type=device.type, enabled=False):
@@ -328,7 +327,7 @@ def encode(file: UploadFile = File(...), dataset: str = Form("cifar10")):
                                       "stages": ["coarse", "fine"]}) + "\n"
 
                     # ---- coarse 段（gold 逐 token，独立 bitstream）----
-                    x_c = F.adaptive_avg_pool2d(x_dev, model.coarse_size)[:, :model.coarse.in_channels]
+                    x_c = model._coarse_input(x_dev)                       # bit-exact coarse 源头（单点推导）
                     coarse_tokens = model.coarse._tokenize(x_c)            # 真 token
                     gen_c = _encode_sequence_iter(model.coarse, coarse_tokens, None, device)
                     c_bits, base = yield from _drive_coder(gen_c, "coarse", 0, total_steps)
