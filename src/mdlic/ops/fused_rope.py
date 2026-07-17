@@ -46,7 +46,7 @@ def _fused_rope_kernel(
     注意: RotaryEmbedding 输出的 cos/sin 形状为 (T, d_k)，
     其中 cos[:, :half] == cos[:, half:]（cat 结构），因此只读前半段。
     """
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)   # int64：避免 (B·H·T) 大时 bh*stride_bh 指针偏移溢出（对齐 flash_attn.py）
     bh = pid // T
     t_pos = pid % T
 

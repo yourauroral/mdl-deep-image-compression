@@ -74,6 +74,11 @@ def _read_container_bytes(blob):
     读文件（_read_container）与 demo 上传解码（/api/decode）共用，保证两条
     路径对同一字节串解出完全相同的 bit 列表。
     """
+    if len(blob) < _HEADER_SIZE:
+        # 截断/过短：先抛 ValueError，避免 struct.unpack 抛 struct.error
+        # （struct.error 不是 ValueError 子类，会漏过调用方的 except ValueError → 500）
+        raise ValueError(
+            f"容器过短：{len(blob)} 字节 < header {_HEADER_SIZE} 字节")
     magic, ver, dual, H, C, c_nbits, f_nbits = struct.unpack(
         _HEADER, blob[:_HEADER_SIZE])
     if magic != _MAGIC:

@@ -81,7 +81,7 @@ train:
   clip_max_norm: 1.0
   z_loss_weight: 1e-4
   lr_schedule: "cosine"
-  warmup_epochs: 1              # 12ep 太短，warmup 占比保持 ~8%
+  warmup_epochs: 1              # 注：epoch 粒度 warmup，=1 时首 epoch 已是峰值 LR（无实际 warmup）；12ep 短训可接受，如需真 warmup 应改 step 粒度
   min_lr_ratio: 0.05
   swa:
     enabled: true

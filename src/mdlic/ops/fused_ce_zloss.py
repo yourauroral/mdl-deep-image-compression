@@ -66,7 +66,7 @@ def _fused_ce_zloss_fwd_kernel(
       4. ce = -x[target] + lse
       5. z = lse²
     """
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)   # int64：避免 M·V ≥ 2^31 时 row*stride 指针偏移溢出（对齐 flash_attn.py）
     if row >= M:
         return
 
@@ -128,7 +128,7 @@ def _fused_ce_zloss_bwd_kernel(
       - w = z_loss_weight
       - inv_M = 1/M（mean reduction 的梯度缩放）
     """
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)   # int64：避免 M·V ≥ 2^31 时 row*stride 指针偏移溢出（对齐 flash_attn.py）
     if row >= M:
         return
 

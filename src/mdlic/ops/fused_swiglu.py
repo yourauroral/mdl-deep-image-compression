@@ -45,7 +45,7 @@ def _fused_swiglu_fwd_kernel(
     每个 program 处理一行的一个 BLOCK_N 片段。
     Grid: (M, cdiv(N, BLOCK_N))
     """
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)   # int64：避免 M·N ≥ 2^31 时 row*stride 指针偏移溢出（对齐 flash_attn.py）
     col_block = tl.program_id(1)
     col_offsets = col_block * BLOCK_N + tl.arange(0, BLOCK_N)
     mask = col_offsets < N
@@ -95,7 +95,7 @@ def _fused_swiglu_bwd_kernel(
 
     Ref: [2] Liger-Kernel SwiGLU backward, activation recomputation pattern [3].
     """
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)   # int64：避免 M·N ≥ 2^31 时 row*stride 指针偏移溢出（对齐 flash_attn.py）
     col_block = tl.program_id(1)
     col_offsets = col_block * BLOCK_N + tl.arange(0, BLOCK_N)
     mask = col_offsets < N

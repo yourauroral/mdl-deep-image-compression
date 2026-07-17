@@ -53,7 +53,7 @@ def _fused_add_rms_norm_fwd_kernel(
     每个 program 处理一行。
     y_i = residual_i + w_i * sublayer_i * rrms
     """
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)   # int64：避免 M·N ≥ 2^31 时 row*stride 指针偏移溢出（对齐 flash_attn.py）
     cols = tl.arange(0, BLOCK_N)
     mask = cols < N
 
@@ -100,7 +100,7 @@ def _fused_add_rms_norm_bwd_kernel(
       其中 sublayer_hat = sublayer * rrms
     dw_row = dy * sublayer_hat
     """
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)   # int64：避免 M·N ≥ 2^31 时 row*stride 指针偏移溢出（对齐 flash_attn.py）
     cols = tl.arange(0, BLOCK_N)
     mask = cols < N
 

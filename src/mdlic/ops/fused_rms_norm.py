@@ -53,7 +53,7 @@ def _rms_norm_fwd_kernel(
     每个 program 处理一行（row）。
     program_id(0) = 行索引 m。
     """
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)   # int64：避免 M·N ≥ 2^31 时 row*stride 指针偏移溢出（对齐 flash_attn.py）
 
     # 计算当前行在 X / Y 中的起始偏移
     X_row_ptr = X + row * stride_x
@@ -106,7 +106,7 @@ def _rms_norm_bwd_kernel(
 
     dw_i（当前行贡献）= dy_i * x_i * rrms
     """
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)   # int64：避免 M·N ≥ 2^31 时 row*stride 指针偏移溢出（对齐 flash_attn.py）
 
     cols = tl.arange(0, BLOCK_N)
     mask = cols < N
@@ -229,7 +229,7 @@ class FusedRMSNorm(torch.nn.Module):
       self.norm = FusedRMSNorm(d_model)
     """
 
-    def __init__(self, features: int, eps: float = 1e-10):
+    def __init__(self, features: int, eps: float = 1e-6):
         super().__init__()
         self.eps = eps
         self.weight = torch.nn.Parameter(torch.ones(features))

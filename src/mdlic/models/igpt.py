@@ -29,6 +29,11 @@ class IGPT(nn.Module):
   架构：RoPE base=500000、QK-Norm、RMSNorm Post-Norm（OLMo 2 风格）、
   SwiGLU FFN、Weight Tying（softmax）、z-loss 正则、深度缩放初始化、
   子像素自回归 (pixel-first)。
+
+  注：本实现每层为 OLMo2 post-norm（x = x + RMSNorm(sublayer(x))），但**未**在
+  最后一层 block 与 tied head 之间加 final RMSNorm（OLMo2/GPT-2 的 ln_f）。
+  post-norm 下残差幅度逐层增长、进入 head 前未归一化，由 z-loss 约束 logit scale。
+  这是与 OLMo2/GPT-2 的一处刻意偏差（非遗漏）；如需对齐可在 head 前补 RMSNorm。
   """
   def __init__(
     self,
