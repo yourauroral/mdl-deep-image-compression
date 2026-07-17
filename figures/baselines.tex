@@ -4,8 +4,8 @@
 %
 % 数据来源: README.md L16-20 (RGB-bit-exact 同域可比)
 %   PixelCNN++          52M   2.92    Salimans et al., ICLR 2017
-%   Image Transformer   95M   2.90    Parmar et al., ICML 2018
-%   PixelSNAIL         380M   2.85    Chen et al., ICML 2018
+%   Image Transformer  ~40M   2.90    Parmar et al., ICML 2018  (原文未报告参数量; ~40M 据官方 tensor2tensor imagetransformer_cifar10_base = 12L/d512/ff2048 估算)
+%   PixelSNAIL         ~91M   2.85    Chen et al., ICML 2018  (原文未报告参数量; ~91M 据官方 neocxi/pixelsnail-public CIFAR 配置 h12_noup_smallkey/nr_filters=256/nr_resnet=4 核算, 见 experiments/pixelsnail_paramcount.py)
 %   Sparse Transformer  59M   2.80    Child et al., 2019 (128 层 strided)
 %   CC-iGPT v2 (Ours)  82.95M 2.8296  本工作，R-only ensemble (best+SWA+EMA) + TTA hflip (2026-05-27)
 \documentclass[tikz,border=8pt]{standalone}
@@ -68,8 +68,8 @@
 
 % --- 手动标注bpd和参数量 ---
 \node[font=\scriptsize, align=center, yshift=4pt] at (axis cs:SparseTrans, 2.80) {2.80 59M};
-\node[font=\scriptsize, align=center, yshift=4pt] at (axis cs:PixelSNAIL, 2.85) {2.85 380M};
-\node[font=\scriptsize, align=center, yshift=4pt] at (axis cs:ImgTrans, 2.90) {2.90 95M};
+\node[font=\scriptsize, align=center, yshift=4pt] at (axis cs:PixelSNAIL, 2.85) {2.85 $\approx$91M};
+\node[font=\scriptsize, align=center, yshift=4pt] at (axis cs:ImgTrans, 2.90) {2.90 $\approx$40M};
 \node[font=\scriptsize, align=center, yshift=4pt] at (axis cs:PixelCNNpp, 2.92) {2.92 52M};
 \node[font=\scriptsize, align=center, orange!70!black, yshift=4pt] at (axis cs:Ours, 2.8296) {\textbf{2.82} \textbf{82M}};
 

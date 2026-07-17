@@ -28,7 +28,7 @@ fine 架构：N=32 层，d=448，h=7，SwiGLU FFN，RoPE base=500000，QK-Norm�
 
 | 数据集     | 设置                                   | bpd        | 位次                                                          |
 |------------|----------------------------------------|------------|---------------------------------------------------------------|
-| CIFAR-10   | ensemble(best+SWA+EMA) + TTA hflip     | **2.8296** | 超越 PixelSNAIL 380M (2.85)；逼近 Sparse Transformer 59M (2.80) |
+| CIFAR-10   | ensemble(best+SWA+EMA) + TTA hflip     | **2.8296** | 超越 PixelSNAIL ≈91M (2.85)；逼近 Sparse Transformer 59M (2.80) |
 | ImageNet64 | ensemble(best+SWA+EMA) + TTA hflip     | **3.4800** | 超 SPN (3.52)；逼近但未达 Sparse Transformer 152M (3.44)       |
 
 **下游证据（MDL 主线，论文 §5）**：线性探针、图像补全（AR inpainting）、真实无损算术编解码 roundtrip（bit-identical）。本文是**第一项**的理论支撑。

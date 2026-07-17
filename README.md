@@ -7,7 +7,7 @@
 - **Phase A (完成)**: iGPT token-level 自回归压缩 + 8 个手写 Triton Kernel（7 个进入训练栈，1 个 `fused_linear_ce` 在 V=256 下经 roofline 分析证伪、保留作反面案例）
 - **Phase B (v1 历史主表完成)**: CC-iGPT（Coarse-Conditioned iGPT）双尺度条件自回归 — 浅层 coarse iGPT (R-only 配置 8×8×1, 64 token, ~2% overhead) 独立编码进 bitstream，UP + 量化后通过 additive embedding（可学习标量 α）注入 fine iGPT (32×32×3, 3072 token)。CIFAR-10 RGB-bit-exact R-only v1 历史主表 **2.9035 bpd**（softmax head, 100ep + 全套正则 + TTA hflip，已被 v2 替代）
 - **Phase C (完成)**: Demo 前端可视化系统 (FastAPI + Chart.js, 7 个展示面板，含交互式无损 codec 图像⇄.bin 真实可解性验证 + 图像补全 AR inpainting 实时面板)
-- **Phase D (完成, 2026-05-27)**: 深窄 + ensemble — fine N=24/d=512 → N=32/d=448 (82.95M)、epoch 100→200、`min_lr_ratio=0.05` + SWA last 31 ckpts (start ep170) + EMA 0.9998；`evaluate.py --ensemble` 多 ckpt probability-mixture ensemble (best+SWA+EMA)。**主表 ensemble + TTA hflip = 2.8296 ± 0.0854**（超越 PixelSNAIL 380M 2.85，逼近 Sparse Transformer 59M 2.80）。详见 [future.md §4](future.md)
+- **Phase D (完成, 2026-05-27)**: 深窄 + ensemble — fine N=24/d=512 → N=32/d=448 (82.95M)、epoch 100→200、`min_lr_ratio=0.05` + SWA last 31 ckpts (start ep170) + EMA 0.9998；`evaluate.py --ensemble` 多 ckpt probability-mixture ensemble (best+SWA+EMA)。**主表 ensemble + TTA hflip = 2.8296 ± 0.0854**（超越 PixelSNAIL ≈91M 2.85，逼近 Sparse Transformer 59M 2.80）。详见 [future.md §4](future.md)
 - **ImageNet64 benchmark (训练+评测完成, 2026-06-07)**: `configs/ccigpt_imagenet64_v1.yaml` 12ep 训练 + 4 卡 DDP 评测全部完成；**主表 ensemble (best+SWA+EMA) + TTA hflip = 3.4800 bpd**（单 ckpt best+TTA = 3.4810；CE_c 3.8960 share 3.4% / CE_f 2.3310 96.6% / α 0.1991）。**超 SPN 3.52、逼近但未达 Sparse Transformer 152M strided 3.44**（差 0.040）。注：4 卡评测的 ± 是 batch-level std（随 GPU 数变化），与 CIFAR 主表 per-image ± 口径不同。
 
 ## 当前进度
@@ -27,14 +27,16 @@
 | 方法 | 类别 | Params | CIFAR-10 bits/dim ↓ | 域 | 来源 |
 |------|------|--------|---------------------|----|------|
 | PixelCNN++ | Autoregressive | 52M | 2.92 | RGB-bit-exact | Salimans et al., ICLR 2017 |
-| Image Transformer | Autoregressive | 95M | 2.90 | RGB-bit-exact | Parmar et al., ICML 2018 |
-| PixelSNAIL | Autoregressive | 380M | 2.85 | RGB-bit-exact | Chen et al., ICML 2018 |
+| Image Transformer | Autoregressive | ≈40M | 2.90 | RGB-bit-exact | Parmar et al., ICML 2018 |
+| PixelSNAIL | Autoregressive | ≈91M | 2.85 | RGB-bit-exact | Chen et al., ICML 2018 |
 | Sparse Transformer | Autoregressive | 59M | 2.80 | RGB-bit-exact | Child et al., 2019 (128 层 strided sparse attention) |
 | **CC-iGPT v2 (Ours, R-only)** | Autoregressive | 82.95M | **2.8296** ± 0.0854 | RGB-bit-exact | `coarse_in_channels=1`，coarse 仅压 R 8×8（64 token），fine 通过 sub-pixel AR 自学 G/B，**主表**（200ep + RandomCrop + DropPath 0.1 + EMA 0.9998 + SWA last 31 ckpts + ensemble best/SWA/EMA + TTA hflip）|
 | PNG | Classical codec | — | 5.87 | RGB-bit-exact | Hoogeboom et al., NeurIPS 2019 报告 |
 | WebP (lossless) | Classical codec | — | 4.61 | RGB-bit-exact | Hoogeboom et al., NeurIPS 2019 报告 |
 
-CC-iGPT v2 R-only **超越 PixelSNAIL 380M (2.85)、逼近 Sparse Transformer 59M (2.80)**，参数预算 82.95M。主表 ensemble (best+SWA+EMA) + TTA hflip = **2.8296 ± 0.0854**（vs PixelSNAIL gap -0.020 / vs Sparse Trans gap +0.030）。
+> **注**：Image Transformer 原论文未报告总参数量；表中 ≈40M 系据官方实现 tensor2tensor `imagetransformer_cifar10_base`（12 层 / d=512 / ff=2048）估算。PixelSNAIL 原论文亦未报告参数量；表中 ≈91M 系据官方实现 `neocxi/pixelsnail-public` 的 CIFAR-10 配置（`h12_noup_smallkey`, `nr_filters=256`, `nr_resnet=4` 默认值 — 官方 README 的 CIFAR 训练命令未覆盖 `--nr_resnet`）逐层核算，脚本见 `experiments/pixelsnail_paramcount.py`（PixelCNN++ 校验锚 55.35M 对齐公开 ~53.5M，torch numel 交叉校验一致）；原所列 380M 无出处、已撤下。Sparse Transformer 的 59M（CIFAR-10, 128L/d256）与 152M（ImageNet64, 48L/d512）均为原论文自报。
+
+CC-iGPT v2 R-only **超越 PixelSNAIL ≈91M (2.85)、逼近 Sparse Transformer 59M (2.80)**，参数预算 82.95M。主表 ensemble (best+SWA+EMA) + TTA hflip = **2.8296 ± 0.0854**（vs PixelSNAIL gap -0.020 / vs Sparse Trans gap +0.030）。
 
 ### ImageNet 64×64 对比
 
@@ -51,7 +53,7 @@ ImageNet64 R-only **超越 SPN 3.52（-0.040）、逼近但未达 Sparse Transfo
 
 1. **方法 — 零新参数的双尺度条件注入**：coarse iGPT 量化 token 经 bit-exact 反量化/上采样/重 tokenize 后，复用 `fine.token_embed` 得到 `coarse_ctx`，再以可学习标量 α 做 additive 注入。整个 ctx 通路只引入 1 个标量参数；encoder/decoder 共用同一函数，bitstream 真实可解码。回避了多尺度联合 AR 的 loss 平衡难题。
 2. **工程 — 8 个手写 Triton kernel + 1 个 roofline 证伪的反面案例**：7 个进入训练栈，1 个 `fused_linear_ce` 在 V=256 下经 `scripts/profile_kernels.py --kernel fused_linear_ce --roofline` 分析判定为负收益（compute-bound + 三重循环失去 cuBLAS GEMM 利用率），保留作工程严谨性的反向证据。
-3. **分析 — RGB-bit-exact 主表 + 多 benchmark SOTA 对比**：CIFAR-10 R-only v2 主表 **2.8296 bpd**（超越 PixelSNAIL 380M 2.85）；ImageNet 64×64 主表 **3.4800 bpd**（超 SPN 3.52、逼近未达 Sparse Transformer 152M 3.44）；Linear Probe 逐层表征曲线；roofline forward 与 fwd+bwd 双视角。
+3. **分析 — RGB-bit-exact 主表 + 多 benchmark SOTA 对比**：CIFAR-10 R-only v2 主表 **2.8296 bpd**（超越 PixelSNAIL ≈91M 2.85）；ImageNet 64×64 主表 **3.4800 bpd**（超 SPN 3.52、逼近未达 Sparse Transformer 152M 3.44）；Linear Probe 逐层表征曲线；roofline forward 与 fwd+bwd 双视角。
 
 ## 快速开始
 
