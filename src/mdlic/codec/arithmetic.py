@@ -127,7 +127,8 @@ def build_cumfreq(probs: List[float], total: int = FREQ_TOTAL) -> List[int]:
     for i in range(V):
         acc += freqs[i]
         cum[i + 1] = acc
-    assert cum[V] == total, f"cumfreq 总和 {cum[V]} != {total}"
+    if cum[V] != total:
+        raise RuntimeError(f"cumfreq 总和 {cum[V]} != {total}")
     return cum
 
 

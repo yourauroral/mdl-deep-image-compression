@@ -4,7 +4,7 @@
     {"name": "Gated PixelCNN",      "category": "Autoregressive density models", "params": "—",          "bpd": 3.57,   "std": null, "note": "van den Oord 2016"},
     {"name": "SPN (Subscale)",      "category": "Autoregressive density models", "params": "—",          "bpd": 3.52,   "std": null, "note": "Menick & Kalchbrenner, ICLR 2019；coarse-to-fine 最近邻"},
     {"name": "Sparse Transformer",  "category": "Autoregressive density models", "params": "152M",       "bpd": 3.44,   "std": null, "note": "Child 2019；strided sparse attention，参数量为原论文自报"},
-    {"name": "CC-iGPT R-only (Ours)", "category": "Autoregressive density models", "params": "3×82.95M", "bpd": 3.4800, "std": null, "primary": false, "note": "历史诊断结果：best+SWA+EMA 三成员 probability mixture + hflip TTA；旧 batch-level std 已作废"},
+    {"name": "CC-iGPT R-only (Ours)", "category": "Autoregressive density models", "params": "3×82.95M", "bpd": 3.4800, "std": null, "primary": false, "note": "历史实验结果（diagnostic protocol）：best+SWA+EMA 三成员 probability mixture + hflip TTA；旧 batch-level std 已作废"},
     {"name": "CC-iGPT R-only formal (Ours)", "category": "Autoregressive density models", "params": "82.95M", "bpd": null, "std": null, "primary": false, "note": "待按单 checkpoint、no-TTA、新逐图 evaluator 和 manifest 重评；数据协议仍需核对"}
   ]
 }

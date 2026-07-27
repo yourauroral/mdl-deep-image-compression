@@ -22,93 +22,31 @@ IN64 12288 token 太慢。
         --out experiments/completion_grid.png
 """
 import argparse
+import math
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
+from mdlic.completion import (
+    complete_image as _complete_one,
+)
+
 
 def _build_model(config, checkpoint, device):
     import torch
+    from mdlic.model_factory import build_model_from_config
     from mdlic.utils import clean_state_dict
-    from scripts.train import _build_ccigpt_from_config, _build_model_from_config
 
     mcfg = config["model"]
     model_type = mcfg.get("type", "igpt")
-    model = (_build_ccigpt_from_config(mcfg, device) if model_type == "ccigpt"
-             else _build_model_from_config(mcfg, device))
+    model = build_model_from_config(mcfg, device)
     ckpt = torch.load(checkpoint, map_location=device, weights_only=False)
     sd = ckpt.get("model_state_dict", ckpt)
     model.load_state_dict(clean_state_dict(sd))
     model.eval()
     return model, model_type
-
-
-def _logits_at(igpt, buf, coarse_ctx, pos):
-    """buf (1, seq_len-1) long → 位置 pos 的下一 token logits (1,V) fp32。"""
-    import torch
-    with torch.no_grad():
-        hidden, position_ids = igpt._embed_inputs(buf, coarse_ctx=coarse_ctx)
-        for block in igpt.blocks:
-            hidden = block(hidden, position_ids=position_ids)
-        logits = igpt.head(hidden[:, pos:pos + 1, :])
-    return logits.float().squeeze(1)
-
-
-def _sample(logits_row, temperature, top_k):
-    """logits (1,V) → 采样 token (int)。temperature>0 + 可选 top_k 截断。"""
-    import torch
-    logits = logits_row.squeeze(0).double()
-    if temperature <= 0:
-        return int(logits.argmax().item())          # 贪心
-    logits = logits / temperature
-    if top_k and top_k < logits.numel():
-        kth = torch.topk(logits, top_k).values[-1]
-        logits = logits.masked_fill(logits < kth, float("-inf"))
-    probs = torch.softmax(logits, dim=-1)
-    return int(torch.multinomial(probs, 1).item())
-
-
-def _complete_one(model, model_type, x, keep_frac, temperature, top_k, device):
-    """x (1,C,H,W) float[0,1] → (orig_u8, masked_u8, completed_u8) 三张 (C,H,W) uint8。"""
-    import torch
-
-    x = x.to(device).clamp(0, 1).float()
-    igpt = model.fine if model_type == "ccigpt" else model
-    C, H = igpt.in_channels, igpt.image_size
-    T = igpt.seq_len
-    seq_in = T - 1
-
-    with torch.amp.autocast(device_type=device.type, enabled=False):
-        coarse_ctx = None
-        if model_type == "ccigpt":
-            x_c = model._coarse_input(x)                  # bit-exact coarse 源头（单点推导）
-            coarse_tokens = model.coarse._tokenize(x_c)
-            coarse_ctx = model.ctx_alpha * model._compute_coarse_ctx(coarse_tokens)
-
-        tokens = igpt._tokenize(x).clone()           # (1, T) 真实 token
-        # 保留前 keep 个 token（raster pixel-first → 等价保留上半若干行）
-        keep = int(round(keep_frac * T))
-        keep = max(1, min(keep, T))                  # 至少保留 token0
-        gen = tokens.clone()
-
-        buf = torch.zeros((1, seq_in), dtype=torch.long, device=device)
-        for m in range(keep, T):
-            buf[0, :m] = gen[0, :m]                  # 前缀=已知+已采样
-            logits = _logits_at(igpt, buf, coarse_ctx, m - 1)
-            gen[0, m] = _sample(logits, temperature, top_k)
-
-    def detok(t):
-        return t.view(1, H, H, C).permute(0, 3, 1, 2).contiguous()[0].to(torch.uint8)
-
-    orig = (x.clamp(0, 1) * 255).round().to(torch.uint8)[0]
-    completed = detok(gen)
-    # masked 可视化：已知区域真实像素，未知区域填中灰 128
-    masked_tokens = tokens.clone()
-    masked_tokens[0, keep:] = 128
-    masked = detok(masked_tokens)
-    return orig.cpu(), masked.cpu(), completed.cpu()
 
 
 def _save_grid(rows, out_path, scale=8):
@@ -159,9 +97,20 @@ def main():
                     help="存图 nearest 放大倍数（native 32px 太小，进 slides 会糊；默认 8×）")
     args = ap.parse_args()
 
+    if args.num_images < 1:
+        ap.error("--num_images must be >= 1")
+    if not math.isfinite(args.keep_frac) or not 0.0 < args.keep_frac <= 1.0:
+        ap.error("--keep_frac must be finite and in (0, 1]")
+    if not math.isfinite(args.temperature) or args.temperature < 0.0:
+        ap.error("--temperature must be finite and >= 0")
+    if args.top_k < 0:
+        ap.error("--top_k must be >= 0")
+    if args.scale < 1:
+        ap.error("--scale must be >= 1")
+
     import torch
     import yaml
-    from scripts.evaluate import _load_dataset
+    from mdlic.data.evaluation import load_evaluation_dataset
 
     torch.manual_seed(args.seed)
     with open(args.config) as f:
@@ -170,7 +119,11 @@ def main():
     model, model_type = _build_model(config, args.checkpoint, device)
     print(f"== 模型加载 (type={model_type}, device={device}) ==")
 
-    dataset, dataset_name = _load_dataset(config)
+    dataset, dataset_name = load_evaluation_dataset(config)
+    if args.num_images > len(dataset):
+        ap.error(
+            f"--num_images ({args.num_images}) exceeds dataset size ({len(dataset)})"
+        )
     print(f"== {dataset_name}：补全前 {args.num_images} 张, keep_frac={args.keep_frac}, "
           f"T={args.temperature}, top_k={args.top_k} ==")
 

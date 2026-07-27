@@ -50,9 +50,11 @@ class CCIGPT(nn.Module):
         _fine_model_cls=IGPT,
     ):
         super().__init__()
-        assert image_size % pool_factor == 0, (
-            f"image_size ({image_size}) 必须能被 pool_factor ({pool_factor}) 整除"
-        )
+        if pool_factor <= 0 or image_size % pool_factor != 0:
+            raise ValueError(
+                f"image_size ({image_size}) 必须能被正整数 "
+                f"pool_factor ({pool_factor}) 整除"
+            )
 
         self.image_size = image_size
         self.in_channels = in_channels
@@ -64,10 +66,11 @@ class CCIGPT(nn.Module):
         # expand 仅能从 size=1 扩展，因此中间值（如 in_channels=3 时传 2）
         # 在 _compute_coarse_ctx 的 x_up.expand(-1, C_fine, -1, -1) 处会崩。
         # 实际语义只有两种：1（灰度先验）或 in_channels（全通道）。
-        assert coarse_in_channels in (1, in_channels), (
-            f"coarse_in_channels ({coarse_in_channels}) 必须 ∈ {{1, in_channels={in_channels}}}; "
-            f"中间值 expand 不可达。"
-        )
+        if coarse_in_channels not in (1, in_channels):
+            raise ValueError(
+                f"coarse_in_channels ({coarse_in_channels}) 必须 ∈ "
+                f"{{1, in_channels={in_channels}}}; 中间值 expand 不可达。"
+            )
 
         shared = dict(
             vocab_size=vocab_size, dropout=dropout,

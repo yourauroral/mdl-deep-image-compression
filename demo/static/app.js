@@ -203,7 +203,7 @@ async function renderMetrics(dataset) {
   };
   const colors = neural.map(colorFor);
 
-  // 副标题明确区分正式主结果与仍待新 evaluator 重跑的历史诊断数字。
+  // 副标题明确区分正式主结果与仍待新 evaluator 重跑的历史实验数字（diagnostic protocol）。
   const panel = document.getElementById("panel-metrics");
   const chartCt = panel.querySelector(".chart-container");
   let desc = panel.querySelector(".panel-desc");

@@ -5,10 +5,11 @@
 ## 0. 2026-07-27 执行口径（优先级高于后文历史备忘）
 
 1. **当前主线不换模型、不改训练损失**：CC-iGPT 继续使用 `CE_coarse + CE_fine`。这是一种双流平衡训练目标，不等同于严格按真实码长加权；本轮代码修正不要求重训，也不使现有 checkpoint 失效。
-2. **当前正式结果待重评**：CIFAR-10 `2.8296` 与 ImageNet64 `3.4800` 都是历史三成员 ensemble + hflip TTA 诊断结果，不再称为正式单模型主表。单个 CC-iGPT v2 是 `82,949,441` 参数；三成员 ensemble 的有效参数量约 `248.85M`，hflip 后每张图共 6 次 forward。正式主表必须使用单 checkpoint、no-TTA、新逐图 evaluator 和结果 manifest。
+2. **当前正式结果待重评**：CIFAR-10 `2.8296` 与 ImageNet64 `3.4800` 都是有效的历史实验结果，但其协议是三成员 ensemble + hflip TTA，在新 evaluator 中归入 diagnostic，而不是正式单模型主表。单个 CC-iGPT v2 是 `82,949,441` 参数；三成员 ensemble 的有效参数量约 `248.85M`，hflip 后每张图共 6 次 forward。正式主表必须用现有预训练 best checkpoint 做 single-checkpoint/no-TTA 重评，不需要重训，并保存新逐图 evaluator 的 schema v5 manifest。
 3. **Phase E 是并行研究分支，不替换 AR 无损主线**：目标是研究 Masked Diffusion Language Model (MDLM) / grouped ARDM 的 `实际码率 vs forward calls`，不是先承诺更低 bpd 或实时加速。Phase E 需要新的训练；现有 AR checkpoint 最多用于初始化兼容权重，不能直接当作 masked model 结果。
 4. **codec-first**：在任何大规模训练前，先用 tiny CIFAR/合成图完成真实 `encode -> file -> decode` 闭环。没有固定 schedule、可解码概率因式分解、量化 CDF 协议和逐像素一致测试，就不把 masked CE/NELBO 称为压缩率。
 5. **六层指标分开报告**：训练 masked CE/NELBO、固定 schedule 的理想模型 NLL、量化 CDF NLL、算术 payload bpd、字节 padding 后的 packed payload bpd、完整文件 bpd。另报 fine/total forward calls、wall-clock、峰值显存和硬件环境。
+6. **执行环境分工**：WSL 负责代码、CPU 测试和 `run_formal_evaluations.py --dry_run`；CIFAR-10/ImageNet64 正式重评在持有数据与 checkpoint 的 AutoDL 上运行。无泄漏 probe/matched controls 和 CUDA backend matrix/profiling 暂缓，未执行前保持 pending，不阻塞本轮 evaluator/manifest 修复，也不据此推进 CC-MDLM 正式训练。
 
 ### Phase E 的最小概率协议
 
@@ -40,7 +41,7 @@ q_theta(x_fine | x_coarse)
 
 ## 1. 当前状态（截至 2026-07-27 全仓通读核对；Phase D 完成 2026-05-27，下游任务 + 前端无损面板 2026-05-29，IN64 训练+评测完成 2026-06-07）
 
-- **CC-iGPT v2 历史诊断结果（Phase D 完成）**：ensemble (best+SWA+EMA) + TTA hflip = **2.8296 bpd**；旧 `±0.0854` 口径不作为新逐图 std。正式单模型/no-TTA 数字待重评（详 §0）
+- **CC-iGPT v2 历史实验结果（Phase D 完成，diagnostic protocol）**：ensemble (best+SWA+EMA) + TTA hflip = **2.8296 bpd**；旧 `±0.0854` 口径不作为新逐图 std。正式单模型/no-TTA 数字待重评（详 §0）
 - v1 历史 TTA 诊断：CC-iGPT R-only 100ep best+TTA 2.9035；旧 std 口径仅留作日志，不进入新协议比较
 - Linear probe 历史曲线 best L19 = **79.33%**；旧脚本曾用 test 选层，需按“训练集分层 validation 选层、完整 train 重训、selected layer test、多 seeds”协议重跑后再作为正式结果
 - 总参数量 **82.95M**（fine 78.14M + coarse 4.81M）
@@ -55,7 +56,7 @@ q_theta(x_fine | x_coarse)
 | A — iGPT raster-scan AR + 6 个训练 primitive + 1 组合 pipeline + 1 反面案例 | ✅ | `src/mdlic/ops/` |
 | B — CC-iGPT v1 双尺度条件式 AR (100ep, R-only) | ✅ | best+TTA 2.9035 |
 | C — Demo 前端可视化 (FastAPI + Chart.js, 7 面板，含交互式无损 codec 图像⇄.bin 真实可解性验证) | ✅ | `demo/` |
-| D — 深窄 (N=32/d=448, 200ep) + 历史 ensemble/TTA 诊断 | ✅ | 历史 2.8296；正式单模型结果待重评 |
+| D — 深窄 (N=32/d=448, 200ep) + 历史 ensemble/TTA 实验 | ✅ | diagnostic protocol 下 2.8296；正式单模型结果待重评 |
 | E — Masked diffusion / grouped ARDM codec | CPU 协议地基完成，训练 gated | 先复核 tiny roundtrip，再训练 CIFAR toy |
 
 详细组件、Triton kernel 列表、架构图见 README。
@@ -188,7 +189,7 @@ coarse_tokens  [B, 64]                       ← R-only int 0-255
 
 **Lever 2 — 多 checkpoint 概率 mixture**：`scripts/evaluate.py --ensemble best,swa,ema` 先对各成员 logits 做 `log_softmax`，再用 `logsumexp - log(K)` 得到逐 token 的算术平均概率。三档是同一训练轨迹的三种平滑（best=val 最优瞬点 / EMA=指数 / SWA=均匀），各自捕获不同 loss-landscape 邻域。
 
-**历史日志**：in-training best ep196 = 2.8312；ensemble + TTA hflip = 2.8296。两者使用旧 rate/evaluation 口径，仅用于定位 checkpoint；正式数字由新 evaluator 重跑产生。
+**历史实验日志**：in-training best ep196 = 2.8312；ensemble + TTA hflip = 2.8296。数字可作为对应旧协议的实验观测引用，但不能替代 single-checkpoint/no-TTA 正式主表；正式数字由新 evaluator 使用预训练权重重跑产生。
 
 ---
 
@@ -240,8 +241,8 @@ MSPA / YCbCr 色彩前端 / logit soft-capping / Gaussian label smoothing / slid
 - **关键设计**：模型无 KV-cache → decode 每步跑完整 forward（前缀真实 token + 0 后缀，causal mask 保证不泄漏）；encode/decode 都走 per-step 同一函数 → logits 逐位相同 → 保证可逆；全程 fp32；token 0 用均匀先验；双尺度先解 coarse 独立 bitstream 重建 ctx 再解 fine
 - **范围**：CIFAR v2 已做真实 roundtrip；IN64 checkpoint 已存在，但 12288-token 逐步 codec 成本很高，未完成真实文件 roundtrip，不据此宣称可用速度
 - **实测（2026-05-30，AutoDL，865s）**：**2/2 图 bit-identical**。img0 achieved 3.0931 bpd（NLL 3.0896，overhead 0.11%）/ img1 2.3216（NLL 2.3161，overhead 0.24%）。逐图 bpd 随图像复杂度变，关键是 **overhead vs NLL 仅 0.1–0.2%**（小正数）→ 报的 bpd = 真实可逆码长，算术编码近最优
-- **bitstream 落盘（MDLC v2，2026-07-26）**：新编码默认写 32B fixed header + canonical JSON metadata + coarse/fine payload + 32B SHA-256。identity 绑定 checkpoint、model config、CDF、AR schedule 与数值 runtime；metadata 另存预处理 RGB SHA-256，解码结束强制核对。header/metadata/payload/checksum 任一区域位翻转、错误 checkpoint/config/protocol/schedule/runtime 均会拒绝。v1 只保留只读结构兼容，不能提供这些保证。
-- **验证边界**：历史 2/2 AutoDL 真实图 roundtrip 使用 v1 容器；v2 已通过 CPU tiny-model 端到端、v1 兼容和协议破坏测试，仍需在同一 AutoDL checkpoint/runtime 上重跑真实图文件闭环后，才能把 GPU 实测标签迁移到 v2。
+- **bitstream 落盘（MDLC v2，2026-07-26；identity-v2 于 2026-07-27）**：新编码默认写 32B fixed header + canonical JSON metadata + coarse/fine payload + 32B SHA-256。identity 绑定 checkpoint、model config、CDF、AR schedule、实现源码 fingerprint，以及 Python/PyTorch/Triton/CUDA/设备与 backend 数值 runtime；metadata 另存预处理 RGB SHA-256，解码结束强制核对。header/metadata/payload/checksum 任一区域位翻转，或 checkpoint/config/protocol/schedule/source/runtime 不同，均会拒绝。
+- **验证边界**：历史 2/2 AutoDL 真实图 roundtrip 使用 v1 容器；当前 MDLC v2 + identity-v2 已通过 CPU tiny-model、legacy inspect 和协议破坏测试。正式 evaluator schema v5 只在 config/checkpoint、数据 fingerprint、源码和 runtime 全匹配时附加 `verify_lossless --result_json` 的子集证明；仍需在 AutoDL 重跑后才能把 GPU 实测标签迁移到当前协议。
 
 ### 6.4 前端下游任务面板（codec / 补全，✅ 实现 2026-05-29~31 + AutoDL 已冒烟）
 
@@ -332,7 +333,7 @@ D. 线性方向是因果的（steering 故事）
 
 ## 7. 未来方向（不在毕设范围内）
 
-- **ImageNet 64×64 benchmark**：历史日志为单 ckpt+TTA `3.4810`、三成员 ensemble+TTA `3.4800`；二者均非新的正式单模型/no-TTA 协议。旧 `±0.1161` 是 batch-level std，作废为正式不确定性指标。应先用新 evaluator 生成逐图 std 与 manifest，再做 SPN/Sparse Transformer 的同口径比较。
+- **ImageNet 64×64 benchmark**：历史实验日志为单 ckpt+TTA `3.4810`、三成员 ensemble+TTA `3.4800`；二者可按各自协议引用，但均非新的正式单模型/no-TTA 协议。旧 `±0.1161` 是 batch-level std，作废为正式不确定性指标。应先用预训练 best checkpoint 和新 evaluator 生成逐图 std 与 manifest，再做 SPN/Sparse Transformer 的同口径比较。
 
 ### 7.1 Diffusion / VDM 路线判断（2026-06-05；零基础阅读顺序一并列出）
 
@@ -434,7 +435,7 @@ metrics: bpp, PSNR, MS-SSIM, LPIPS, FID
 | 加 Mixup / CutMix / label smoothing | NLL 任务文献支持有限 |
 | 改色彩前端 (YCbCr / YCoCg-R) | `MEMORY.md` 全禁 |
 | 加 logit soft-capping / Gaussian LS / sliding window attn | 已删除项 |
-| WSL 上跑 `dryrun_forward.py` / 训练 | 会死机；详 `feedback_no_wsl_dryrun.md` |
+| WSL 上跑 CUDA 训练 / profiling | 本地只做 CPU 验证；训练、CUDA kernel 测试与 profiling 放到 AutoDL |
 
 ## 9. Phase E 架构演进指南：从 CC-iGPT 到 CC-MDLM
 
@@ -601,7 +602,7 @@ metrics: bpp, PSNR, MS-SSIM, LPIPS, FID
 
 #### E3.3 代码改造清单
 
-> **实现状态（2026-07-27）**：CPU 协议地基已完成。现有代码包含可序列化/哈希的 `MaskSchedule.raster_chunks`、独立 `MaskedIGPT.forward_masked`、`CCMDLM` fixed-group objective、组内概率冻结的 arithmetic codec，以及 100 个合成样本和 tiny 模型的文件级 roundtrip/NLL 对账。尚未接入 CIFAR 训练配置；本机虽有 AR checkpoint，但 E0 全量正式评估/真实逐 token roundtrip、CUDA 双向后端实测和 GPU profiling 仍需 GPU，因此没有 CC-MDLM bpd/速度结论，也未启动 E3 训练。
+> **实现状态（2026-07-27）**：CPU 协议地基已完成。现有代码包含可序列化/哈希的 `MaskSchedule.raster_chunks`、独立 `MaskedIGPT.forward_masked`、`CCMDLM` fixed-group objective、组内概率冻结的 arithmetic codec，以及 100 个合成样本和 tiny 模型的文件级 roundtrip/NLL 对账。AR schema v5 evaluator、identity-v2 roundtrip manifest 和 AutoDL 正式重评 runner 已就绪，但正式 JSON 尚未在 AutoDL 生成；无泄漏 probe 与 CUDA backend/profiling 也保持 pending。因此没有 CC-MDLM bpd/速度结论，也未启动 E3 训练。
 
 仅在 CIFAR-10 上，按低风险顺序：
 
@@ -632,7 +633,7 @@ metrics: bpp, PSNR, MS-SSIM, LPIPS, FID
 只有 E0–E4 的真实实验通过后，论文才可以采用以下叙事：
 
 1. **从“极致压缩”到“帕累托最优”**
-    *   **旧结果**：`2.8296` 是历史 ensemble+TTA 诊断数字，不能与单模型 codec 成本混写。
+    *   **旧结果**：`2.8296` 是 ensemble+TTA 诊断协议下的历史实验结果，可以按该协议引用，但不能与单模型 codec 成本混写。
     *   **候选新叙事**：报告离散图像无损压缩的 **`完整文件 bpd / 总 forward calls / 实测延迟`** 前沿，并逐点给出真实 roundtrip。只有测得的 rate gap 和 speedup 才能进入摘要。
 2. **MDL 理论的泛化**
     *   展示显式 grouped factorization 如何把 masked prediction 转成可解码的离散 code；NELBO 与实际文件码长的差异本身也是结果。
@@ -661,7 +662,7 @@ metrics: bpp, PSNR, MS-SSIM, LPIPS, FID
 
 ### 10.1 三个可让不同方向眼前一亮的卖点
 
-1. **diffusion / 生成模型方向** → 当前可诚实表述为："已有可解码 AR 无损基线，下一阶段研究显式 grouped masked factorization；先验证 NELBO、schedule NLL 与实际文件 bpd 的差异，再画 rate/calls/time 前沿。" `2.8296/3.4800` 仅作为历史 ensemble+TTA 日志，不冒充 MDLM 实测。
+1. **diffusion / 生成模型方向** → 当前可诚实表述为："已有可解码 AR 无损基线，下一阶段研究显式 grouped masked factorization；先验证 NELBO、schedule NLL 与实际文件 bpd 的差异，再画 rate/calls/time 前沿。" `2.8296/3.4800` 作为明确标注协议的历史 ensemble+TTA 实验结果，不冒充单模型或 MDLM 实测。
 2. **高效系统 / 编译 / 量化方向** → “训练栈含 6 个手写 Triton kernel；RoPE→FlashAttention 是两个 kernel 的 pipeline，不冒充额外 fusion；`fused_linear_ce` 是独立反面案例。基准 harness 已修正，旧 H800 数字待重跑后再作性能结论。”
 3. **信息论 / 编码方向** → "项目名源于 MDL；当前指标是预共享模型下的条件码长。手写 WNC 算术编解码做到 **bit-exact roundtrip**，并显式计入首 token、CDF 量化、padding 与容器开销。"
 

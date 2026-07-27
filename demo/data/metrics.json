@@ -6,7 +6,7 @@
     {"name": "PixelSNAIL",              "category": "Autoregressive density models", "params": "≈91M",       "bpd": 2.85,   "std": null, "note": "Chen 2018；参数量据官方 CIFAR-10 配置逐层核算，原论文未报告总参数量"},
     {"name": "Sparse Transformer",      "category": "Autoregressive density models", "params": "59M",        "bpd": 2.80,   "std": null, "note": "Child 2019；N=128 strided sparse，参数量为原论文自报"},
     {"name": "CC-iGPT R-only v1 (Ours)", "category": "Autoregressive density models", "params": "≈80.8M",     "bpd": 2.9035, "std": null, "primary": false, "note": "v1 历史 TTA 诊断结果；旧 std 口径已作废，不作为当前正式主结果"},
-    {"name": "CC-iGPT R-only v2 (Ours)", "category": "Autoregressive density models", "params": "3×82.95M",   "bpd": 2.8296, "std": null, "primary": false, "note": "历史诊断结果：best+SWA+EMA 三成员 probability mixture + hflip TTA（6 次 forward）；旧 std 口径已作废"},
+    {"name": "CC-iGPT R-only v2 (Ours)", "category": "Autoregressive density models", "params": "3×82.95M",   "bpd": 2.8296, "std": null, "primary": false, "note": "历史实验结果（diagnostic protocol）：best+SWA+EMA 三成员 probability mixture + hflip TTA（6 次 forward）；旧 std 口径已作废"},
     {"name": "CC-iGPT R-only v2 formal (Ours)", "category": "Autoregressive density models", "params": "82.95M", "bpd": null, "std": null, "primary": false, "note": "待按单 checkpoint、no-TTA、新逐图 evaluator 和 manifest 重评"}
   ]
 }

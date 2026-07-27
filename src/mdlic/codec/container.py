@@ -10,11 +10,13 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
 import struct
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
+from ..provenance import runtime_metadata, source_tree_record
 from .arithmetic import FREQ_TOTAL, pack_bits, unpack_bits
 
 
@@ -32,8 +34,16 @@ V2_CHECKSUM_SIZE = hashlib.sha256().digest_size
 
 FLAG_DUAL = 1 << 0
 KNOWN_FLAGS = FLAG_DUAL
-IDENTITY_SCHEMA = "mdlic-codec-identity-v1"
+LEGACY_IDENTITY_SCHEMA = "mdlic-codec-identity-v1"
+IDENTITY_SCHEMA = "mdlic-codec-identity-v2"
 METADATA_SCHEMA = "mdlc-v2-metadata"
+IMPLEMENTATION_SCHEMA = "mdlic-codec-implementation-v1"
+CODEC_SOURCE_PATHS = (
+    "src/mdlic",
+    "scripts/train.py",
+    "scripts/verify_lossless.py",
+    "pyproject.toml",
+)
 
 DEFAULT_CODEC_PROTOCOL = {
     "name": "mdlic-wnc-arithmetic-v1",
@@ -90,6 +100,16 @@ def canonical_sha256(value: Any) -> str:
     return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
 
 
+def codec_implementation_fingerprint(repo_root: str | Path | None = None) -> dict[str, Any]:
+    """Fingerprint code that can alter model logits or arithmetic coding."""
+    source = source_tree_record(repo_root, include_paths=CODEC_SOURCE_PATHS)
+    return {
+        "schema": IMPLEMENTATION_SCHEMA,
+        "execution_source_sha256": source["fingerprint_sha256"],
+        "execution_source_file_count": source["file_count"],
+    }
+
+
 def sha256_file(path: str | Path) -> str:
     digest = hashlib.sha256()
     with open(path, "rb") as handle:
@@ -118,22 +138,23 @@ def default_ar_schedule(model_type: str) -> dict[str, str]:
 
 def runtime_fingerprint(device) -> dict[str, Any]:
     """Describe numerical runtime details that can affect arithmetic decode."""
-    import torch
-
-    device = torch.device(device)
-    device_name = None
-    if device.type == "cuda" and torch.cuda.is_available():
-        device_name = torch.cuda.get_device_name(device)
+    details = runtime_metadata(device)
     return {
-        "torch": torch.__version__,
-        "device_type": device.type,
-        "device_name": device_name,
-        "cuda_runtime": torch.version.cuda,
-        "cudnn": torch.backends.cudnn.version(),
-        "allow_tf32_matmul": bool(
-            getattr(torch.backends.cuda.matmul, "allow_tf32", False)
-        ),
-        "allow_tf32_cudnn": bool(getattr(torch.backends.cudnn, "allow_tf32", False)),
+        "schema": "mdlic-codec-runtime-v2",
+        "python": details["python"],
+        "platform": details["platform"],
+        "packages": {
+            "torch": details["packages"]["torch"],
+            "triton": details["packages"]["triton"],
+        },
+        "cuda_runtime": details["cuda_runtime"],
+        "cuda_driver": details["cuda_driver"],
+        "cudnn": details["cudnn"],
+        "device_type": details["device_type"],
+        "device_name": details["device_name"],
+        "device_capability": details["device_capability"],
+        "numerics": details["numerics"],
+        "environment": details["environment"],
     }
 
 
@@ -143,6 +164,7 @@ def make_codec_identity(
     model_config: Mapping[str, Any],
     checkpoint_sha256: str,
     runtime: Mapping[str, Any],
+    implementation: Mapping[str, Any] | None = None,
     schedule: Mapping[str, Any] | None = None,
     codec_protocol: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -151,6 +173,9 @@ def make_codec_identity(
     protocol = dict(codec_protocol or DEFAULT_CODEC_PROTOCOL)
     schedule_dict = dict(schedule or default_ar_schedule(model_type))
     runtime_dict = dict(runtime)
+    implementation_dict = dict(
+        implementation or codec_implementation_fingerprint()
+    )
     return {
         "schema": IDENTITY_SCHEMA,
         "model_type": model_type,
@@ -162,6 +187,8 @@ def make_codec_identity(
         "schedule_sha256": canonical_sha256(schedule_dict),
         "runtime": runtime_dict,
         "runtime_sha256": canonical_sha256(runtime_dict),
+        "implementation": implementation_dict,
+        "implementation_sha256": canonical_sha256(implementation_dict),
     }
 
 
@@ -315,6 +342,57 @@ def read_container_bytes(
     )
     fine_bits = unpack_bits(parsed.fine_data, parsed.fine_nbits)
     return parsed.dual, parsed.height, parsed.channels, coarse_bits, fine_bits
+
+
+def write_container(
+    path: str | Path,
+    dual: bool,
+    height: int,
+    channels: int,
+    coarse_bits: list[int],
+    fine_bits: list[int],
+    *,
+    identity: Mapping[str, Any],
+    source_rgb_sha256: str,
+    width: int | None = None,
+) -> int:
+    """Atomically write a checksummed, model-bound MDLC v2 container."""
+    blob = build_container_bytes(
+        dual,
+        height,
+        channels,
+        coarse_bits,
+        fine_bits,
+        identity=identity,
+        source_rgb_sha256=source_rgb_sha256,
+        width=width,
+    )
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(f"{target.name}.tmp.{os.getpid()}")
+    try:
+        with open(temporary, "wb") as handle:
+            handle.write(blob)
+        os.replace(temporary, target)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+    return len(blob)
+
+
+def read_container(
+    path: str | Path,
+    *,
+    expected_identity: Mapping[str, Any] | None = None,
+) -> tuple[bool, int, int, list[int], list[int]]:
+    """Read an MDLC file and optionally enforce its codec identity."""
+    with open(path, "rb") as handle:
+        return read_container_bytes(
+            handle.read(),
+            expected_identity=expected_identity,
+        )
 
 
 def parse_container_meta(blob: bytes | bytearray | memoryview) -> dict[str, Any]:
@@ -556,21 +634,39 @@ def _validate_sha256(value: str, label: str) -> None:
 
 
 def _validate_identity(identity: Mapping[str, Any]) -> None:
-    if not isinstance(identity, Mapping) or identity.get("schema") != IDENTITY_SCHEMA:
-        raise ValueError(f"codec identity schema must be {IDENTITY_SCHEMA!r}")
-    for key in (
+    if not isinstance(identity, Mapping):
+        raise ValueError("codec identity must be a mapping")
+    schema = identity.get("schema")
+    if schema not in (LEGACY_IDENTITY_SCHEMA, IDENTITY_SCHEMA):
+        raise ValueError(
+            "codec identity schema must be one of "
+            f"{LEGACY_IDENTITY_SCHEMA!r}, {IDENTITY_SCHEMA!r}"
+        )
+    digest_keys = [
         "checkpoint_sha256",
         "model_config_sha256",
         "codec_protocol_sha256",
         "schedule_sha256",
         "runtime_sha256",
-    ):
-        _validate_sha256(identity.get(key), key)
-    for value_key, hash_key in (
+    ]
+    value_hash_pairs = [
         ("codec_protocol", "codec_protocol_sha256"),
         ("schedule", "schedule_sha256"),
         ("runtime", "runtime_sha256"),
-    ):
+    ]
+    if schema == IDENTITY_SCHEMA:
+        implementation = identity.get("implementation")
+        if not isinstance(implementation, Mapping) or (
+            implementation.get("schema") != IMPLEMENTATION_SCHEMA
+        ):
+            raise ValueError(
+                f"codec implementation schema must be {IMPLEMENTATION_SCHEMA!r}"
+            )
+        digest_keys.append("implementation_sha256")
+        value_hash_pairs.append(("implementation", "implementation_sha256"))
+    for key in digest_keys:
+        _validate_sha256(identity.get(key), key)
+    for value_key, hash_key in value_hash_pairs:
         if canonical_sha256(identity.get(value_key)) != identity[hash_key]:
             raise ValueError(f"codec identity {value_key} does not match {hash_key}")
 
@@ -587,14 +683,17 @@ def _validate_expected_identity(
     expected: Mapping[str, Any],
 ) -> None:
     _validate_identity(expected)
-    keys = (
+    keys = [
+        "schema",
         "model_type",
         "checkpoint_sha256",
         "model_config_sha256",
         "codec_protocol_sha256",
         "schedule_sha256",
         "runtime_sha256",
-    )
+    ]
+    if expected.get("schema") == IDENTITY_SCHEMA:
+        keys.append("implementation_sha256")
     mismatches = [key for key in keys if actual.get(key) != expected.get(key)]
     if mismatches:
         raise ValueError(

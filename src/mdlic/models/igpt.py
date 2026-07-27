@@ -160,18 +160,21 @@ class IGPT(nn.Module):
     hidden = self.token_embed(input_tokens)
 
     if coarse_ctx is not None:
-        assert coarse_ctx.shape == hidden.shape, (
-            f"coarse_ctx shape {tuple(coarse_ctx.shape)} != hidden {tuple(hidden.shape)}"
-        )
+        if coarse_ctx.shape != hidden.shape:
+          raise ValueError(
+              f"coarse_ctx shape {tuple(coarse_ctx.shape)} != "
+              f"hidden {tuple(hidden.shape)}"
+          )
         hidden = hidden + coarse_ctx
 
     # 默认序列长度 = seq_len-1（NTP shift）；buffer 已在 __init__ 算好。
     # encode 路径下 input_tokens 长度也恒为 seq_len-1，T 与 buffer 一致。
     T = input_tokens.shape[1]
-    assert T == self._channel_indices.shape[0], (
-        f"input_tokens 长度 {T} 与缓存 channel_indices 长度 "
-        f"{self._channel_indices.shape[0]} 不匹配"
-    )
+    if T != self._channel_indices.shape[0]:
+      raise ValueError(
+          f"input_tokens 长度 {T} 与缓存 channel_indices 长度 "
+          f"{self._channel_indices.shape[0]} 不匹配"
+      )
     hidden = hidden + self.channel_embed(self._channel_indices).unsqueeze(0)
     return hidden, self._position_ids
 

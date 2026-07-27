@@ -38,100 +38,31 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
 from mdlic.codec.arithmetic import (
-    ArithmeticEncoder, ArithmeticDecoder, build_cumfreq, FREQ_TOTAL,
+    ArithmeticEncoder, ArithmeticDecoder, build_cumfreq,
 )
 from mdlic.codec.container import (
-    CURRENT_VERSION,
-    MAGIC,
-    V2_FIXED_HEADER_SIZE,
-    V2_HEADER,
-    build_container_bytes,
+    build_container_bytes as _build_container_bytes,
     in_memory_model_identity,
     make_codec_identity,
-    parse_container_meta,
-    read_container_bytes,
+    parse_container_meta as _parse_container_meta,
+    read_container as _read_container,
+    read_container_bytes as _read_container_bytes,
     runtime_fingerprint,
     sha256_file,
     sha256_rgb_bytes,
     validate_decoded_rgb,
+    write_container as _write_container,
 )
-
-# 均匀 256-way 先验（token 0 用），常量，encode/decode 共用
-_UNIFORM_CUM = list(range(0, FREQ_TOTAL + 1, FREQ_TOTAL // 256))
-
-# Compatibility names retained for the CLI, demo, and older imports. New writes
-# are always v2; v1 is accepted only by the shared reader/inspector.
-_MAGIC = MAGIC
-_VERSION = CURRENT_VERSION
-_HEADER = V2_HEADER
-_HEADER_SIZE = V2_FIXED_HEADER_SIZE
-
-
-def _build_container_bytes(
-    dual,
-    H,
-    C,
-    c_bits,
-    f_bits,
-    *,
-    identity,
-    source_rgb_sha256,
-    W=None,
-):
-    return build_container_bytes(
-        dual,
-        H,
-        C,
-        c_bits,
-        f_bits,
-        identity=identity,
-        source_rgb_sha256=source_rgb_sha256,
-        width=W,
-    )
-
-
-def _read_container_bytes(blob, *, expected_identity=None):
-    return read_container_bytes(blob, expected_identity=expected_identity)
-
-
-def _write_container(
-    path,
-    dual,
-    H,
-    C,
-    c_bits,
-    f_bits,
-    *,
-    identity,
-    source_rgb_sha256,
-    W=None,
-):
-    """Write a checksummed, model-bound MDLC v2 container."""
-    blob = _build_container_bytes(
-        dual,
-        H,
-        C,
-        c_bits,
-        f_bits,
-        identity=identity,
-        source_rgb_sha256=source_rgb_sha256,
-        W=W,
-    )
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path, "wb") as fh:
-        fh.write(blob)
-    return len(blob)
-
-
-def _read_container(path, *, expected_identity=None):
-    """Read an MDLC v1/v2 file, optionally enforcing its codec identity."""
-    with open(path, "rb") as fh:
-        blob = fh.read()
-    return _read_container_bytes(blob, expected_identity=expected_identity)
-
-
-def _parse_container_meta(blob):
-    return parse_container_meta(blob)
+from mdlic.codec.sequential import (
+    decode_sequence as _decode_sequence,
+    detokenize as _detokenize,
+    encode_sequence as _encode_sequence,
+)
+from mdlic.codec.verification import (
+    build_roundtrip_manifest,
+    write_roundtrip_manifest,
+)
+from mdlic.provenance import file_record, git_metadata, runtime_metadata
 
 
 def _inspect_container(path):
@@ -206,8 +137,10 @@ def _self_test():
     print(f"[self_test] coded {len(bits)} bit / quantized-CDF NLL {cdf_ideal:.1f} bit / "
           f"coder overhead {len(bits)-cdf_ideal:+.2f} bit")
     print(f"[self_test] model NLL before CDF quantization: {model_ideal:.1f} bit")
-    assert ok, "coder roundtrip 失败"
-    assert abs(len(bits) - cdf_ideal) < 4.0, "算术 coder 与量化 CDF NLL 偏差过大"
+    if not ok:
+        raise RuntimeError("coder roundtrip 失败")
+    if abs(len(bits) - cdf_ideal) >= 4.0:
+        raise RuntimeError("算术 coder 与量化 CDF NLL 偏差过大")
     return ok
 
 
@@ -215,16 +148,12 @@ def _self_test():
 
 def _build_model(config, checkpoint, device):
     import torch
+    from mdlic.model_factory import build_model_from_config
     from mdlic.utils import clean_state_dict
-    from scripts.train import _build_ccigpt_from_config, _build_model_from_config
 
     mcfg = config["model"]
     model_type = mcfg.get("type", "igpt")
-    if model_type != "ccigpt":
-        # 单尺度 iGPT 也能验证，但本脚本聚焦 CC-iGPT 双尺度可解性
-        model = _build_model_from_config(mcfg, device)
-    else:
-        model = _build_ccigpt_from_config(mcfg, device)
+    model = build_model_from_config(mcfg, device)
 
     ckpt = torch.load(checkpoint, map_location=device, weights_only=False)
     sd = ckpt.get("model_state_dict", ckpt)
@@ -252,123 +181,6 @@ def _chw_uint8_bytes(tensor):
     return tensor.permute(1, 2, 0).contiguous().cpu().numpy().tobytes()
 
 
-def _logits_from_tokens(igpt, buffer_tokens, coarse_ctx, pos_index):
-    """buffer_tokens: (1, seq_len-1) long（前缀真实 + 后缀 0）。
-    返回位置 pos_index 处预测下一 token 的 logits（1, V）fp32。
-    """
-    import torch
-    with torch.no_grad():
-        hidden, position_ids = igpt._embed_inputs(buffer_tokens, coarse_ctx=coarse_ctx)
-        for block in igpt.blocks:
-            hidden = block(hidden, position_ids=position_ids)
-        logits = igpt.head(hidden[:, pos_index:pos_index + 1, :])  # (1,1,V)
-    return logits.float().squeeze(1)  # (1, V)
-
-
-def _probs(logits_row):
-    """logits (1,V) fp32 → Python float 概率表（fp64 softmax，确定性）。"""
-    from mdlic.codec.probability import codec_probabilities
-
-    return codec_probabilities(logits_row).squeeze(0).tolist()
-
-
-def _encode_sequence(igpt, tokens, coarse_ctx, device, tag, log_every):
-    """返回 bitstream、模型 NLL 和实际量化 CDF 对应的 NLL（单位 bit）。"""
-    import torch
-    T = tokens.shape[1]
-    seq_in = igpt.seq_len - 1
-    enc = ArithmeticEncoder()
-    model_ideal_bits = 0.0
-    cdf_ideal_bits = 0.0
-
-    # token 0：均匀先验
-    enc.encode(int(tokens[0, 0].item()), _UNIFORM_CUM)
-    model_ideal_bits += 8.0
-    cdf_ideal_bits += 8.0
-
-    buf = torch.zeros((1, seq_in), dtype=torch.long, device=device)
-    for m in range(1, T):
-        buf[0, m - 1] = tokens[0, m - 1]
-        logits = _logits_from_tokens(igpt, buf, coarse_ctx, m - 1)
-        p = _probs(logits)
-        sym = int(tokens[0, m].item())
-        model_ideal_bits += -math.log2(max(p[sym], 1e-300))
-        cum = build_cumfreq(p)
-        cdf_ideal_bits += -math.log2((cum[sym + 1] - cum[sym]) / cum[-1])
-        enc.encode(sym, cum)
-        if log_every and m % log_every == 0:
-            print(f"    [{tag} encode] {m}/{T-1}")
-    return enc.finish(), model_ideal_bits, cdf_ideal_bits
-
-
-def _encode_sequence_iter(igpt, tokens, coarse_ctx, device):
-    """逐步算术编码生成器：每编码一个 token yield (m, T-1) 进度，
-    最终 `return` 出 bit 列表 (list[int])。
-
-    与 _encode_sequence 同一逐 token 路径（_logits_from_tokens），仅多吐进度，
-    供 demo 流式端点 /api/encode 用，绕开 AutoDL 反代 idle 超时。
-    关键：与 _decode_sequence_iter 用**完全相同**的 buffer 构造 + _logits_from_tokens，
-    故 encode 写的 bits 与 decode 逐 token 读所需分布逐位相同 → bit-exact 可解。
-    """
-    import torch
-    T = tokens.shape[1]
-    seq_in = igpt.seq_len - 1
-    enc = ArithmeticEncoder()
-    enc.encode(int(tokens[0, 0].item()), _UNIFORM_CUM)   # token 0：均匀先验
-    buf = torch.zeros((1, seq_in), dtype=torch.long, device=device)
-    for m in range(1, T):
-        buf[0, m - 1] = tokens[0, m - 1]
-        logits = _logits_from_tokens(igpt, buf, coarse_ctx, m - 1)
-        p = _probs(logits)
-        enc.encode(int(tokens[0, m].item()), build_cumfreq(p))
-        yield m, T - 1
-    return enc.finish()
-
-
-def _decode_sequence_iter(igpt, bits, T, coarse_ctx, device):
-    """逐步算术解码生成器：每解出一个 token yield (m, T-1) 进度，
-    最终 `return` 出 token 序列 (1, T)。每步 logits 必须与 encode 端逐位相同。
-
-    CLI（_decode_sequence）与 demo 流式端点（/api/decode）共用此单一解码逻辑，
-    各自决定进度怎么消费（打印 / 推送），保证两条路径不漂移。
-    """
-    import torch
-    seq_in = igpt.seq_len - 1
-    dec = ArithmeticDecoder(bits)
-    out = torch.zeros((1, T), dtype=torch.long, device=device)
-
-    out[0, 0] = dec.decode(_UNIFORM_CUM)
-    buf = torch.zeros((1, seq_in), dtype=torch.long, device=device)
-    for m in range(1, T):
-        buf[0, m - 1] = out[0, m - 1]
-        logits = _logits_from_tokens(igpt, buf, coarse_ctx, m - 1)
-        p = _probs(logits)
-        out[0, m] = dec.decode(build_cumfreq(p))
-        yield m, T - 1
-    return out
-
-
-def _decode_sequence(igpt, bits, T, coarse_ctx, device, tag, log_every):
-    """逐步算术解码出 token 序列 (1, T)，CLI 进度打印版。"""
-    gen = _decode_sequence_iter(igpt, bits, T, coarse_ctx, device)
-    out = None
-    try:
-        while True:
-            m, total = next(gen)
-            if log_every and m % log_every == 0:
-                print(f"    [{tag} decode] {m}/{total}")
-    except StopIteration as stop:
-        out = stop.value
-    return out
-
-
-def _detokenize(tokens, image_size, channels):
-    """(1, H*W*C) pixel-first long token → (C,H,W) uint8 tensor（_tokenize 逆）。"""
-    import torch
-    t = tokens.view(1, image_size, image_size, channels)
-    return t.permute(0, 3, 1, 2).contiguous()[0].to(torch.uint8)
-
-
 def _verify_image(model, model_type, x, device, log_every, dump_path=None):
     """对单张图 (1,C,H,W) float[0,1] 做 encode→decode→断言 bit-identical。
 
@@ -392,7 +204,8 @@ def _verify_image(model, model_type, x, device, log_every, dump_path=None):
             coarse_dec = _decode_sequence(
                 model.coarse, c_bits, coarse_tokens.shape[1], None, device,
                 "coarse", log_every)
-            assert torch.equal(coarse_dec, coarse_tokens), "coarse token 解码不一致！"
+            if not torch.equal(coarse_dec, coarse_tokens):
+                raise RuntimeError("coarse token 解码不一致")
 
             # ---- 从解出的 coarse token 重建 fine 条件 ctx（decoder 视角）----
             coarse_ctx = model.ctx_alpha * model._compute_coarse_ctx(coarse_dec)
@@ -404,7 +217,8 @@ def _verify_image(model, model_type, x, device, log_every, dump_path=None):
             fine_dec = _decode_sequence(
                 model.fine, f_bits, fine_tokens.shape[1], coarse_ctx, device,
                 "fine", log_every)
-            assert torch.equal(fine_dec, fine_tokens), "fine token 解码不一致！"
+            if not torch.equal(fine_dec, fine_tokens):
+                raise RuntimeError("fine token 解码不一致")
 
             recon = _detokenize(fine_dec, H, C)
             N_f = model.fine.seq_len
@@ -419,7 +233,8 @@ def _verify_image(model, model_type, x, device, log_every, dump_path=None):
                 model, tokens, None, device, "igpt", log_every)
             dec = _decode_sequence(model, bits, tokens.shape[1], None, device,
                                    "igpt", log_every)
-            assert torch.equal(dec, tokens), "token 解码不一致！"
+            if not torch.equal(dec, tokens):
+                raise RuntimeError("token 解码不一致")
             recon = _detokenize(dec, H, C)
             N_f = model.seq_len
             total_bits = len(bits)
@@ -469,6 +284,8 @@ def _verify_image(model, model_type, x, device, log_every, dump_path=None):
         )
         file_ok = (d_dual == dual and d_H == H and d_C == C
                    and d_c == c_bits_d and d_f == f_bits_d)
+        if not file_ok:
+            raise RuntimeError("MDLC 文件写入后 bitstream 不一致")
         dump_info = {"dump_path": dump_path, "file_bytes": file_bytes,
                      "file_roundtrip_ok": bool(file_ok)}
 
@@ -486,6 +303,7 @@ def _verify_image(model, model_type, x, device, log_every, dump_path=None):
         "container_version": meta["version"],
         "integrity_verified": meta["integrity_verified"],
         "decoded_rgb_checksum_verified": True,
+        "source_rgb_sha256": source_rgb_sha256,
         "ideal_bpd": ideal_bpd,
         "cdf_ideal_bpd": cdf_ideal_bpd,
         "coder_overhead_bpd": payload_bpd - cdf_ideal_bpd,
@@ -508,11 +326,18 @@ def main():
     ap.add_argument("--dump_dir", type=str, default=None,
                     help="把每张图的 bitstream 写成模型绑定的 MDLC v2 容器到该目录"
                          "（图像→bits→文件→bits→图像，读回断言 bit 一致）")
+    ap.add_argument("--result_json", type=str, default=None,
+                    help="写出可附加到正式 evaluator manifest 的 sequential roundtrip 证明")
     ap.add_argument("--self_test", action="store_true",
                     help="仅跑 coder 合成 roundtrip，无需 GPU/ckpt")
     ap.add_argument("--inspect", type=str, default=None,
                     help="只读模式：解析一个 .bin 容器打印结构/码长/bpd，无需 GPU/ckpt/模型")
     args = ap.parse_args()
+
+    if args.num_images < 1:
+        ap.error("--num_images must be >= 1")
+    if args.result_json and (args.inspect or args.self_test):
+        ap.error("--result_json only applies to model roundtrip mode")
 
     if args.inspect:
         _inspect_container(args.inspect)
@@ -522,11 +347,15 @@ def main():
         _self_test()
         return
 
-    assert args.config and args.checkpoint, "需要 --config 和 --checkpoint（或用 --self_test）"
+    if not args.config or not args.checkpoint:
+        ap.error("需要 --config 和 --checkpoint（或用 --self_test）")
 
     import torch
     import yaml
-    from scripts.evaluate import _load_dataset
+    from mdlic.data.evaluation import (
+        evaluation_dataset_record,
+        load_evaluation_dataset,
+    )
 
     # 先跑一次 self_test，确保 coder 本身没问题，再进昂贵的模型循环
     print("== 预检：coder self_test ==")
@@ -538,10 +367,15 @@ def main():
     model, model_type = _build_model(config, args.checkpoint, device)
     print(f"== 模型加载完成 (type={model_type}, device={device}) ==")
 
-    dataset, dataset_name = _load_dataset(config)
+    dataset, dataset_name = load_evaluation_dataset(config)
+    if args.num_images > len(dataset):
+        ap.error(
+            f"--num_images ({args.num_images}) exceeds dataset size ({len(dataset)})"
+        )
     print(f"== 数据集 {dataset_name}，验证前 {args.num_images} 张 ==\n")
 
     n_pass = 0
+    per_image_results = []
     for idx in range(args.num_images):
         item = dataset[idx]
         x = item[0] if isinstance(item, (tuple, list)) else item
@@ -574,10 +408,25 @@ def main():
                   f"文件读回 bit 一致 {fok}")
         print()
         n_pass += int(r["pixel_exact"])
+        per_image_results.append({"sample_index": idx, **r})
 
     print(f"== 结果：{n_pass}/{args.num_images} 张 bit-identical 还原 ==")
     if n_pass != args.num_images:
         sys.exit(1)
+    if args.result_json:
+        manifest = build_roundtrip_manifest(
+            command=[sys.executable, *sys.argv],
+            git=git_metadata(),
+            config=file_record(args.config),
+            checkpoint=file_record(args.checkpoint),
+            model_type=model_type,
+            codec_identity=_model_codec_identity(model, model_type, device),
+            dataset=evaluation_dataset_record(dataset, dataset_name, config),
+            runtime=runtime_metadata(device),
+            per_image=per_image_results,
+        )
+        write_roundtrip_manifest(args.result_json, manifest)
+        print(f"== sequential roundtrip manifest: {args.result_json} ==")
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-% CC-iGPT v2 历史诊断四档对比 (4 柱版, 答辩简化)
+% CC-iGPT v2 历史实验四档对比（diagnostic protocol，4 柱版，答辩简化）
 % 编译: pdflatex ensemble_compare.tex   (或 latexmk -pdf)
 % 嵌入论文: \input{figures/ensemble_compare.tex}
 %
@@ -11,9 +11,9 @@
 %       2.8296；旧 std 是无效的 batch aggregation 口径，已从图中移除
 %
 % 设计意图: 保留旧实验的数值溯源，不把 ensemble+TTA 当作正式单模型结果。
-%   前三档 in-training 数字作为 ensemble 收益的视觉参照；全部只作历史诊断。
+%   前三档 in-training 数字作为 ensemble 收益的视觉参照；全部是 diagnostic protocol 下的历史实验结果。
 % 参考线:
-%   v1 best+TTA 2.9035        — Phase B 历史诊断
+%   v1 best+TTA 2.9035        — Phase B 历史实验（diagnostic protocol）
 %   PixelSNAIL 2.85           — 文献参考线；与三模型/TTA 配置不是同协议
 %   Sparse Transformer 2.80   — 文献参考线；正式比较等待单模型重评
 
@@ -54,12 +54,12 @@
     (EMA,     2.8301)
 };
 
-% --- ensemble + TTA (橙色, 历史诊断数字) ---
+% --- ensemble + TTA（橙色，diagnostic protocol 下的历史实验数字）---
 \addplot[draw=orange!70!black, fill=orange!30!yellow!80, bar shift=0pt] coordinates {
     (Ensemble+TTA, 2.8296)
 };
 
-% --- 参考线 1: v1 历史诊断 2.9035 ---
+% --- 参考线 1: v1 历史实验（diagnostic protocol）2.9035 ---
 \draw[densely dashed, gray!50, line width=0.4pt]
     ({rel axis cs:0,0}|-{axis cs:best,2.9035})
     -- ({rel axis cs:1,0}|-{axis cs:best,2.9035});
@@ -85,13 +85,13 @@
 % --- 标题 ---
 \node[font=\footnotesize\bfseries, anchor=south]
     at (current bounding box.north)
-    {CC-iGPT v2 历史诊断溯源 — 三档 in-training 单档 vs Ensemble+TTA};
+    {CC-iGPT v2 历史实验溯源（diagnostic protocol）— 三档 in-training 单档 vs Ensemble+TTA};
 
 % --- 副标题 ---
 \node[font=\scriptsize, gray!50!black, anchor=north, yshift=-2pt, text width=12cm, align=center]
     at (current bounding box.south)
     {\textit{N=32/d=448 (82.95M) $\cdot$ EMA 0.9998 $\cdot$ SWA last 31 ckpts (start ep170) $\cdot$ ensemble = per-token probability mixture $\cdot$ TTA = hflip 双 forward 取均\\
-    灰色三档为 200ep 训练日志末尾 in-training val（无 TTA）；橙色为三成员、6-forward/image 历史诊断，不是正式单模型主表}};
+    灰色三档为 200ep 训练日志末尾 in-training val（无 TTA）；橙色为三成员、6-forward/image 历史实验结果（diagnostic protocol），不是正式单模型主表}};
 
 \end{tikzpicture}
 \end{document}

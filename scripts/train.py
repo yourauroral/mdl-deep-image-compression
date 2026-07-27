@@ -33,9 +33,11 @@ from torchvision import transforms
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
-from mdlic.models.igpt import IGPT
-from mdlic.models.cc_igpt import CCIGPT
 from mdlic.models.layers import get_fused_kernel_status
+from mdlic.model_factory import (
+    build_ccigpt_from_config as _build_ccigpt_from_config,
+    build_igpt_from_config as _build_model_from_config,
+)
 from mdlic.eval_metrics import per_image_bpd
 from mdlic.provenance import (
     canonical_sha256 as _canonical_provenance_hash,
@@ -95,9 +97,13 @@ def _validate_config(config: dict):
          Ref: Google, "Machine Learning: The High-Interest Credit Card of
               Technical Debt," NeurIPS 2015 Workshop — 配置验证是减少 ML 技术债的关键。
     """
+    def require(condition: bool, message: str) -> None:
+        if not condition:
+            raise ValueError(message)
+
     # ── 必填顶层字段 ──
     for key in ['exp_name', 'model', 'data', 'train', 'eval', 'checkpoint']:
-        assert key in config, f"Config 缺少必填字段: '{key}'"
+        require(key in config, f"Config 缺少必填字段: '{key}'")
 
     # ── model 字段 ──
     mcfg = config['model']
@@ -106,40 +112,48 @@ def _validate_config(config: dict):
     if model_type in ('igpt', 'ccigpt'):
         required_model = ['image_size', 'in_channels', 'vocab_size', 'd_model', 'N', 'h', 'd_ff', 'dropout']
         for key in required_model:
-            assert key in mcfg, f"Config model 缺少必填字段: 'model.{key}'"
+            require(key in mcfg, f"Config model 缺少必填字段: 'model.{key}'")
 
-        assert mcfg['d_model'] % mcfg['h'] == 0, (
+        require(mcfg['d_model'] > 0, f"model.d_model 必须 > 0，got {mcfg['d_model']}")
+        require(mcfg['N'] > 0, f"model.N (depth) 必须 > 0，got {mcfg['N']}")
+        require(mcfg['h'] > 0, f"model.h (heads) 必须 > 0，got {mcfg['h']}")
+        require(mcfg['d_model'] % mcfg['h'] == 0, (
             f"model.d_model ({mcfg['d_model']}) 必须能被 model.h ({mcfg['h']}) 整除"
-        )
-        assert mcfg['d_model'] > 0, f"model.d_model 必须 > 0，got {mcfg['d_model']}"
-        assert mcfg['N'] > 0, f"model.N (depth) 必须 > 0，got {mcfg['N']}"
-        assert mcfg['h'] > 0, f"model.h (heads) 必须 > 0，got {mcfg['h']}"
-        assert mcfg['d_ff'] > 0, f"model.d_ff 必须 > 0，got {mcfg['d_ff']}"
-        assert 0.0 <= mcfg['dropout'] < 1.0, f"model.dropout 必须在 [0, 1)，got {mcfg['dropout']}"
-        assert mcfg['vocab_size'] > 0, f"model.vocab_size 必须 > 0，got {mcfg['vocab_size']}"
+        ))
+        require(mcfg['d_ff'] > 0, f"model.d_ff 必须 > 0，got {mcfg['d_ff']}")
+        require(0.0 <= mcfg['dropout'] < 1.0,
+                f"model.dropout 必须在 [0, 1)，got {mcfg['dropout']}")
+        require(mcfg['vocab_size'] > 0,
+                f"model.vocab_size 必须 > 0，got {mcfg['vocab_size']}")
     else:
         raise ValueError(f"未知 model.type: '{model_type}'，支持 igpt/ccigpt")
 
     # ── train 字段 ──
     tcfg = config['train']
-    assert tcfg.get('batch_size', 0) > 0, f"train.batch_size 必须 > 0"
-    assert float(tcfg.get('lr', 0)) > 0, f"train.lr 必须 > 0"
-    assert tcfg.get('epochs', 0) > 0, f"train.epochs 必须 > 0"
-    assert tcfg.get('clip_max_norm', 0) > 0, f"train.clip_max_norm 必须 > 0"
-    assert tcfg.get('grad_accum_steps', 1) >= 1, f"train.grad_accum_steps 必须 >= 1"
+    require(tcfg.get('batch_size', 0) > 0, "train.batch_size 必须 > 0")
+    require(float(tcfg.get('lr', 0)) > 0, "train.lr 必须 > 0")
+    require(tcfg.get('epochs', 0) > 0, "train.epochs 必须 > 0")
+    require(tcfg.get('clip_max_norm', 0) > 0, "train.clip_max_norm 必须 > 0")
+    require(tcfg.get('grad_accum_steps', 1) >= 1,
+            "train.grad_accum_steps 必须 >= 1")
 
     amp_dtype = tcfg.get('amp_dtype', 'fp16')
     # None / "none" / "fp32" 走 fp32 训练（数值敏感场景兜底用，主路径 forward
     # 已支持 amp_dtype is None 时跳过 autocast）
-    assert amp_dtype in ('fp16', 'bf16', None, 'none', 'fp32'), (
+    require(amp_dtype in ('fp16', 'bf16', None, 'none', 'fp32'), (
         f"train.amp_dtype 必须是 'fp16' / 'bf16' / null / 'none' / 'fp32'，"
         f"got '{amp_dtype}'"
-    )
+    ))
 
     lr_schedule = tcfg.get('lr_schedule', 'cosine')
-    assert lr_schedule in ('cosine', 'wsd'), (
+    require(lr_schedule in ('cosine', 'wsd'), (
         f"train.lr_schedule 必须是 cosine/wsd，got '{lr_schedule}'"
-    )
+    ))
+    if lr_schedule == 'cosine':
+        min_lr_ratio = float(tcfg.get('min_lr_ratio', 0.0))
+        require(0.0 <= min_lr_ratio < 1.0, (
+            f"train.min_lr_ratio 必须在 [0, 1)，got {min_lr_ratio}"
+        ))
 
     # SWA 与 epochs 交叉校验：start_epoch > epochs 时训练不会触发任何 SWA 更新，
     # 尾部 finalize 走 warning 路径但 swa.pth 不会落盘。提前 fail-fast 避免训完
@@ -147,73 +161,39 @@ def _validate_config(config: dict):
     swa_cfg = tcfg.get('swa', {})
     if swa_cfg.get('enabled', False):
         swa_start = swa_cfg.get('start_epoch', 0)
-        assert swa_start <= tcfg['epochs'], (
+        require(swa_start <= tcfg['epochs'], (
             f"train.swa.start_epoch ({swa_start}) 不能大于 train.epochs "
             f"({tcfg['epochs']})，否则 SWA 永不触发，swa.pth 无法生成。"
-        )
+        ))
 
     # z-loss 权重校验（model_type 在上面 if-else 已限定 ∈ {igpt, ccigpt}）
     z_w = float(tcfg.get('z_loss_weight', 1e-4))
-    assert z_w >= 0, f"train.z_loss_weight 必须 >= 0，got {z_w}"
+    require(z_w >= 0, f"train.z_loss_weight 必须 >= 0，got {z_w}")
 
     # CC-iGPT 额外校验
     if model_type == 'ccigpt':
         for key in ['pool_factor', 'coarse_d_model', 'coarse_N', 'coarse_h', 'coarse_d_ff']:
-            assert key in mcfg, f"Config model 缺少 ccigpt 必填字段: 'model.{key}'"
-        assert mcfg['image_size'] % mcfg['pool_factor'] == 0, (
+            require(key in mcfg,
+                    f"Config model 缺少 ccigpt 必填字段: 'model.{key}'")
+        require(mcfg['pool_factor'] > 0,
+                f"model.pool_factor 必须 > 0，got {mcfg['pool_factor']}")
+        require(mcfg['image_size'] % mcfg['pool_factor'] == 0, (
             f"image_size ({mcfg['image_size']}) 必须能被 pool_factor ({mcfg['pool_factor']}) 整除"
-        )
-        assert mcfg['coarse_d_model'] % mcfg['coarse_h'] == 0, (
+        ))
+        require(mcfg['coarse_h'] > 0,
+                f"model.coarse_h 必须 > 0，got {mcfg['coarse_h']}")
+        require(mcfg['coarse_d_model'] % mcfg['coarse_h'] == 0, (
             f"coarse_d_model ({mcfg['coarse_d_model']}) 必须能被 coarse_h ({mcfg['coarse_h']}) 整除"
-        )
+        ))
 
         # coarse_in_channels：R-only 灰度先验（仅 1 或 in_channels 合法，
         # 中间值 expand 路径不可达，详见 cc_igpt.py:CCIGPT.__init__）
         coarse_ic = mcfg.get('coarse_in_channels')
         if coarse_ic is not None:
-            assert coarse_ic in (1, mcfg['in_channels']), (
+            require(coarse_ic in (1, mcfg['in_channels']), (
                 f"model.coarse_in_channels ({coarse_ic}) 必须 ∈ "
                 f"{{1, in_channels={mcfg['in_channels']}}}"
-            )
-
-
-def _shared_igpt_kwargs(mcfg: dict) -> dict:
-    """提取 iGPT / CC-iGPT 共用字段。"""
-    return dict(
-        in_channels=mcfg["in_channels"],
-        vocab_size=mcfg["vocab_size"],
-        dropout=mcfg["dropout"],
-        activation_checkpointing=mcfg.get("activation_checkpointing", False),
-        drop_path=mcfg.get("drop_path", 0.0),
-    )
-
-
-def _build_model_from_config(mcfg: dict, device) -> IGPT:
-    """从 config['model'] 构建 IGPT 模型（统一 train.py 和 dryrun_forward.py）。"""
-    return IGPT(
-        image_size=mcfg["image_size"],
-        d_model=mcfg["d_model"], N=mcfg["N"], h=mcfg["h"], d_ff=mcfg["d_ff"],
-        **_shared_igpt_kwargs(mcfg),
-    ).to(device)
-
-
-def _build_ccigpt_from_config(mcfg: dict, device) -> CCIGPT:
-    """从 config['model'] 构建 CC-iGPT 模型。
-
-    顶层字段 (image_size, d_model, N, h, d_ff, ...) 描述 fine 模型；
-    额外字段 pool_factor / coarse_d_model / coarse_N / coarse_h / coarse_d_ff
-    描述 coarse 子模型。
-    """
-    return CCIGPT(
-        image_size=mcfg["image_size"],
-        pool_factor=mcfg["pool_factor"],
-        fine_d_model=mcfg["d_model"], fine_N=mcfg["N"],
-        fine_h=mcfg["h"], fine_d_ff=mcfg["d_ff"],
-        coarse_d_model=mcfg["coarse_d_model"], coarse_N=mcfg["coarse_N"],
-        coarse_h=mcfg["coarse_h"], coarse_d_ff=mcfg["coarse_d_ff"],
-        coarse_in_channels=mcfg.get("coarse_in_channels"),
-        **_shared_igpt_kwargs(mcfg),
-    ).to(device)
+            ))
 
 
 def _no_decay_param_names(model) -> set:
@@ -624,8 +604,14 @@ def _checkpoint_meta(config: dict, args, epoch: int, kind: str, seed: int,
 
 def _grad_accum_window_size(step_index: int, steps: int, grad_accum_steps: int) -> int:
     """Actual micro-batch count in the accumulation window containing step_index."""
-    assert 0 <= step_index < steps, f"step_index={step_index} out of range for steps={steps}"
-    assert grad_accum_steps >= 1, f"grad_accum_steps must be >= 1, got {grad_accum_steps}"
+    if not 0 <= step_index < steps:
+        raise ValueError(
+            f"step_index={step_index} out of range for steps={steps}"
+        )
+    if grad_accum_steps < 1:
+        raise ValueError(
+            f"grad_accum_steps must be >= 1, got {grad_accum_steps}"
+        )
     remainder = steps % grad_accum_steps
     if remainder and step_index >= steps - remainder:
         return remainder
@@ -1080,9 +1066,10 @@ def main():
         # 设为 >0 可避免末段 LR 过低导致 SWA 平均的是几乎相同的快照（"假平均"）。
         # Ref: Hagele et al., arXiv:2405.18392 §4.2 — SWA 需要权重仍在变化才有意义。
         min_lr_ratio = float(config["train"].get("min_lr_ratio", 0.0))
-        assert 0.0 <= min_lr_ratio < 1.0, (
-            f"train.min_lr_ratio 必须在 [0, 1)，got {min_lr_ratio}"
-        )
+        if not 0.0 <= min_lr_ratio < 1.0:
+            raise ValueError(
+                f"train.min_lr_ratio 必须在 [0, 1)，got {min_lr_ratio}"
+            )
         def lr_lambda(epoch):
             if epoch < warmup_epochs:
                 return float(epoch + 1) / float(max(1, warmup_epochs))

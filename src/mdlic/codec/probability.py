@@ -63,16 +63,27 @@ def codec_target_nll_per_image(
     return nll_sum / num_tokens
 
 
-def codec_aligned_score_metadata() -> dict[str, object]:
-    """Describe the fast teacher-forced score's numerical convention."""
+def codec_teacher_forced_score_metadata() -> dict[str, object]:
+    """Describe a teacher-forced estimate using the codec's probability dtypes.
+
+    Matching logits/softmax dtypes does not make a full-sequence forward
+    bitstream-equivalent to the codec's per-token execution path.
+    """
     return {
-        "name": "mdlic-codec-aligned-teacher-forced-nll-v1",
+        "name": "mdlic-teacher-forced-codec-numerics-nll-v2",
+        "score_kind": "teacher_forced_ideal_model_nll",
         "forward": "teacher-forced-full-sequence",
         "autocast": False,
         "logits_dtype": "float32",
         "softmax_dtype": "float64",
+        "sequential_codec_execution": False,
         "actual_arithmetic_coding": False,
     }
+
+
+# Compatibility import for local callers. The metadata name intentionally
+# changed so old result-schema checks cannot mistake this for codec execution.
+codec_aligned_score_metadata = codec_teacher_forced_score_metadata
 
 
 def diagnostic_score_metadata(amp_dtype: torch.dtype | None) -> dict[str, object]:

@@ -11,5 +11,5 @@
   "historical_reported_bpd": 2.8296,
   "historical_reported_std": 0.0854,
   "ctx_alpha": 0.1009,
-  "note": "历史诊断分解；bpd_total 按两个 8-bit 首 token + CE*(N-1) 从已四舍五入 CE 近似重算；旧 std 口径已作废，不是正式单 checkpoint/no-TTA 结果"
+  "note": "历史实验的诊断分解；bpd_total 按两个 8-bit 首 token + CE*(N-1) 从已四舍五入 CE 近似重算；旧 std 口径已作废，不是正式单 checkpoint/no-TTA 结果"
 }

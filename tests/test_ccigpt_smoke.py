@@ -141,8 +141,8 @@ def test_disable_ctx_equivalent_to_vanilla_igpt(device):
     assert abs(out_no_ctx["ce_loss"].item() - out_with_zero_ctx["ce_loss"].item()) < 1e-6
 
 
-def test_shape_assert_triggers(device):
-    """coarse_ctx shape 错误时 IGPT.forward 必须 assert 命中。"""
+def test_shape_validation_triggers(device):
+    """coarse_ctx shape 错误时 IGPT.forward 必须显式拒绝。"""
     torch.manual_seed(7)
     fine = IGPT(
         image_size=32, in_channels=3, vocab_size=256,
@@ -150,7 +150,7 @@ def test_shape_assert_triggers(device):
     ).to(device).eval()
     x = torch.rand(2, 3, 32, 32, device=device)
     bad_ctx = torch.zeros(2, 100, 64, device=device)  # 错误 T 维度
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError, match="coarse_ctx shape"):
         fine(x, coarse_ctx=bad_ctx)
 
 

@@ -45,7 +45,7 @@ from torchvision.datasets import CIFAR10, CIFAR100
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from scripts.train import _build_model_from_config, _build_ccigpt_from_config
+from mdlic.model_factory import build_model_from_config
 from mdlic.provenance import (
     canonical_sha256,
     dataset_record,
@@ -72,10 +72,7 @@ def build_model(mcfg, device):
     复用 train.py 的工厂函数，确保配置键路径与训练完全一致：
     CC-iGPT yaml 用平铺键 (d_model 描述 fine、coarse_d_model 描述 coarse)。
     """
-    model_type = mcfg.get("type", "igpt")
-    if model_type == "ccigpt":
-        return _build_ccigpt_from_config(mcfg, device)
-    return _build_model_from_config(mcfg, device)
+    return build_model_from_config(mcfg, device)
 
 
 def load_checkpoint(model, ckpt_path, device):

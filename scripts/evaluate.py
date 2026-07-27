@@ -56,20 +56,25 @@ from mdlic.eval_metrics import (
     per_image_rate_components as _per_image_rate_components,
     tokenize_targets as _tokenize_targets,
 )
+from mdlic.data.evaluation import (
+    evaluation_dataset_record as _evaluation_dataset_record,
+    load_evaluation_dataset as _load_dataset,
+)
 from mdlic.codec.probability import (
-    codec_aligned_score_metadata,
+    codec_teacher_forced_score_metadata,
     diagnostic_score_metadata,
 )
+from mdlic.codec.container import make_codec_identity, runtime_fingerprint
+from mdlic.codec.verification import load_verified_roundtrip
 from mdlic.provenance import (
-    dataset_record,
     git_metadata as _git_metadata,
     runtime_metadata as _runtime_metadata,
     sha256_file as _sha256_file,
 )
 from mdlic.rate import dual_stream_bpd, ideal_stream_bits, single_stream_bpd
+from mdlic.model_factory import build_model_from_config
 from mdlic.traditional_codecs import codec_metadata, encode_rgb_array, get_codec_spec
 from mdlic.utils import clean_state_dict
-from scripts.train import _build_model_from_config, _build_ccigpt_from_config
 
 
 # ── 多卡评测（DDP）──
@@ -176,10 +181,7 @@ def _mean_and_sample_std(total: float, square_total: float, count: int):
 
 def _build_from_config(mcfg: dict, device):
     """根据 model.type 分发到 IGPT / CC-iGPT 构建函数。"""
-    model_type = mcfg.get("type", "igpt")
-    if model_type == "ccigpt":
-        return _build_ccigpt_from_config(mcfg, device)
-    return _build_model_from_config(mcfg, device)
+    return build_model_from_config(mcfg, device)
 
 
 # ── 学术 Baseline（直接引用论文数字）──
@@ -302,7 +304,7 @@ def evaluate_model(model, loader, device, amp_dtype=None, tta_hflip: bool = Fals
 
     extras = {
         "score_numerics": (
-            codec_aligned_score_metadata()
+            codec_teacher_forced_score_metadata()
             if codec_numerics
             else diagnostic_score_metadata(amp_dtype)
         ),
@@ -373,6 +375,50 @@ def _write_per_image_json(path: str, values, summary: dict, records=None) -> Non
     print(f"[per_image_json] wrote {len(values)} rows → {path}")
 
 
+def _codec_roundtrip_attachment(
+    path: str | None,
+    *,
+    config: dict,
+    config_path: str,
+    checkpoint_paths,
+    model_type: str,
+    codec_protocol_supported: bool,
+    dataset_fingerprint_sha256: str,
+    device,
+) -> dict:
+    """Validate optional sequential evidence without overstating its coverage."""
+    if path is None:
+        return {
+            "status": "not_run",
+            "actual_arithmetic_coding_run": False,
+            "image_count": 0,
+            "reason": (
+                "teacher-forced evaluation does not execute the sequential codec; "
+                "attach --codec_verification_json to record subset roundtrip evidence"
+            ),
+        }
+    checkpoint_paths = list(checkpoint_paths)
+    if not codec_protocol_supported or len(checkpoint_paths) != 1:
+        raise ValueError(
+            "codec verification can only attach to a supported single-checkpoint protocol"
+        )
+    checkpoint_sha256 = _sha256_file(checkpoint_paths[0])
+    identity = make_codec_identity(
+        model_type=model_type,
+        model_config=config["model"],
+        checkpoint_sha256=checkpoint_sha256,
+        runtime=runtime_fingerprint(device),
+    )
+    return load_verified_roundtrip(
+        path,
+        expected_config_sha256=_sha256_file(config_path),
+        expected_checkpoint_sha256=checkpoint_sha256,
+        expected_model_type=model_type,
+        expected_codec_identity=identity,
+        expected_dataset_fingerprint_sha256=dataset_fingerprint_sha256,
+    )
+
+
 def _write_result_manifest(
     path: str,
     *,
@@ -395,9 +441,19 @@ def _write_result_manifest(
         raise ValueError("dataset metadata name does not match the evaluated dataset")
     if dataset_metadata.get("size") != dataset_size:
         raise ValueError("dataset metadata size does not match the evaluated dataset")
+    if not all(math.isfinite(float(value)) for value in (bpd_mean, bpd_std)):
+        raise ValueError("result manifest rates must be finite")
+    if not isinstance(summary, dict):
+        raise ValueError("result manifest summary must be a mapping")
     model_list = list(models)
     checkpoint_paths = list(checkpoint_paths)
+    if not model_list:
+        raise ValueError("result manifest requires at least one model")
     members = len(model_list)
+    if len(checkpoint_paths) != members:
+        raise ValueError(
+            "result manifest requires exactly one checkpoint path per model member"
+        )
     params_per_member = sum(p.numel() for p in model_list[0].parameters())
     protocol = "single_model_nll" if members == 1 else "ensemble_probability_mixture"
     if args.tta_hflip:
@@ -417,28 +473,79 @@ def _write_result_manifest(
         if key in extras
     }
     score_numerics = extras.get("score_numerics", {"name": "unspecified"})
-    probability_numerics_aligned = (
+    probability_numerics_match = (
         score_numerics.get("name")
-        == codec_aligned_score_metadata()["name"]
+        == codec_teacher_forced_score_metadata()["name"]
     )
-    codec_supported, codec_reason = _current_codec_compatibility(
+    codec_supported, codec_reason = _current_codec_protocol_support(
         members=members,
         tta_hflip=args.tta_hflip,
-        probability_numerics_aligned=probability_numerics_aligned,
+        probability_numerics_match=probability_numerics_match,
+    )
+    is_formal = bool(getattr(args, "formal", False))
+    if is_formal:
+        if members != 1 or not codec_supported:
+            raise ValueError(
+                "formal result manifest requires one codec-supported model"
+            )
+        records = extras.get("per_image_records")
+        if not isinstance(records, list) or len(records) != dataset_size:
+            raise ValueError(
+                "formal result manifest requires one per-image record per dataset sample"
+            )
+        if any(not isinstance(record, dict) for record in records):
+            raise ValueError("formal per-image records must be mappings")
+        sample_ids = [record.get("sample_id") for record in records]
+        if sample_ids != list(range(dataset_size)):
+            raise ValueError(
+                "formal result manifest requires ordered, complete sample_id coverage"
+            )
+        if any(
+            isinstance(record.get("ideal_model_bpd"), bool)
+            or not isinstance(record.get("ideal_model_bpd"), (int, float))
+            or not math.isfinite(float(record["ideal_model_bpd"]))
+            for record in records
+        ):
+            raise ValueError("formal per-image bpd values must be finite numbers")
+        if summary.get("n") != dataset_size:
+            raise ValueError(
+                "formal per-image summary count does not match dataset size"
+            )
+    roundtrip = _codec_roundtrip_attachment(
+        getattr(args, "codec_verification_json", None),
+        config=config,
+        config_path=config_abs,
+        checkpoint_paths=checkpoint_paths,
+        model_type=config["model"].get("type", "igpt"),
+        codec_protocol_supported=codec_supported,
+        dataset_fingerprint_sha256=dataset_metadata["fingerprint_sha256"],
+        device=device,
     )
     payload = {
-        "schema_version": 4,
+        "schema_version": 5,
         "protocol": protocol,
-        "decodable_by_current_codec": codec_supported,
-        "codec_compatibility": {
+        "reporting_tier": (
+            "formal_single_model_teacher_forced"
+            if is_formal
+            else "diagnostic"
+        ),
+        "codec_protocol_support": {
             "supported": codec_supported,
             "reason": codec_reason,
-            "probability_numerics_aligned": probability_numerics_aligned,
-            "actual_arithmetic_coding_run": bool(
-                score_numerics.get("actual_arithmetic_coding", False)
-            ),
+            "teacher_forced_probability_numerics_match": probability_numerics_match,
         },
+        "sequential_roundtrip": roundtrip,
         "command": [sys.executable, *sys.argv],
+        "evaluation_execution": {
+            "distributed": _is_dist(),
+            "world_size": dist.get_world_size() if _is_dist() else 1,
+            "collective_backend": str(dist.get_backend()) if _is_dist() else None,
+            "dataset_sharding": (
+                "stride-no-padding" if _is_dist() else "full-dataset"
+            ),
+            "batch_size_per_rank": getattr(args, "batch_size", None),
+            "dataloader_workers_per_rank": 2,
+        },
         "git": _git_metadata(),
         "config": {
             "path": config_abs,
@@ -454,11 +561,12 @@ def _write_result_manifest(
         },
         "dataset": dataset_metadata,
         "rate_accounting": {
-            "metric": "ideal_model_bpd",
+            "metric": "teacher_forced_ideal_model_bpd",
             "ce_predictions_per_stream": "num_tokens_minus_one",
             "first_token_prior": "uniform_256",
             "first_token_bits_per_stream": 8,
             "includes_container_header": False,
+            "actual_arithmetic_coding_run": False,
         },
         "score_numerics": score_numerics,
         "result": {
@@ -475,28 +583,33 @@ def _write_result_manifest(
 
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     tmp_path = f"{path}.tmp.{os.getpid()}"
-    with open(tmp_path, "w") as fh:
-        json.dump(payload, fh, ensure_ascii=False, indent=2)
+    with open(tmp_path, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, ensure_ascii=False, indent=2, allow_nan=False)
+        fh.write("\n")
     os.replace(tmp_path, path)
     print(f"[result_json] wrote manifest → {path}")
 
 
-def _current_codec_compatibility(
+def _current_codec_protocol_support(
     *,
     members: int,
     tta_hflip: bool,
-    probability_numerics_aligned: bool = True,
+    probability_numerics_match: bool = True,
 ) -> tuple[bool, str]:
-    """Describe whether the current single-checkpoint codec can realize a score."""
+    """Describe whether the current codec implements the evaluation protocol.
+
+    This does not claim that the teacher-forced score was produced by the
+    sequential codec; that evidence is recorded separately.
+    """
     if members < 1:
         raise ValueError("members must be >= 1")
     if tta_hflip:
         return False, "hflip TTA has no corresponding current bitstream protocol"
     if members != 1:
         return False, "the current codec accepts exactly one checkpoint"
-    if not probability_numerics_aligned:
+    if not probability_numerics_match:
         return False, "score does not use the codec's fp32-logits/fp64-softmax numerics"
-    return True, "single checkpoint without TTA uses codec-aligned probability numerics"
+    return True, "current codec implements single-checkpoint raster AR without TTA"
 
 
 @torch.no_grad()
@@ -536,14 +649,16 @@ def evaluate_ensemble(models, loader, device, amp_dtype=None,
             amp_ctx = autocast(device_type="cuda", dtype=amp_dtype) if use_amp else nullcontext()
             with amp_ctx:
                 out = m(x_in)
-            assert out.get("logits") is not None, (
-                "ensemble 评测要求 forward 返回 logits（softmax 路径）"
-            )
+            if out.get("logits") is None:
+                raise RuntimeError(
+                    "ensemble 评测要求 forward 返回 logits（softmax 路径）"
+                )
             fine_log_probs.append(F.log_softmax(out["logits"].float(), dim=-1))
             if "ce_loss_coarse" in out and out["ce_loss_coarse"] is not None:
-                assert out.get("logits_coarse") is not None, (
-                    "CC-iGPT ensemble 需要 logits_coarse 才能对 coarse 概率做 mixture"
-                )
+                if out.get("logits_coarse") is None:
+                    raise RuntimeError(
+                        "CC-iGPT ensemble 需要 logits_coarse 才能对 coarse 概率做 mixture"
+                    )
                 coarse_log_probs.append(
                     F.log_softmax(out["logits_coarse"].float(), dim=-1)
                 )
@@ -578,7 +693,10 @@ def evaluate_ensemble(models, loader, device, amp_dtype=None,
             ce_c_flip, ce_f_flip, _ = _ensemble_forward(x_flip)
             ce_f_img = (ce_f_img + ce_f_flip) * 0.5
             if ce_c_img is not None:
-                assert ce_c_flip is not None
+                if ce_c_flip is None:
+                    raise RuntimeError(
+                        "hflip forward omitted coarse logits for a CC-iGPT ensemble"
+                    )
                 ce_c_img = (ce_c_img + ce_c_flip) * 0.5
 
         ce_fine_val = ce_f_img.mean().item()
@@ -732,58 +850,6 @@ def print_results_table(dataset_name, model_bpd, model_std,
     print()
 
 
-def _load_dataset(config):
-    """加载测试数据集。
-    """
-    from torchvision import transforms
-    from torchvision.datasets import CIFAR10, CIFAR100
-
-    dataset_name = config["data"].get("dataset", "cifar100")
-
-    if dataset_name == "imagenet64_npy":
-        from mdlic.data.imagenet64_npy import ImageNet64Npy
-        test_dataset = ImageNet64Npy(root=config["data"]["valid"], split="val")
-        return test_dataset, dataset_name
-    if dataset_name not in ("cifar10", "cifar100"):
-        raise ValueError(
-            f"未知 dataset: '{dataset_name}'，支持 cifar10/cifar100/imagenet64_npy"
-        )
-    transform = transforms.ToTensor()
-    DatasetClass = CIFAR10 if dataset_name == "cifar10" else CIFAR100
-    test_dataset = DatasetClass(root=config["data"]["valid"], train=False,
-                                download=False, transform=transform)
-    return test_dataset, dataset_name
-
-
-def _evaluation_dataset_record(dataset, dataset_name: str, config: dict) -> dict:
-    split = "test" if dataset_name in ("cifar10", "cifar100") else "val"
-    if dataset_name == "imagenet64_npy":
-        preprocessing = {
-            "schema": "mdlic-rgb-preprocess-v1",
-            "steps": [
-                "read uint8 HWC sample from val.npy",
-                "transpose HWC to CHW",
-                "convert to float32 and divide by 255",
-            ],
-            "augmentation": None,
-        }
-    else:
-        preprocessing = {
-            "schema": "mdlic-rgb-preprocess-v1",
-            "steps": [
-                "torchvision.transforms.ToTensor: uint8 HWC to float32 CHW in [0,1]",
-            ],
-            "augmentation": None,
-        }
-    return dataset_record(
-        dataset,
-        name=dataset_name,
-        split=split,
-        configured_path=config["data"].get("valid"),
-        preprocessing=preprocessing,
-    )
-
-
 def _load_checkpoint(model, ckpt_path, device):
     """加载 checkpoint（支持完整 ckpt 和纯 state_dict）。
 
@@ -838,7 +904,10 @@ def cmd_single(args, config, device):
     # softmax 口径。TTA 仍是沿用训练 AMP 的诊断模式。
     codec_numerics = not args.tta_hflip
     if codec_numerics:
-        amp_dtype, amp_dtype_str = None, "fp32 logits + fp64 softmax (codec-aligned)"
+        amp_dtype, amp_dtype_str = (
+            None,
+            "fp32 logits + fp64 softmax (teacher-forced codec numerics)",
+        )
     else:
         amp_dtype, amp_dtype_str = _get_amp_dtype(config)
 
@@ -1002,9 +1071,10 @@ def cmd_ensemble(args, config, device):
     print(f"Dataset: {dataset_name} test ({len(test_dataset)} images)")
 
     ckpt_paths = [p.strip() for p in args.ensemble.split(',') if p.strip()]
-    assert len(ckpt_paths) >= 2, (
-        f"--ensemble 至少需要 2 个 ckpt，got {len(ckpt_paths)}"
-    )
+    if len(ckpt_paths) < 2:
+        raise ValueError(
+            f"--ensemble 至少需要 2 个 ckpt，got {len(ckpt_paths)}"
+        )
 
     mcfg = config["model"]
     model_type = mcfg.get("type", "igpt")
@@ -1117,14 +1187,18 @@ experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/ema.pth \\
                         help='同时评测 SWA checkpoint（swa.pth vs best.pth）')
     parser.add_argument('--tta_hflip', action='store_true',
                         help='诊断性 Test-Time Augmentation；当前 codec 未实现对应协议')
-    parser.add_argument('--batch_size', type=int, default=64,
-                        help='评测 batch size')
+    parser.add_argument('--batch_size', type=int, default=None,
+                        help='评测 batch size；默认 data.valid_batch_size 或 train.batch_size')
     parser.add_argument('--per_image_stats', action='store_true',
                         help='额外打印 per-image bpd/std/stderr/CI')
     parser.add_argument('--per_image_json', type=str, default=None,
                         help='导出 per-image bpd JSON；会隐式启用 --per_image_stats。')
     parser.add_argument('--result_json', type=str, default=None,
                         help='导出可复现评测 manifest（隐式收集逐图结果）')
+    parser.add_argument('--formal', action='store_true',
+                        help='强制单 checkpoint/no-TTA/result manifest 正式 teacher-forced 协议')
+    parser.add_argument('--codec_verification_json', type=str, default=None,
+                        help='附加 verify_lossless.py 生成的同环境 sequential roundtrip manifest')
     parser.add_argument('--bootstrap_samples', type=int, default=1000,
                         help='per-image 均值 bootstrap CI 抽样次数；设 0 可关闭 CI。')
     parser.add_argument('--bootstrap_seed', type=int, default=0,
@@ -1137,11 +1211,43 @@ experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/ema.pth \\
         parser.error("--ensemble 与 --swa 互斥；ensemble 已包含多档 ckpt 评测")
     if args.swa and (args.per_image_stats or args.per_image_json or args.result_json):
         parser.error("--swa 对比模式暂不导出逐图结果；请分别评测具体 checkpoint")
+    if args.formal:
+        if not args.checkpoint or args.ensemble or args.swa or args.tta_hflip:
+            parser.error("--formal requires exactly one --checkpoint and forbids ensemble/SWA/TTA")
+        if not args.result_json:
+            parser.error("--formal requires --result_json")
+    if args.codec_verification_json:
+        if not args.result_json:
+            parser.error("--codec_verification_json requires --result_json")
+        if not args.checkpoint or args.ensemble or args.swa or args.tta_hflip:
+            parser.error(
+                "--codec_verification_json only supports one checkpoint without SWA/TTA"
+            )
+        if os.path.abspath(args.codec_verification_json) == os.path.abspath(
+            args.result_json
+        ):
+            parser.error(
+                "--codec_verification_json and --result_json must be different files"
+            )
+    if args.bootstrap_samples < 0:
+        parser.error("--bootstrap_samples must be >= 0")
+    if args.per_image_json and args.result_json and (
+        os.path.abspath(args.per_image_json) == os.path.abspath(args.result_json)
+    ):
+        parser.error("--per_image_json and --result_json must be different files")
 
     with open(args.config, 'r') as f:
         config = yaml.safe_load(f)
+    if args.batch_size is None:
+        args.batch_size = int(
+            config["data"].get(
+                "valid_batch_size", config["train"].get("batch_size", 64)
+            )
+        )
+    if args.batch_size < 1:
+        parser.error("--batch_size must be >= 1")
 
-    # DDP：torchrun 拉起多进程时初始化 NCCL + 绑卡；单卡直接走 cuda:0 / cpu。
+    # DDP：torchrun 拉起多进程时初始化 gloo + 绑卡；单卡直接走 cuda:0 / cpu。
     rank, world_size, local_rank, is_dist = _init_distributed()
     if is_dist:
         device = torch.device(f'cuda:{local_rank}')

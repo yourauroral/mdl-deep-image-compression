@@ -22,6 +22,9 @@ wandb/
 # Datasets (DO NOT COMMIT)
 datasets/
 
+# Formal JSON manifests are tracked; generated codec payloads are not.
+results/formal/**/bitstreams/
+
 # OS/Editor
 .DS_Store
 .vscode/
@@ -38,8 +41,6 @@ cv_template.tex
 *.docx
 *.pdf
 *.txt
-!requirements.txt
-!requirements-dev.txt
 *.log
 reading_plan.md
 plan.md

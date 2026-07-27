@@ -46,3 +46,11 @@ package-dir = {"" = "src"}
 where = ["src"]
 include = ["mdlic*"]
 namespaces = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+  "cpu: tests that run without CUDA.",
+  "cuda: tests that require a CUDA device.",
+  "slow: tests that are expensive enough to skip during quick local checks.",
+]

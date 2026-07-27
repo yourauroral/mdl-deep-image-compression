@@ -2,7 +2,7 @@ exp_name: "ccigpt_cifar10_s_rgb_ronly_v2"
 
 # CC-iGPT RGB-bit-exact + sub-pixel AR + R-only coarse — 深窄 200ep 版（v2）
 #
-# 与 v1 (ccigpt_cifar10_s_rgb_ronly.yaml, best+TTA 2.9035 历史诊断) 的差异：
+# 与 v1 (ccigpt_cifar10_s_rgb_ronly.yaml, best+TTA 2.9035 历史实验/diagnostic protocol) 的差异：
 #   架构：N=24 → 32（深 33%），d_model=512 → 448（窄 12.5%），d_ff=1376 → 1216，
 #         h=8 → 7（保 d_k=64）；fine 参数 ~76M → ~78.14M（净持平 +2.8%），coarse 不动
 #         （fine 78,136,640 + coarse 4,812,800 + alpha 1 = 单模型 82,949,441）。
@@ -25,7 +25,7 @@ exp_name: "ccigpt_cifar10_s_rgb_ronly_v2"
 # 训练后实测 (2026-05-27, 200ep 完成)：
 #   in-training (无 TTA / ensemble)：best val ep196 = 2.8312；
 #                                    SWA last 31 = 2.8276；EMA = 2.8301。
-#   历史诊断 (ensemble best+SWA+EMA + TTA hflip): 2.8296 bpd；旧 ±0.0854 统计口径已作废。
+#   历史实验结果（diagnostic protocol，ensemble best+SWA+EMA + TTA hflip）: 2.8296 bpd；旧 ±0.0854 统计口径已作废。
 #   三成员需保存 248,848,323 参数，hflip 后每图 6 次 forward；正式单模型结果待重评。
 
 model:

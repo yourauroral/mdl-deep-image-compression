@@ -7,21 +7,21 @@ import pytest
 
 from mdlic.codec.container import (
     CURRENT_VERSION,
+    LEGACY_IDENTITY_SCHEMA,
     V2_CHECKSUM_SIZE,
     V2_FIXED_HEADER_SIZE,
     build_legacy_v1_container_bytes,
+    build_container_bytes as _build_container_bytes,
     canonical_sha256,
     make_codec_identity,
     parse_container,
+    parse_container_meta as _parse_container_meta,
+    read_container as _read_container,
+    read_container_bytes as _read_container_bytes,
+    runtime_fingerprint,
     sha256_rgb_bytes,
     validate_decoded_rgb,
-)
-from scripts.verify_lossless import (
-    _build_container_bytes,
-    _parse_container_meta,
-    _read_container,
-    _read_container_bytes,
-    _write_container,
+    write_container as _write_container,
 )
 
 
@@ -36,6 +36,7 @@ def _identity(
     protocol=None,
     schedule=None,
     runtime=None,
+    implementation=None,
 ):
     return make_codec_identity(
         model_type="ccigpt",
@@ -44,6 +45,7 @@ def _identity(
         codec_protocol=protocol,
         schedule=schedule,
         runtime=runtime or {"torch": "test", "device_type": "cpu"},
+        implementation=implementation,
     )
 
 
@@ -149,11 +151,46 @@ def test_v2_rejects_wrong_checkpoint_config_protocol_schedule_and_runtime():
         "codec_protocol_sha256": _identity(protocol=protocol),
         "schedule_sha256": _identity(schedule=schedule),
         "runtime_sha256": _identity(runtime={"torch": "other", "device_type": "cpu"}),
+        "implementation_sha256": _identity(implementation={
+            "schema": "mdlic-codec-implementation-v1",
+            "execution_source_sha256": "44" * 32,
+            "execution_source_file_count": 1,
+        }),
     }
 
     for field, expected in mismatches.items():
         with pytest.raises(ValueError, match=field):
             parse_container(blob, expected_identity=expected)
+
+
+def test_legacy_identity_v1_is_inspectable_but_not_accepted_for_new_decode():
+    legacy = copy.deepcopy(_identity())
+    legacy["schema"] = LEGACY_IDENTITY_SCHEMA
+    legacy.pop("implementation")
+    legacy.pop("implementation_sha256")
+    blob = _build_container_bytes(
+        False,
+        2,
+        1,
+        [],
+        [1, 0, 1],
+        identity=legacy,
+        source_rgb_sha256=SOURCE_SHA256,
+    )
+
+    assert parse_container(blob).metadata["identity"]["schema"] == LEGACY_IDENTITY_SCHEMA
+    with pytest.raises(ValueError, match="schema"):
+        parse_container(blob, expected_identity=_identity())
+
+
+def test_codec_runtime_fingerprint_records_backend_sensitive_fields():
+    fingerprint = runtime_fingerprint("cpu")
+
+    assert fingerprint["schema"] == "mdlic-codec-runtime-v2"
+    assert "triton" in fingerprint["packages"]
+    assert "deterministic_algorithms" in fingerprint["numerics"]
+    assert "float32_matmul_precision" in fingerprint["numerics"]
+    assert "CUBLAS_WORKSPACE_CONFIG" in fingerprint["environment"]
 
 
 def test_identity_rejects_internal_protocol_hash_mismatch():

@@ -159,7 +159,7 @@ p_\theta(x) \;=\; \prod_t p_\theta(x_t \mid x_{<t}),
 \end{frame}
 
 % ============================== 3. 历史结果与正式协议 ==============================
-\begin{frame}{历史诊断：CIFAR-10 RGB-bit-exact}
+\begin{frame}{历史实验：CIFAR-10 diagnostic protocol}
 \begin{center}
 \includegraphics[width=0.92\linewidth]{baseline.png}
 \end{center}
@@ -171,11 +171,11 @@ p_\theta(x) \;=\; \prod_t p_\theta(x_t \mid x_{<t}),
 (3$\times$82.95\,M stored params, 200 ep, ensemble + TTA hflip, 6 forwards/image)
 
 \smallskip
-{\scriptsize 历史探索值，不作为单模型正式主表；正式结果待 single checkpoint / no-TTA / per-image manifest 重评。}
+{\scriptsize 该协议下的历史实验结果，不作为单模型正式主表；正式结果待 single checkpoint / no-TTA / per-image manifest 重评。}
 \end{frame}
 
 % ============================== 3b. ImageNet64 第二轨道（完成 2026-06-07） ==============================
-\begin{frame}{第二轨道：ImageNet 64$\times$64（历史诊断）}
+\begin{frame}{第二轨道：ImageNet 64$\times$64（历史实验，diagnostic protocol）}
 \centering
 \begin{tabular}{lcc}
 \toprule
@@ -230,7 +230,7 @@ PixelRNN & -- & 3.63 \\
 其中 $N_c = 64$ (coarse 8$\times$8 R), $N_f = 3072$ ($32{\times}32{\times}3$)。
 
 \medskip
-\textbf{历史诊断分解（展示 CE 已四舍五入）}
+\textbf{历史实验的诊断分解（展示 CE 已四舍五入）}
 \begin{itemize}
   \item $\mathrm{CE}_c = 4.3302$ \quad bpd 占比 \alert{4.6\%}
   \item $\mathrm{CE}_f = 1.8711$ \quad bpd 占比 \alert{95.4\%}
@@ -407,7 +407,7 @@ $\to$ \texttt{re-tokenize} $\to$ \texttt{fine.token\_embed} $\to$ \texttt{AR shi
 \end{columns}
 
 \medskip
-{\centering\footnotesize\color{muted}图中与文中 ensemble+TTA 数字均只作历史诊断。\par}
+{\centering\footnotesize\color{muted}图中与文中 ensemble+TTA 数字均为 diagnostic protocol 下的历史实验结果，不进入正式单模型主表。\par}
 \end{frame}
 
 % ============================== 9. Triton Kernel (图) ==============================
@@ -628,7 +628,7 @@ representation 血脉承 iGPT，density 血脉承 Sparse Transformer（纯生成
 
 \smallskip
 \textbf{3 分析} —— RGB-bit-exact 评估与 codec 对账 \\
-{\scriptsize 2.8296 / 3.4800 为三成员 ensemble+TTA 历史诊断；正式单模型主表、probe 与 GPU profiling 待按新协议回填。}
+{\scriptsize 2.8296 / 3.4800 为三成员 ensemble+TTA 诊断协议下的历史实验结果；正式单模型主表、probe 与 GPU profiling 待按新协议回填。}
 \end{column}
 \begin{column}{0.50\textwidth}
 \small

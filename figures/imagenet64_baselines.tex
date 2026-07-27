@@ -9,7 +9,7 @@
 %   Sparse Transformer  3.44   Child et al., 2019  ← 目标线
 %   CC-iGPT (historical) 3.4800 本工作，IN64 v1 12ep，ensemble(best+SWA+EMA)+TTA hflip（4卡实测 2026-06-07）
 %
-% 历史诊断 3.4800（ensemble best/SWA/EMA + TTA hflip；单 ckpt best+TTA=3.4810）。
+% 历史实验结果 3.4800（diagnostic protocol：ensemble best/SWA/EMA + TTA hflip；单 ckpt best+TTA=3.4810）。
 %   数值位于 SPN 3.52 与 Sparse Transformer 3.44 之间，但协议不同，不作正式优劣声明。
 %   旧 ±0.1161 是 batch-level std，已作废；正式结果等待单 checkpoint/no-TTA 逐图重评。
 \documentclass[tikz,border=8pt]{standalone}

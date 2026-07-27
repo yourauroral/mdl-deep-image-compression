@@ -1,4 +1,4 @@
-"""Reproducibility metadata shared by evaluation and downstream scripts."""
+"""Reproducibility metadata shared by training and evaluation tools."""
 
 from __future__ import annotations
 
@@ -17,9 +17,6 @@ DEFAULT_SOURCE_PATHS = (
     "src",
     "scripts",
     "pyproject.toml",
-    "requirements.txt",
-    "requirements-dev.txt",
-    "uv.lock",
 )
 SOURCE_SUFFIXES = {".py", ".pyi", ".toml", ".lock", ".txt"}
 
@@ -154,12 +151,49 @@ def _package_version(distribution: str) -> str | None:
         return None
 
 
+def _nvidia_driver_version() -> str | None:
+    try:
+        process = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=driver_version",
+                "--format=csv,noheader",
+            ],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=5,
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return None
+    if process.returncode != 0:
+        return None
+    versions = sorted({line.strip() for line in process.stdout.splitlines() if line.strip()})
+    return ",".join(versions) or None
+
+
 def runtime_metadata(device=None) -> dict:
     import torch
 
+    if device is not None:
+        device = torch.device(device)
     device_name = None
+    device_capability = None
     if device is not None and device.type == "cuda" and torch.cuda.is_available():
         device_name = torch.cuda.get_device_name(device)
+        device_capability = list(torch.cuda.get_device_capability(device))
+
+    cuda_backend = torch.backends.cuda
+    backend_flag_names = (
+        "flash_sdp_enabled",
+        "mem_efficient_sdp_enabled",
+        "math_sdp_enabled",
+    )
+    backend_flags = {}
+    for name in backend_flag_names:
+        getter = getattr(cuda_backend, name, None)
+        backend_flags[name] = bool(getter()) if callable(getter) else None
     return {
         "python": platform.python_version(),
         "platform": platform.platform(),
@@ -171,19 +205,31 @@ def runtime_metadata(device=None) -> dict:
             "triton": _package_version("triton"),
         },
         "cuda_runtime": torch.version.cuda,
+        "cuda_driver": _nvidia_driver_version() if torch.cuda.is_available() else None,
         "cudnn": torch.backends.cudnn.version(),
         "device": str(device) if device is not None else None,
+        "device_type": device.type if device is not None else None,
         "device_name": device_name,
+        "device_capability": device_capability,
         "numerics": {
             "deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
+            "deterministic_warn_only": bool(
+                getattr(torch, "is_deterministic_algorithms_warn_only_enabled", lambda: False)()
+            ),
             "cudnn_benchmark": torch.backends.cudnn.benchmark,
             "cudnn_deterministic": torch.backends.cudnn.deterministic,
+            "float32_matmul_precision": torch.get_float32_matmul_precision(),
             "allow_tf32_matmul": bool(
                 getattr(torch.backends.cuda.matmul, "allow_tf32", False)
             ),
             "allow_tf32_cudnn": bool(
                 getattr(torch.backends.cudnn, "allow_tf32", False)
             ),
+            **backend_flags,
+        },
+        "environment": {
+            "CUBLAS_WORKSPACE_CONFIG": os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
+            "NVIDIA_TF32_OVERRIDE": os.environ.get("NVIDIA_TF32_OVERRIDE"),
         },
     }
 

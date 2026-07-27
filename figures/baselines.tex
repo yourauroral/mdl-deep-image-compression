@@ -7,7 +7,7 @@
 %   Image Transformer  ~40M   2.90    Parmar et al., ICML 2018  (原文未报告参数量; ~40M 据官方 tensor2tensor imagetransformer_cifar10_base = 12L/d512/ff2048 估算)
 %   PixelSNAIL         ~91M   2.85    Chen et al., ICML 2018  (原文未报告参数量; ~91M 据官方 neocxi/pixelsnail-public CIFAR 配置 h12_noup_smallkey/nr_filters=256/nr_resnet=4 核算, 见 scripts/pixelsnail_paramcount.py)
 %   Sparse Transformer  59M   2.80    Child et al., 2019 (128 层 strided)
-%   CC-iGPT v2 (historical diagnostic) 3x82.95M 2.8296
+%   CC-iGPT v2 (historical experiment; diagnostic protocol) 3x82.95M 2.8296
 %     R-only ensemble (best+SWA+EMA) + TTA hflip, 6 forwards/image；非正式单模型主表
 \documentclass[tikz,border=8pt]{standalone}
 \usepackage{tikz}
@@ -53,7 +53,7 @@
     (Ours, 2.8296)
 };
 
-% --- 参考线 1：PixelSNAIL 2.85；Ours 为不同成本的历史诊断，不作胜负结论 ---
+% --- 参考线 1：PixelSNAIL 2.85；Ours 为不同成本、diagnostic protocol 下的历史实验，不作胜负结论 ---
 \draw[densely dashed, gray!50, line width=0.4pt]
     ({rel axis cs:0,0}|-{axis cs:SparseTrans,2.85})
     -- ({rel axis cs:1,0}|-{axis cs:SparseTrans,2.85});

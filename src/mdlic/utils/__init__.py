@@ -1,5 +1,5 @@
 """
-公共工具函数 — 被 train.py、evaluate.py、dryrun_forward.py 等多处复用。
+公共工具函数 — 被训练、评测与 checkpoint 加载入口复用。
 """
 
 import math

@@ -52,6 +52,15 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from mdlic.rate import num_model_predictions
 from mdlic.request_limits import SlidingWindowRateLimiter
+from mdlic.codec.container import (
+    build_container_bytes,
+    parse_container_meta,
+    read_container_bytes,
+    sha256_rgb_bytes,
+    validate_decoded_rgb,
+)
+from mdlic.codec.sequential import decode_sequence_iter, encode_sequence_iter
+from mdlic.completion import complete_image
 
 DATA_DIR = Path(__file__).resolve().parent / "data"
 
@@ -420,8 +429,8 @@ def _drive_coder(gen, stage, base, total):
 def encode(file: UploadFile = File(...), dataset: str = Form("cifar10")):
     """上传图 → **逐 token gold 算术编码** → 模型绑定 MDLC v2（流式 NDJSON 进度）。
 
-    编码必须与 /api/decode 走**同一**逐 token 路径（verify_lossless._encode_sequence_iter
-    与 _decode_sequence_iter 共用 _logits_from_tokens，prefix+0 缓冲逐位相同）：算术编码
+    编码必须与 /api/decode 走**同一**逐 token 公共 codec 路径（`encode_sequence_iter`
+    与 `decode_sequence_iter` 共用 logits 路径，prefix+0 缓冲逐位相同）：算术编码
     零容忍，logits 差一个 ULP 即可让某 token 跨累积频数边界翻符号、解码失步成噪点。同源
     保证 encode 写的 bits 与 decode 逐 token 读所需分布逐位相同 → bit-exact 可解。
 
@@ -444,12 +453,6 @@ def encode(file: UploadFile = File(...), dataset: str = Form("cifar10")):
         x, _, preprocessing = _read_upload_to_tensor(
             file, size=_model_image_size(model, model_type), allow_resize=False
         )
-        from scripts.verify_lossless import (
-            _build_container_bytes,
-            _encode_sequence_iter,
-            _parse_container_meta,
-        )
-        from mdlic.codec.container import sha256_rgb_bytes
     except Exception:
         lease.release()
         raise
@@ -479,11 +482,11 @@ def encode(file: UploadFile = File(...), dataset: str = Form("cifar10")):
 
                         x_c = model._coarse_input(x_dev)
                         coarse_tokens = model.coarse._tokenize(x_c)
-                        gen_c = _encode_sequence_iter(model.coarse, coarse_tokens, None, device)
+                        gen_c = encode_sequence_iter(model.coarse, coarse_tokens, None, device)
                         c_bits, base = yield from _drive_coder(gen_c, "coarse", 0, total_steps)
                         coarse_ctx = model.ctx_alpha * model._compute_coarse_ctx(coarse_tokens)
                         fine_tokens = model.fine._tokenize(x_dev)
-                        gen_f = _encode_sequence_iter(model.fine, fine_tokens, coarse_ctx, device)
+                        gen_f = encode_sequence_iter(model.fine, fine_tokens, coarse_ctx, device)
                         f_bits, _ = yield from _drive_coder(gen_f, "fine", base, total_steps)
                         enc_tokens = coarse_tokens[0].tolist() + fine_tokens[0].tolist()
                     else:
@@ -495,12 +498,12 @@ def encode(file: UploadFile = File(...), dataset: str = Form("cifar10")):
                                           "unit": "model_predictions",
                                           "stages": ["single"]}) + "\n"
                         tokens = model._tokenize(x_dev)
-                        gen = _encode_sequence_iter(model, tokens, None, device)
+                        gen = encode_sequence_iter(model, tokens, None, device)
                         f_bits, _ = yield from _drive_coder(gen, "single", 0, total_steps)
                         c_bits = []
                         enc_tokens = tokens[0].tolist()
 
-                    blob = _build_container_bytes(
+                    blob = build_container_bytes(
                         dual,
                         H,
                         C,
@@ -510,7 +513,7 @@ def encode(file: UploadFile = File(...), dataset: str = Form("cifar10")):
                         source_rgb_sha256=source_rgb_sha256,
                     )
                     total_bits = len(c_bits) + len(f_bits)
-                    container_meta = _parse_container_meta(blob)
+                    container_meta = parse_container_meta(blob)
                     parts = {"coarse_bits": len(c_bits), "fine_bits": len(f_bits)} if dual else {}
                     yield json.dumps({
                         "type": "done",
@@ -556,12 +559,11 @@ def inspect(file: UploadFile = File(...)):
     """上传 .bin → 即时解析容器结构/码长/bpd（纯文件级，无需 GPU/ckpt/模型）。
 
     容器结构自描述：仅凭文件就能读出尺寸/双尺度/码长/bpd/identity。与 CLI
-    `verify_lossless.py --inspect` 同一套 _parse_container_meta，口径一致。
+    `verify_lossless.py --inspect` 共用 `parse_container_meta`，口径一致。
     """
-    from scripts.verify_lossless import _parse_container_meta
     blob = _read_bin_upload(file)
     try:
-        meta = _parse_container_meta(blob)
+        meta = parse_container_meta(blob)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     for key in ("bpd", "payload_bpd", "packed_payload_bpd", "file_bpd"):
@@ -575,7 +577,7 @@ def decode(file: UploadFile = File(...), dataset: str = Form("cifar10")):
 
     真实 decoder 视角：只给文件，无原图。逐 token 重跑完整 forward（无 KV-cache,
     causal mask 保证 0 后缀不泄漏），与 scripts/verify_lossless 的 gold 路径同源
-    （共用 _decode_sequence_iter）。CIFAR 共 (64-1)+(3072-1)=3134 次预测、~60–120s,
+    （共用 `decode_sequence_iter`）。CIFAR 共 (64-1)+(3072-1)=3134 次预测、~60–120s,
     故用 StreamingResponse 每 ~128 步推一行进度，绕开 AutoDL 反代 idle 超时。
 
     解码步数由模型几何固定（model.coarse.seq_len / model.fine.seq_len），不受文件
@@ -594,15 +596,8 @@ def decode(file: UploadFile = File(...), dataset: str = Form("cifar10")):
         if model is None:
             raise HTTPException(status_code=503, detail="No checkpoint available. Place a checkpoint in experiments/*/checkpoints/best.pth")
 
-        from scripts.verify_lossless import (
-            _decode_sequence_iter,
-            _parse_container_meta,
-            _read_container_bytes,
-        )
-        from mdlic.codec.container import validate_decoded_rgb
-
-        container_meta = _parse_container_meta(blob)
-        dual, H, C, c_bits, f_bits = _read_container_bytes(
+        container_meta = parse_container_meta(blob)
+        dual, H, C, c_bits, f_bits = read_container_bytes(
             blob,
             expected_identity=model._codec_identity,
         )
@@ -637,10 +632,10 @@ def decode(file: UploadFile = File(...), dataset: str = Form("cifar10")):
                         yield json.dumps({"type": "start", "total": total_steps,
                                           "unit": "model_predictions",
                                           "stages": ["coarse", "fine"]}) + "\n"
-                        gen_c = _decode_sequence_iter(model.coarse, c_bits, N_c, None, device)
+                        gen_c = decode_sequence_iter(model.coarse, c_bits, N_c, None, device)
                         coarse_dec, base = yield from _drive_coder(gen_c, "coarse", 0, total_steps)
                         coarse_ctx = model.ctx_alpha * model._compute_coarse_ctx(coarse_dec)
-                        gen_f = _decode_sequence_iter(model.fine, f_bits, N_f, coarse_ctx, device)
+                        gen_f = decode_sequence_iter(model.fine, f_bits, N_f, coarse_ctx, device)
                         fine_dec, _ = yield from _drive_coder(gen_f, "fine", base, total_steps)
                         recon_t = fine_dec
                         total_bits = len(c_bits) + len(f_bits)
@@ -652,7 +647,7 @@ def decode(file: UploadFile = File(...), dataset: str = Form("cifar10")):
                         yield json.dumps({"type": "start", "total": total_steps,
                                           "unit": "model_predictions",
                                           "stages": ["single"]}) + "\n"
-                        gen = _decode_sequence_iter(model, f_bits, N, None, device)
+                        gen = decode_sequence_iter(model, f_bits, N, None, device)
                         dec, _ = yield from _drive_coder(gen, "single", 0, total_steps)
                         recon_t = dec
                         total_bits = len(f_bits)
@@ -707,7 +702,7 @@ def complete(
     与 scripts/complete_image.py 同一套 per-step forward（无 KV-cache，causal mask
     保证 0 后缀不泄漏）。CC-iGPT 的 coarse ctx 由**整图**缩略图算 —— 故语义是"低分
     缩略图 + 上半真实像素 → 补下半"，coarse 是显式 side-channel（与压缩时独立 bitstream
-    同源），非偷看答案。详见 complete_image.py docstring 与 runbook。
+    同源），非偷看答案。详见 complete_image.py docstring。
 
     sync def → FastAPI 放进 threadpool，GPU 采样不阻塞 event loop（但单请求会占住
     一个 worker ~数十秒，且与 IN64 训练共享 GPU；属预期，demo 单用户场景可接受）。
@@ -744,11 +739,17 @@ def complete(
             file, size=_model_image_size(model, model_type), allow_resize=True
         )
 
-        from scripts.complete_image import _complete_one
-
         model.eval()
         with torch.no_grad():
-            o, m, c = _complete_one(model, model_type, x, keep_frac, temperature, top_k, device)
+            o, m, c = complete_image(
+                model,
+                model_type,
+                x,
+                keep_frac,
+                temperature,
+                top_k,
+                device,
+            )
     finally:
         lease.release()
 
@@ -831,9 +832,11 @@ def _get_cached_model(device, dataset: str = "cifar10"):
 
             mcfg = config["model"]
             model_type = mcfg.get("type")
-            assert model_type == "ccigpt", (
-                f"demo 主线只支持 CC-iGPT，{cfg_name} 的 model.type={model_type!r} 不匹配"
-            )
+            if model_type != "ccigpt":
+                raise ValueError(
+                    f"demo 主线只支持 CC-iGPT，{cfg_name} 的 "
+                    f"model.type={model_type!r} 不匹配"
+                )
             candidate = (mcfg, model_type, ckpt_path)
             break
 
@@ -843,8 +846,8 @@ def _get_cached_model(device, dataset: str = "cifar10"):
         mcfg, model_type, ckpt_path = candidate
         _evict_cached_model(torch)
 
-        from scripts.train import _build_ccigpt_from_config
-        model = _build_ccigpt_from_config(mcfg, device)
+        from mdlic.model_factory import build_ccigpt_from_config
+        model = build_ccigpt_from_config(mcfg, device)
 
         # best.pth 是裸 state_dict（torch.save(model.state_dict())），不含
         # optimizer/epoch 等 Python 对象，可安全使用 weights_only=True
