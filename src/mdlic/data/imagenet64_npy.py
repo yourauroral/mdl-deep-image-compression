@@ -10,6 +10,8 @@ class ImageNet64Npy(Dataset):
     def __init__(self, root: str, split: str, hflip: bool = False):
         path = os.path.join(root, f"{split}.npy")
         self.data = np.load(path, mmap_mode="r")
+        manifest_path = os.path.join(root, "dataset_manifest.json")
+        self.manifest_path = manifest_path if os.path.isfile(manifest_path) else None
         assert self.data.ndim == 4 and self.data.shape[1:] == (64, 64, 3), \
             f"unexpected shape {self.data.shape}, expected (N, 64, 64, 3)"
         assert self.data.dtype == np.uint8

@@ -2,22 +2,21 @@ exp_name: "ccigpt_cifar10_s_rgb_ronly"
 
 # CC-iGPT RGB-bit-exact + sub-pixel AR + R-only coarse（灰度先验）
 #
-# ⚠️ v1 历史主表配置（已被 v2 替代）— 实测 best+TTA 2.9035 ± 0.0854 bpd（100ep）。
-#    当前主表请使用 ccigpt_cifar10_s_rgb_ronly_v2.yaml（深窄 N=32/d=448 + 200ep
-#    + ensemble，主表 2.8296 bpd）。本配置保留作 v1→v2 提升对照参考。
+# v1 历史诊断配置（已被 v2 架构替代）— best+TTA 2.9035 bpd（100ep；旧 ±0.0854 统计口径已作废）。
+# v2 的 ensemble+TTA 2.8296 同样是历史诊断；正式主表待单 checkpoint/no-TTA 重评。
 #
 # 设计动机：
-#   coarse 只压 R 单通道 8×8（64 tokens, ~2% overhead），
+#   coarse 只压 R 单通道 8×8（64 tokens，占联合 token 数约 2%；历史 bpd 占比约 4.6%），
 #   coarse 不再背"3 通道相关"重担，容量解放给"R 通道空间结构"。fine 通过
 #   sub-pixel AR 自学 G/B 相对 R 的偏色修正。
 #
 # ctx 注入策略：R 复制三份的"灰度先验"
 #   coarse 输出 64 R token → bilinear UP 到 (B,1,32,32) → expand 到 (B,3,32,32)
-#   → fine.token_embed 查表。bit-exact 严格保留，零新参数（仅 ctx_alpha 标量）。
+#   → fine.token_embed 查表。bit-exact 严格保留，仅新增 ctx_alpha 这 1 个标量参数。
 #
 # v1 训练配置：100ep + hflip + RandomCrop(reflect) + dropout 0.1 +
 # DropPath 0→0.1 + EMA(decay=0.9995) + SWA(last 10ep)。
-# v1 实测：单 forward bpd 2.9038；+TTA hflip → 2.9035（v1 历史主表）。
+# v1 实测：单 forward bpd 2.9038；+TTA hflip → 2.9035（历史诊断）。
 
 model:
   type: ccigpt

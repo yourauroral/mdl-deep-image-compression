@@ -28,9 +28,10 @@ except ImportError:
     fused_add_rms_norm = None
 
 try:
-    from .fused_attn_rope import fused_attn_rope
+    from .fused_attn_rope import fused_attn_rope, rope_then_flash_attn
 except ImportError:
     fused_attn_rope = None
+    rope_then_flash_attn = None
 
 # fused_linear_ce 是反面案例（V=256 下 roofline 证伪），不在训练栈使用，
 # 仅供 scripts/profile_kernels.py 与论文 §3.2 复现使用。详见 fused_linear_ce.py 顶部说明。

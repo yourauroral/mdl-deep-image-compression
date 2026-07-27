@@ -26,11 +26,12 @@ import math
 import torch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
-from src.mdlic.models.igpt import IGPT
-from src.mdlic.models.cc_igpt import CCIGPT
+from mdlic.models.igpt import IGPT
+from mdlic.models.cc_igpt import CCIGPT
 from scripts.train import _build_model_from_config, _build_ccigpt_from_config
-from src.mdlic.models.layers import get_fused_kernel_status
+from mdlic.models.layers import get_fused_kernel_status
 
 
 def _check_finite(out: dict, tag: str):
@@ -39,7 +40,8 @@ def _check_finite(out: dict, tag: str):
     ce_val = out['ce_loss'].item()
     assert math.isfinite(loss_val), f"[{tag}] loss is {loss_val} (NaN/Inf!)"
     assert math.isfinite(ce_val), f"[{tag}] ce_loss is {ce_val} (NaN/Inf!)"
-    bpd = ce_val / math.log(2)
+    bpd = out.get('bpd')
+    bpd = bpd.item() if bpd is not None else ce_val / math.log(2)
     assert 0.0 < bpd < 50.0, f"[{tag}] bits/dim={bpd:.2f} 超出合理范围 (0, 50)"
     print(f"  [{tag}] loss={loss_val:.4f}  ce_loss={ce_val:.4f}  bits/dim={bpd:.2f}  logits={out['logits'].shape}")
 
@@ -47,6 +49,7 @@ def _check_finite(out: dict, tag: str):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default='configs/igpt_cifar10_s_rgb.yaml')
+    parser.add_argument('--batch_size', type=int, default=1)
     args = parser.parse_args()
 
     with open(args.config, 'r') as f:
@@ -62,7 +65,13 @@ def main():
     for name, avail in kernel_status.items():
         print(f"  {name}: {'ON' if avail else 'OFF'}")
 
-    x = torch.rand(2, 3, 32, 32, device=device)
+    if args.batch_size < 1:
+        parser.error("--batch_size 必须 >= 1")
+    image_size = int(mcfg["image_size"])
+    in_channels = int(mcfg["in_channels"])
+    x = torch.rand(
+        args.batch_size, in_channels, image_size, image_size, device=device,
+    )
 
     # ── 1. 默认配置 forward（按 config.model.type 分发到 iGPT / CC-iGPT） ──
     model_type = mcfg.get("type", "igpt")
@@ -83,22 +92,33 @@ def main():
         assert model.head.weight is model.token_embed.weight, "Weight tying failed!"
         print("  [weight tying] OK — head.weight is token_embed.weight")
         # 子像素 AR 是唯一序列布局，channel_embed 永远存在
-        assert hasattr(model, 'channel_embed') and model.channel_embed.weight.shape == (3, mcfg["d_model"])
+        assert hasattr(model, 'channel_embed')
+        assert model.channel_embed.weight.shape == (in_channels, mcfg["d_model"])
         out['loss'].backward()
         assert all(p.grad is not None for p in model.parameters() if p.requires_grad)
         print("  [backward] all grads computed: OK")
 
     # ── 2. CC-iGPT smoke (硬编码 mini 配置，与 Test 1 真实 config 路径互补) ──
     print("\n=== Test 2: CC-iGPT (Coarse-Conditioned iGPT, mini hardcoded) ===")
+    # mini smoke 固定在至多 32px，避免 IN64 配置再额外构造一个 12288-token 模型。
+    mini_image_size = min(image_size, 32)
+    mini_pool_factor = int(mcfg.get("pool_factor", 4))
+    if mini_image_size % mini_pool_factor != 0:
+        mini_pool_factor = 2
     model5 = CCIGPT(
-        image_size=32, in_channels=3, vocab_size=256,
-        pool_factor=4,
+        image_size=mini_image_size, in_channels=in_channels,
+        vocab_size=mcfg["vocab_size"],
+        pool_factor=mini_pool_factor,
         fine_d_model=mcfg["d_model"], fine_N=2,
         fine_h=mcfg["h"], fine_d_ff=mcfg["d_ff"],
         coarse_d_model=128, coarse_N=2, coarse_h=4, coarse_d_ff=344,
         dropout=0.0,
     ).to(device)
-    out5 = model5(x)
+    x_mini = torch.rand(
+        args.batch_size, in_channels, mini_image_size, mini_image_size,
+        device=device,
+    )
+    out5 = model5(x_mini)
     bpd5 = out5["bpd"].item()
     loss5 = out5["loss"].item()
     ce5_c = out5["ce_loss_coarse"].item()

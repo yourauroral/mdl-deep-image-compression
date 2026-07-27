@@ -6,5 +6,7 @@
   "accuracy": [40.90, 49.71, 52.59, 54.45, 55.77, 57.19, 58.26, 60.33, 61.88, 64.51, 68.22, 70.13, 72.03, 73.59, 75.16, 77.23, 78.41, 78.18, 78.59, 79.33, 78.87, 78.79, 78.85, 78.58, 77.85, 78.02, 77.07, 76.62, 76.95, 76.08, 76.15, 75.84],
   "best_layer": 19,
   "best_accuracy": 79.33,
-  "note": "CC-iGPT v2 fine 分支 32 层逐层 linear probe (with α·coarse_ctx 注入, α=0.099)。中段 L19 峰值 79.33%（明显高于 iGPT-S baseline 24 层 L22 66.93%），随后缓降是 GPT 类 AR 模型的典型表征曲线 — 末几层逐渐过拟合到 token-level NLL 目标，丢弃部分语义信息。"
+  "protocol_status": "historical_test_selected",
+  "uncertainty_status": "unavailable_legacy_single_classifier_run",
+  "note": "历史探索曲线：旧脚本使用 test curve 选择 L19，因此 79.33% 不是正式无泄漏结果，也不能把与 iGPT-S 的差值归因于 coarse context。待按 validation 选层、多 classifier seeds、完整 train 重训、最终单层 test 协议重跑。"
 }

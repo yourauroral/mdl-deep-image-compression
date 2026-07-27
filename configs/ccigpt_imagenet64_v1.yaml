@@ -2,17 +2,17 @@ exp_name: "ccigpt_imagenet64_v1"
 
 # CC-iGPT RGB-bit-exact + sub-pixel AR + R-only coarse — ImageNet64 跨数据集首版
 #
-# 与 CIFAR-10 v2 (ccigpt_cifar10_s_rgb_ronly_v2.yaml, 主表 2.8296 bpd) 的差异：
+# 与 CIFAR-10 v2 (历史 ensemble+TTA 诊断 2.8296 bpd) 的差异：
 #   数据：cifar10 (32×32×3, 50k train) → imagenet64_npy (64×64×3, 1.28M train)
 #   image_size: 32 → 64，pool_factor=4 不变
 #       → coarse  8×8 → 16×16   = 64 → 256 token  (R-only)
 #       → fine   32×32×3 → 64×64×3 = 3072 → 12288 token  (×4)
 #   显存：fine attention O(L²) 内存 ×16，必须降 batch
-#       batch_size 48×3 → 12×12  (effective batch 仍 288)
+#       batch_size 48×3 → 12×6  (×4 卡 → effective batch 仍 288，见下方 grad_accum_steps)
 #   epochs: 200 → 12 (ImageNet 1.28M / CIFAR 50k = 25.6×；12ep token 量 ≈ CIFAR 200ep × 1.5)
 #       —— 实测 1.2s/micro-step × 53381 step/ep = 17.8 h/ep；
 #       —— 12ep ≈ 8.9 天卡时（vs 40ep 30 天不可行）；
-#       —— 训练 token 量 7.7× v2 主表，预计 ensemble bpd 落 3.35-3.50（中位数 ~3.42）。
+#       —— 训练 token 量约为 CIFAR v2 的 7.7×；旧 ensemble 预测仅作训练前记录。
 #   SWA: start_epoch 170/200 → 11/12 (last 2 ckpts，update_interval=1，比例略低于 v2 85% 但 ImageNet 单 ep 信息量大)
 #   EMA: decay 0.9998 → 0.9998 (12ep step ≈ 53k，半衰期 3.5k step ≈ 6.6% 总训，与 v2 同档)
 #   warmup_epochs: 5 → 1 (12ep 太短，warmup 占比 < 1ep；step 数仍 4448 充裕)
@@ -22,8 +22,7 @@ exp_name: "ccigpt_imagenet64_v1"
 # 架构：fine N=32/d=448/h=7 (d_k=64), coarse 4.81M (256d×6L) — 与 v2 完全一致
 #       (控制变量：纯换数据集；如 OOM 再考虑降 N/d 或 sparse-attn)
 #
-# 目标：bpd_total < 3.44 (Sparse Transformer 152M strided ImageNet64 = 3.44)
-#       逼近 < 3.40 (Sparse Transformer 152M full)
+# 历史目标：bpd_total < 3.44；正式比较按单模型重评并记录实际数据文件 SHA-256。
 #
 # 风险：seq_len=12288 在 fp32 attention 下 batch=12 仍可能 OOM；
 #       fallback: (a) batch 6 + accum 24 (b) activation_checkpointing 已开
@@ -31,7 +30,7 @@ exp_name: "ccigpt_imagenet64_v1"
 #
 # 训练前预测 (2026-05-28, 12ep + hflip): best+TTA → 3.40-3.55；ensemble → 3.35-3.50。
 # 决策点：ep12 ensemble bpd
-#   < 3.42 → 直接交，论文 §5 ImageNet64 主表
+#   < 3.42 → 历史决策记录；不得直接升级为正式主表
 #   3.42-3.50 → warm restart 续训 4 ep（卡时 +3 天）
 #   > 3.50 → debug（ctx α 是否收敛？lr 是否过低？）
 

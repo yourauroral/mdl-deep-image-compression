@@ -83,7 +83,7 @@ python scripts/verify_lossless.py --inspect experiments/bitstreams/img0.bin
 
 这里慢是因为模型没有 KV-cache，每个 token 都要跑一次完整 forward。属预期，不是卡死；`--log_every 512` 会打印进度。
 
-## [3] IN64 -> CIFAR transfer probe（✅ 完成 2026-06-07，完整 32 层 best L16 = 73.19%）
+## [3] IN64 -> CIFAR transfer probe（旧协议探索曲线；正式结果待重跑）
 
 ```bash
 python scripts/linear_probe.py \
@@ -93,7 +93,7 @@ python scripts/linear_probe.py \
 ```
 
 IN64 模型 `image_size=64`，CIFAR 图会 resize **32->64**。这个结果只能看 transfer 趋势，不能和 CIFAR-10 native 32x32 的 66.93/79.33 直接横比。
-**实测：完整 32 层 best L16 = 73.19%**（中层峰，L15–L17 为 73.12/73.19/73.18 平台；L0 41.69%→L16 73.19%→L31 64.79%），胜 iGPT-S native 66.93% (+6.3pp)、低于 CC-iGPT v2 native 79.33%（transfer + resize 域偏移代价）。
+**旧协议探索曲线：完整 32 层在 L16 为 73.19%**（L15–L17 为 73.12/73.19/73.18；L0 41.69%→L16 73.19%→L31 64.79%）。该层由 test curve 选出，且 transfer+resize 与 iGPT-S native、CC-iGPT v2 native 均非同协议，因此不得据此作优劣声明。正式结果需按 validation 选层、多 classifier seeds、完整 train 重训、最终单层 test 协议重跑。
 注：probe `--batch_size` 默认已改自适应（IN64 fine seq=12288 → batch 64），不指定即可，避免长序列下 batch 256 触发 int32 偏移溢出 → CUDA illegal memory access。
 
 ---

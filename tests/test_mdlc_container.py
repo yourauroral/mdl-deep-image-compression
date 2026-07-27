@@ -1,144 +1,238 @@
-"""MDLC .bin 容器单元测试（纯 CPU，WSL 可跑，无 torch 依赖）。
+"""Protocol tests for checksummed, model-bound MDLC containers."""
 
-验证 verify_lossless.py 抽出的容器 helper（demo /api/encode|inspect|decode 复用）：
-  1. _build_container_bytes → _read_container_bytes 双/单尺度逐 bit roundtrip；
-  2. _parse_container_meta 字段正确（尺寸/码长/bpd/自洽校验）；
-  3. 坏 magic / 截断 / 版本不符等损坏输入报错；
-  4. 落盘 _write_container 与内存 _build_container_bytes 逐字节一致。
-"""
+import copy
 import random
-import struct
 
 import pytest
 
-from scripts.verify_lossless import (
-    _build_container_bytes, _read_container_bytes, _parse_container_meta,
-    _write_container, _read_container, _MAGIC, _HEADER, _HEADER_SIZE,
+from mdlic.codec.container import (
+    CURRENT_VERSION,
+    V2_CHECKSUM_SIZE,
+    V2_FIXED_HEADER_SIZE,
+    build_legacy_v1_container_bytes,
+    canonical_sha256,
+    make_codec_identity,
+    parse_container,
+    sha256_rgb_bytes,
+    validate_decoded_rgb,
 )
+from scripts.verify_lossless import (
+    _build_container_bytes,
+    _parse_container_meta,
+    _read_container,
+    _read_container_bytes,
+    _write_container,
+)
+
+
+SOURCE_RGB = b"synthetic decoded RGB bytes"
+SOURCE_SHA256 = sha256_rgb_bytes(SOURCE_RGB)
+
+
+def _identity(
+    *,
+    checkpoint="11" * 32,
+    config=None,
+    protocol=None,
+    schedule=None,
+    runtime=None,
+):
+    return make_codec_identity(
+        model_type="ccigpt",
+        model_config=config or {"type": "ccigpt", "d_model": 16},
+        checkpoint_sha256=checkpoint,
+        codec_protocol=protocol,
+        schedule=schedule,
+        runtime=runtime or {"torch": "test", "device_type": "cpu"},
+    )
 
 
 def _rand_bits(n):
     return [random.randint(0, 1) for _ in range(n)]
 
 
-def test_build_read_roundtrip_dual():
-    """双尺度：build → read 必须逐位还原 coarse/fine bit 列表与 H/C。"""
-    random.seed(0)
-    H, C = 32, 3
-    c_bits = _rand_bits(517)      # 非字节对齐，验证 padding 处理
-    f_bits = _rand_bits(24690)
-    blob = _build_container_bytes(True, H, C, c_bits, f_bits)
-    dual, rH, rC, rc, rf = _read_container_bytes(blob)
-    assert dual is True
-    assert (rH, rC) == (H, C)
-    assert rc == c_bits
-    assert rf == f_bits
+def _build(*, dual=True):
+    random.seed(7)
+    coarse = _rand_bits(517) if dual else []
+    fine = _rand_bits(8001)
+    return _build_container_bytes(
+        dual,
+        32,
+        3,
+        coarse,
+        fine,
+        identity=_identity(),
+        source_rgb_sha256=SOURCE_SHA256,
+    ), coarse, fine
 
 
-def test_build_read_roundtrip_single():
-    """单尺度：coarse 为空，fine 即整串。"""
-    random.seed(1)
-    H, C = 32, 3
-    f_bits = _rand_bits(8001)
-    blob = _build_container_bytes(False, H, C, [], f_bits)
-    dual, rH, rC, rc, rf = _read_container_bytes(blob)
-    assert dual is False
-    assert (rH, rC) == (H, C)
-    assert rc == []
-    assert rf == f_bits
+@pytest.mark.parametrize("dual", [False, True])
+def test_v2_default_roundtrip(dual):
+    blob, coarse, fine = _build(dual=dual)
+    parsed = parse_container(blob, expected_identity=_identity())
+    result = _read_container_bytes(blob, expected_identity=_identity())
+
+    assert parsed.version == CURRENT_VERSION
+    assert parsed.integrity_verified is True
+    assert result == (dual, 32, 3, coarse, fine)
 
 
-def test_build_read_roundtrip_imagenet64_geometry():
-    """大图几何（64×64×3）也应正确 round-trip（H/C 各占 1 字节，64 在范围内）。"""
-    random.seed(2)
-    H, C = 64, 3
-    c_bits = _rand_bits(2048)
-    f_bits = _rand_bits(100003)
-    blob = _build_container_bytes(True, H, C, c_bits, f_bits)
-    dual, rH, rC, rc, rf = _read_container_bytes(blob)
-    assert (dual, rH, rC) == (True, H, C)
-    assert rc == c_bits and rf == f_bits
+def test_v1_is_read_only_compatible():
+    coarse = [1, 0, 1]
+    fine = [0, 1] * 7
+    blob = build_legacy_v1_container_bytes(True, 32, 3, coarse, fine)
+
+    assert _read_container_bytes(blob) == (True, 32, 3, coarse, fine)
+    meta = _parse_container_meta(blob)
+    assert meta["version"] == 1
+    assert meta["integrity_verified"] is False
+    assert meta["integrity"] == "structural-only-legacy-v1"
+    assert meta["model_bound"] is False
+    with pytest.raises(ValueError, match="no model/protocol identity"):
+        _read_container_bytes(blob, expected_identity=_identity())
 
 
-def test_parse_meta_fields():
-    """_parse_container_meta 的尺寸/码长/bpd/自洽校验字段正确。"""
-    random.seed(3)
-    H, C = 32, 3
-    c_bits = _rand_bits(600)        # 600 bit → 75 byte（对齐）
-    f_bits = _rand_bits(24000)      # 24000 bit → 3000 byte（对齐）
-    blob = _build_container_bytes(True, H, C, c_bits, f_bits)
-    m = _parse_container_meta(blob)
+def test_v2_metadata_and_rate_fields():
+    blob, coarse, fine = _build()
+    meta = _parse_container_meta(blob)
 
-    assert m["magic"] == "MDLC"
-    assert m["version"] == 1
-    assert m["dual"] is True
-    assert (m["H"], m["C"]) == (H, C)
-    assert m["n_subpix"] == H * H * C
-    assert m["coarse_nbits"] == 600
-    assert m["fine_nbits"] == 24000
-    assert m["total_bits"] == 24600
-    assert m["coarse_nbytes"] == 75
-    assert m["fine_nbytes"] == 3000
-    # payload = 75 + 3000；header 16B
-    assert m["payload_bytes"] == 3075
-    assert m["total_bytes"] == _HEADER_SIZE + 3075
-    assert m["self_consistent"] is True
-    assert m["bpd"] == pytest.approx(24600 / (32 * 32 * 3))
-    # header_hex 是 16 字节 = 16 组两位 hex
-    assert len(m["header_hex"].split()) == _HEADER_SIZE
+    assert meta["magic"] == "MDLC"
+    assert meta["version"] == 2
+    assert (meta["H"], meta["W"], meta["C"]) == (32, 32, 3)
+    assert meta["fixed_header_size"] == V2_FIXED_HEADER_SIZE
+    assert meta["checksum_bytes"] == V2_CHECKSUM_SIZE
+    assert meta["payload_bytes"] == (len(coarse) + 7) // 8 + (len(fine) + 7) // 8
+    assert meta["header_size"] == (
+        meta["fixed_header_size"] + meta["metadata_bytes"] + meta["checksum_bytes"]
+    )
+    assert meta["total_bytes"] == meta["header_size"] + meta["payload_bytes"]
+    assert meta["payload_bpd"] == pytest.approx(
+        (len(coarse) + len(fine)) / (32 * 32 * 3)
+    )
+    assert meta["file_bpd"] == pytest.approx(len(blob) * 8 / (32 * 32 * 3))
+    assert meta["source_rgb_sha256"] == SOURCE_SHA256
+    assert meta["codec_identity"] == _identity()
 
 
-def test_parse_meta_non_byte_aligned_bpd():
-    """非字节对齐 bit 数下 bpd 仍按真实 bit 数算（而非按字节）。"""
-    H, C = 32, 3
-    c_bits = [1] * 7         # 7 bit → 1 byte（含 1 bit padding）
-    f_bits = [0] * 9         # 9 bit → 2 byte（含 7 bit padding）
-    blob = _build_container_bytes(True, H, C, c_bits, f_bits)
-    m = _parse_container_meta(blob)
-    assert m["total_bits"] == 16          # 真实 bit 数，不含 padding
-    assert m["bpd"] == pytest.approx(16 / (32 * 32 * 3))
-    assert m["self_consistent"] is True   # payload 3B = 1 + 2
+@pytest.mark.parametrize("region", ["header", "metadata", "payload", "checksum"])
+def test_v2_rejects_bit_flip_in_every_region(region):
+    blob, _, _ = _build()
+    parsed = parse_container(blob)
+    positions = {
+        "header": 6,
+        "metadata": V2_FIXED_HEADER_SIZE + 3,
+        "payload": V2_FIXED_HEADER_SIZE + parsed.metadata_size,
+        "checksum": len(blob) - 1,
+    }
+    corrupted = bytearray(blob)
+    corrupted[positions[region]] ^= 0x01
 
-
-def test_bad_magic_raises():
-    blob = b"XXXX" + b"\x00" * 32
-    with pytest.raises(ValueError, match="MDLC"):
-        _read_container_bytes(blob)
-    with pytest.raises(ValueError, match="MDLC"):
-        _parse_container_meta(blob)
-
-
-def test_truncated_header_raises():
-    """文件小于 header 大小 → parse 报错（损坏检测）。"""
-    blob = b"MDLC" + b"\x01\x01"   # 只有 6 字节 < 16
     with pytest.raises(ValueError):
-        _parse_container_meta(blob)
+        parse_container(corrupted)
 
 
-def test_bad_version_raises():
-    """版本号不符 → read 报错。"""
-    # 手工拼一个 version=99 的 header（其余字段随意但合法）
-    header = struct.pack(_HEADER, _MAGIC, 99, 1, 32, 3, 0, 8)
-    blob = header + b"\x00"   # fine 8 bit = 1 byte
-    with pytest.raises(ValueError, match="版本"):
-        _read_container_bytes(blob)
+def test_v2_rejects_wrong_checkpoint_config_protocol_schedule_and_runtime():
+    blob, _, _ = _build()
+    protocol = {
+        "name": "different-coder",
+        "first_token_prior": "uniform-256",
+        "cdf": {"total": 65536, "quantizer": "different"},
+    }
+    schedule = {
+        "name": "different-order",
+        "stream_order": "coarse-then-fine",
+        "within_stream": "right-to-left",
+    }
+    mismatches = {
+        "checkpoint_sha256": _identity(checkpoint="22" * 32),
+        "model_config_sha256": _identity(config={"type": "ccigpt", "d_model": 32}),
+        "codec_protocol_sha256": _identity(protocol=protocol),
+        "schedule_sha256": _identity(schedule=schedule),
+        "runtime_sha256": _identity(runtime={"torch": "other", "device_type": "cpu"}),
+    }
+
+    for field, expected in mismatches.items():
+        with pytest.raises(ValueError, match=field):
+            parse_container(blob, expected_identity=expected)
 
 
-def test_write_matches_build(tmp_path):
-    """落盘 _write_container 与内存 _build_container_bytes 逐字节一致。"""
-    random.seed(4)
-    H, C = 32, 3
-    c_bits = _rand_bits(333)
-    f_bits = _rand_bits(12345)
-    expect = _build_container_bytes(True, H, C, c_bits, f_bits)
+def test_identity_rejects_internal_protocol_hash_mismatch():
+    identity = copy.deepcopy(_identity())
+    identity["codec_protocol"]["name"] = "tampered"
+    with pytest.raises(ValueError, match="codec_protocol"):
+        _build_container_bytes(
+            False,
+            32,
+            3,
+            [],
+            [1],
+            identity=identity,
+            source_rgb_sha256=SOURCE_SHA256,
+        )
 
-    p = tmp_path / "img.bin"
-    nbytes = _write_container(str(p), True, H, C, c_bits, f_bits)
-    on_disk = p.read_bytes()
-    assert on_disk == expect
-    assert nbytes == len(expect)
 
-    # 读文件路径与读字节路径解出的内容一致
-    dual, rH, rC, rc, rf = _read_container(str(p))
-    assert (dual, rH, rC) == (True, H, C)
-    assert rc == c_bits and rf == f_bits
+def test_decoded_rgb_checksum_is_enforced():
+    blob, _, _ = _build()
+    meta = _parse_container_meta(blob)
+
+    validate_decoded_rgb(SOURCE_RGB, meta)
+    with pytest.raises(ValueError, match="decoded RGB checksum mismatch"):
+        validate_decoded_rgb(SOURCE_RGB + b"corrupt", meta)
+
+
+def test_truncation_trailing_bytes_and_bad_magic_are_rejected():
+    blob, _, _ = _build()
+    for invalid in (blob[:-1], blob + b"extra", b"XXXX" + blob[4:]):
+        with pytest.raises(ValueError):
+            _parse_container_meta(invalid)
+
+
+def test_build_rejects_invalid_geometry_streams_and_digest():
+    identity = _identity()
+    with pytest.raises(ValueError, match="H"):
+        _build_container_bytes(
+            False, 0, 3, [], [1], identity=identity, source_rgb_sha256=SOURCE_SHA256
+        )
+    with pytest.raises(ValueError, match="dual"):
+        _build_container_bytes(
+            False, 32, 3, [1], [1], identity=identity,
+            source_rgb_sha256=SOURCE_SHA256,
+        )
+    with pytest.raises(ValueError, match="source_rgb_sha256"):
+        _build_container_bytes(
+            False, 32, 3, [], [1], identity=identity, source_rgb_sha256="bad"
+        )
+
+
+def test_write_matches_build_and_enforces_identity_on_read(tmp_path):
+    blob, coarse, fine = _build()
+    path = tmp_path / "image.mdlc"
+    written = _write_container(
+        path,
+        True,
+        32,
+        3,
+        coarse,
+        fine,
+        identity=_identity(),
+        source_rgb_sha256=SOURCE_SHA256,
+    )
+
+    assert path.read_bytes() == blob
+    assert written == len(blob)
+    assert _read_container(path, expected_identity=_identity()) == (
+        True,
+        32,
+        3,
+        coarse,
+        fine,
+    )
+
+
+def test_make_identity_hashes_canonical_config():
+    first = _identity(config={"type": "ccigpt", "nested": {"a": 1, "b": 2}})
+    second = _identity(config={"nested": {"b": 2, "a": 1}, "type": "ccigpt"})
+    assert first["model_config_sha256"] == second["model_config_sha256"]
+    assert first["model_config_sha256"] == canonical_sha256(
+        {"type": "ccigpt", "nested": {"a": 1, "b": 2}}
+    )

@@ -5,6 +5,7 @@ Training script for iGPT autoregressive image compression.
 Usage:
     python scripts/train.py --config configs/igpt_cifar10_s_rgb.yaml
     python scripts/train.py --config configs/igpt_cifar10_s_rgb.yaml --resume experiments/.../epoch_10.pth
+    python scripts/train.py --config configs/igpt_cifar10_s_rgb.yaml --init_from experiments/.../best.pth
     torchrun --nproc_per_node=2 scripts/train.py --config configs/igpt_cifar10_s_rgb.yaml
 """
 
@@ -12,6 +13,8 @@ import os
 import sys
 import csv
 import json
+import hashlib
+import random
 import argparse
 import yaml
 import math
@@ -19,7 +22,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from contextlib import nullcontext
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Sampler
 from torch.utils.data.distributed import DistributedSampler
 import torch.distributed as dist
 from torch.amp import autocast, GradScaler
@@ -28,11 +31,57 @@ import numpy as np
 from torchvision import transforms
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
-from src.mdlic.models.igpt import IGPT
-from src.mdlic.models.cc_igpt import CCIGPT
-from src.mdlic.models.layers import get_fused_kernel_status
-from src.mdlic.utils import seed_everything, compute_bpd, clean_state_dict
+from mdlic.models.igpt import IGPT
+from mdlic.models.cc_igpt import CCIGPT
+from mdlic.models.layers import get_fused_kernel_status
+from mdlic.eval_metrics import per_image_bpd
+from mdlic.provenance import (
+    canonical_sha256 as _canonical_provenance_hash,
+    dataset_record,
+    git_metadata,
+    runtime_metadata,
+    source_tree_record,
+)
+from mdlic.utils import seed_everything, compute_bpd, clean_state_dict
+
+
+TRAINING_STATE_SCHEMA = "mdlic-training-state-v3"
+LEGACY_TRAINING_STATE_SCHEMA = "mdlic-training-state-v2"
+
+
+class DistributedEvalSampler(Sampler):
+    """Deterministically shard evaluation data without padding or dropping.
+
+    Shards may differ by one sample, so validation must call the unwrapped model:
+    DDP forward can perform buffer collectives and would hang when ranks execute a
+    different number of batches.
+    """
+
+    def __init__(self, dataset, num_replicas=None, rank=None):
+        if num_replicas is None:
+            if not dist.is_available() or not dist.is_initialized():
+                raise RuntimeError("distributed process group is not initialized")
+            num_replicas = dist.get_world_size()
+        if rank is None:
+            if not dist.is_available() or not dist.is_initialized():
+                raise RuntimeError("distributed process group is not initialized")
+            rank = dist.get_rank()
+        if not isinstance(num_replicas, int) or num_replicas <= 0:
+            raise ValueError(f"num_replicas must be positive, got {num_replicas!r}")
+        if not isinstance(rank, int) or not 0 <= rank < num_replicas:
+            raise ValueError(f"rank must be in [0,{num_replicas}), got {rank!r}")
+        self.dataset = dataset
+        self.num_replicas = num_replicas
+        self.rank = rank
+
+    def __iter__(self):
+        return iter(range(self.rank, len(self.dataset), self.num_replicas))
+
+    def __len__(self):
+        remaining = len(self.dataset) - self.rank
+        return 0 if remaining <= 0 else (remaining + self.num_replicas - 1) // self.num_replicas
 
 
 def _validate_config(config: dict):
@@ -173,7 +222,7 @@ def _no_decay_param_names(model) -> set:
     用 isinstance(module, …) 识别 norm/embedding 层，避免子串 'norm' 误匹配（例如
     未来若把模块命名成 `normalizer` / `ln1` 都会静默改变 wd 行为）。
     """
-    from src.mdlic.models.layers import RMSNorm
+    from mdlic.models.layers import RMSNorm
     no_decay_modules = (nn.Embedding, RMSNorm, nn.LayerNorm)
     no_decay = set()
     for module_name, module in model.named_modules():
@@ -235,18 +284,317 @@ def _atomic_save_json(obj, path: str):
     os.replace(tmp_path, path)
 
 
+def _canonical_config_hash(value) -> str:
+    """Stable SHA256 for JSON-compatible config fragments."""
+    encoded = json.dumps(
+        _json_ready(value), ensure_ascii=False, sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _validate_resume_checkpoint(
+    checkpoint: dict,
+    *,
+    config: dict,
+    seed: int,
+    world_size: int,
+    provenance_fingerprint: str | None = None,
+    allow_legacy_resume: bool = False,
+    optimizer_count: int,
+    scheduler_required: bool,
+    scaler_required: bool,
+    swa_enabled: bool,
+    ema_enabled: bool,
+) -> None:
+    """Require every state needed to continue the same optimization run."""
+    if not isinstance(checkpoint, dict):
+        raise RuntimeError("--resume requires a training-state checkpoint mapping")
+    schema = checkpoint.get("schema")
+    legacy_resume = schema == LEGACY_TRAINING_STATE_SCHEMA
+    if legacy_resume and not allow_legacy_resume:
+        raise RuntimeError(
+            "--resume checkpoint predates source/runtime/data provenance; "
+            "pass --allow_legacy_resume to acknowledge non-exact provenance, "
+            "or use --init_from"
+        )
+    if schema not in (TRAINING_STATE_SCHEMA, LEGACY_TRAINING_STATE_SCHEMA):
+        raise RuntimeError(
+            f"--resume requires schema {TRAINING_STATE_SCHEMA!r}; "
+            "use --init_from for bare or legacy weights"
+        )
+
+    required = {
+        "epoch",
+        "model_state_dict",
+        "optimizer_state_dicts",
+        "best_bpd",
+        "config_sha256",
+        "model_config_sha256",
+        "seed",
+        "world_size",
+        "rng_states_by_rank",
+    }
+    if not legacy_resume:
+        required.update(("provenance", "provenance_sha256"))
+    if scheduler_required:
+        required.add("scheduler_state_dict")
+    if scaler_required:
+        required.add("scaler_state_dict")
+    if swa_enabled:
+        required.update(("swa_state", "swa_n"))
+    if ema_enabled:
+        required.update(("ema_state", "ema_tick"))
+    missing = sorted(required - checkpoint.keys())
+    if missing:
+        raise RuntimeError(
+            "--resume checkpoint is incomplete; missing: " + ", ".join(missing)
+        )
+
+    if not legacy_resume:
+        if provenance_fingerprint is None:
+            raise RuntimeError("strict resume requires the current provenance fingerprint")
+        checkpoint_provenance = checkpoint["provenance"]
+        if not isinstance(checkpoint_provenance, dict):
+            raise RuntimeError("--resume checkpoint provenance must be a mapping")
+        recorded_fingerprint = checkpoint_provenance.get("fingerprint_sha256")
+        if checkpoint["provenance_sha256"] != recorded_fingerprint:
+            raise RuntimeError("--resume checkpoint provenance hash is internally inconsistent")
+        if recorded_fingerprint != provenance_fingerprint:
+            raise RuntimeError(
+                "--resume provenance mismatch: execution source, runtime, or dataset changed; "
+                "use the original environment or --init_from"
+            )
+
+    if checkpoint["model_config_sha256"] != _canonical_config_hash(config["model"]):
+        raise RuntimeError("--resume model config hash mismatch; use --init_from for migration")
+    if checkpoint["config_sha256"] != _canonical_config_hash(config):
+        raise RuntimeError("--resume full config hash mismatch; use the original config or --init_from")
+    if checkpoint["seed"] != seed:
+        raise RuntimeError(
+            f"--resume seed mismatch: checkpoint={checkpoint['seed']} current={seed}"
+        )
+    if checkpoint["world_size"] != world_size:
+        raise RuntimeError(
+            "--resume world_size mismatch: "
+            f"checkpoint={checkpoint['world_size']} current={world_size}"
+        )
+    if not isinstance(checkpoint["epoch"], int) or checkpoint["epoch"] < 0:
+        raise RuntimeError("--resume checkpoint epoch must be a non-negative integer")
+
+    optimizer_states = checkpoint["optimizer_state_dicts"]
+    if not isinstance(optimizer_states, list) or len(optimizer_states) != optimizer_count:
+        raise RuntimeError(
+            "--resume optimizer count mismatch: "
+            f"checkpoint={len(optimizer_states) if isinstance(optimizer_states, list) else 'invalid'} "
+            f"current={optimizer_count}"
+        )
+    rng_states = checkpoint["rng_states_by_rank"]
+    if not isinstance(rng_states, list) or len(rng_states) != world_size:
+        raise RuntimeError(
+            "--resume requires exactly one RNG state per rank: "
+            f"checkpoint={len(rng_states) if isinstance(rng_states, list) else 'invalid'} "
+            f"current={world_size}"
+        )
+
+
+def _load_init_from_state_dict(model, checkpoint: dict) -> dict:
+    """Load shape-compatible weights only and report migration coverage."""
+    if not isinstance(checkpoint, dict):
+        raise RuntimeError("--init_from checkpoint must be a state_dict or mapping")
+    source = checkpoint.get("model_state_dict", checkpoint)
+    if not isinstance(source, dict):
+        raise RuntimeError("--init_from checkpoint has no valid model state_dict")
+    source = clean_state_dict(source)
+    target = model.state_dict()
+
+    compatible = {}
+    unexpected = []
+    shape_mismatch = []
+    for name, value in source.items():
+        if name not in target:
+            unexpected.append(name)
+        elif not torch.is_tensor(value) or value.shape != target[name].shape:
+            shape_mismatch.append(name)
+        else:
+            compatible[name] = value
+
+    parameter_numel = {name: value.numel() for name, value in model.named_parameters()}
+    matched_parameter_numel = sum(
+        parameter_numel[name] for name in compatible if name in parameter_numel
+    )
+    total_parameter_numel = sum(parameter_numel.values())
+    if matched_parameter_numel == 0:
+        raise RuntimeError("--init_from matched no trainable model parameters")
+
+    incompatible = model.load_state_dict(compatible, strict=False)
+    return {
+        "matched_keys": len(compatible),
+        "missing_keys": len(incompatible.missing_keys),
+        "unexpected_keys": len(unexpected),
+        "shape_mismatch_keys": len(shape_mismatch),
+        "matched_parameter_numel": matched_parameter_numel,
+        "total_parameter_numel": total_parameter_numel,
+        "parameter_coverage": matched_parameter_numel / total_parameter_numel,
+    }
+
+
+def _capture_rng_state() -> dict:
+    state = {
+        "python": random.getstate(),
+        "numpy": np.random.get_state(),
+        "torch_cpu": torch.get_rng_state(),
+    }
+    if torch.cuda.is_available():
+        state["torch_cuda"] = torch.cuda.get_rng_state_all()
+    return state
+
+
+def _restore_rng_state(state: dict) -> None:
+    """Restore a state produced by _capture_rng_state, including CUDA ranks."""
+    if not state:
+        return
+    random.setstate(state["python"])
+    np.random.set_state(state["numpy"])
+    torch.set_rng_state(state["torch_cpu"].cpu())
+    if "torch_cuda" in state and torch.cuda.is_available():
+        torch.cuda.set_rng_state_all([rng.cpu() for rng in state["torch_cuda"]])
+
+
+def _gather_rng_states(distributed: bool, rank: int):
+    """Collect one RNG snapshot per rank; return the list on rank 0 only."""
+    local_state = _capture_rng_state()
+    if not distributed:
+        return [local_state]
+    gathered = [None] * dist.get_world_size() if rank == 0 else None
+    dist.gather_object(local_state, gathered, dst=0)
+    return gathered
+
+
+_CSV_HEADER = [
+    "epoch", "train_loss", "train_bpd", "val_loss",
+    "val_bpd", "val_bpd_std", "lr",
+]
+
+
+def _open_training_csv(path: str, resume: bool, start_epoch: int):
+    """Open a curve CSV without truncating or duplicating resumed epochs."""
+    if resume and os.path.exists(path):
+        with open(path, "r", newline="") as existing:
+            rows = list(csv.reader(existing))
+        if not rows or rows[0] != _CSV_HEADER:
+            raise ValueError(f"CSV header 不兼容: {path}")
+        data_rows = [row for row in rows[1:] if row]
+        if data_rows:
+            try:
+                last_epoch = int(data_rows[-1][0])
+            except (ValueError, IndexError) as exc:
+                raise ValueError(f"CSV 最后一行 epoch 非法: {path}") from exc
+            if last_epoch >= start_epoch:
+                raise ValueError(
+                    f"CSV 已记录到 epoch {last_epoch}，但 resume 将从 {start_epoch} 开始；"
+                    "拒绝写入重复/倒序曲线")
+        fh = open(path, "a", newline="")
+        return fh, csv.writer(fh)
+
+    fh = open(path, "w", newline="")
+    writer = csv.writer(fh)
+    writer.writerow(_CSV_HEADER)
+    fh.flush()
+    return fh, writer
+
+
+def _build_training_provenance(
+    config: dict,
+    train_dataset,
+    valid_dataset,
+    dataset_name: str,
+    device,
+) -> dict:
+    """Capture immutable execution inputs once at training startup."""
+    source = source_tree_record()
+    git = git_metadata(source_tree=source)
+    runtime = runtime_metadata(device)
+    augment = config["data"].get("augment", {}) or {}
+    common_preprocessing = {
+        "schema": "mdlic-training-data-v1",
+        "storage": (
+            "uint8 HWC npy -> float32 CHW / 255"
+            if dataset_name == "imagenet64_npy"
+            else "torchvision CIFAR uint8 HWC -> float32 CHW / 255"
+        ),
+    }
+    datasets = {
+        "train": dataset_record(
+            train_dataset,
+            name=dataset_name,
+            split="train",
+            configured_path=config["data"].get("train"),
+            preprocessing={
+                **common_preprocessing,
+                "augmentation": augment,
+            },
+        ),
+        "validation": dataset_record(
+            valid_dataset,
+            name=dataset_name,
+            split="test" if dataset_name in ("cifar10", "cifar100") else "val",
+            configured_path=config["data"].get("valid"),
+            preprocessing={
+                **common_preprocessing,
+                "augmentation": None,
+            },
+        ),
+    }
+    identity = {
+        "schema": "mdlic-training-provenance-v1",
+        "execution_source_sha256": source["fingerprint_sha256"],
+        "runtime": runtime,
+        "dataset_fingerprints": {
+            split: record["fingerprint_sha256"]
+            for split, record in datasets.items()
+        },
+    }
+    return {
+        **identity,
+        "git": git,
+        "datasets": datasets,
+        "fingerprint_sha256": _canonical_provenance_hash(identity),
+    }
+
+
+def _broadcast_rank0_object(value, *, distributed: bool, rank: int, device):
+    if not distributed:
+        return value
+    values = [value if rank == 0 else None]
+    dist.broadcast_object_list(values, src=0, device=device)
+    return values[0]
+
+
 def _checkpoint_meta(config: dict, args, epoch: int, kind: str, seed: int,
-                     metrics: dict, extra: dict = None) -> dict:
+                     metrics: dict, extra: dict = None,
+                     provenance: dict | None = None) -> dict:
     """Small, human-readable metadata sidecar for checkpoint provenance."""
     mcfg = config.get("model", {})
     tcfg = config.get("train", {})
     return {
+        "metadata_schema": "mdlic-checkpoint-meta-v3",
+        "checkpoint_semantics": "weights-only",
+        "resume_capable": False,
         "kind": kind,
         "epoch": epoch,
         "exp_name": config.get("exp_name"),
         "config_path": getattr(args, "config", None),
         "resume_path": getattr(args, "resume", None),
+        "init_from_path": getattr(args, "init_from", None),
+        "initialization_mode": (
+            "resume" if getattr(args, "resume", None)
+            else "init_from" if getattr(args, "init_from", None)
+            else "scratch"
+        ),
         "seed": seed,
+        "config_sha256": _canonical_config_hash(config),
+        "model_config_sha256": _canonical_config_hash(mcfg),
         "model": {
             "type": mcfg.get("type", "igpt"),
             "image_size": mcfg.get("image_size"),
@@ -270,6 +618,7 @@ def _checkpoint_meta(config: dict, args, epoch: int, kind: str, seed: int,
         },
         "metrics": metrics,
         "extra": extra or {},
+        "provenance": provenance,
     }
 
 
@@ -283,6 +632,31 @@ def _grad_accum_window_size(step_index: int, steps: int, grad_accum_steps: int) 
     return grad_accum_steps
 
 
+def _global_weighted_means(metric_sums: dict[str, torch.Tensor], sample_count: int,
+                           device, distributed: bool) -> dict[str, float]:
+    """Convert sample-weighted sums into means, aggregating all ranks if needed."""
+    names = tuple(metric_sums)
+    packed = torch.stack([
+        *[
+            torch.as_tensor(metric_sums[name], device=device, dtype=torch.float64)
+            for name in names
+        ],
+        torch.tensor(float(sample_count), device=device, dtype=torch.float64),
+    ])
+    if distributed:
+        if not (dist.is_available() and dist.is_initialized()):
+            raise RuntimeError("distributed metric reduction requires an initialized process group")
+        dist.all_reduce(packed, op=dist.ReduceOp.SUM)
+
+    global_count = packed[-1].item()
+    if global_count <= 0:
+        raise RuntimeError("training loader produced no samples across all ranks")
+    return {
+        name: packed[index].item() / global_count
+        for index, name in enumerate(names)
+    }
+
+
 def train_one_epoch(model, loader, optimizers, scaler, device,
                     epoch, log_freq, writer, clip_max_norm,
                     amp_dtype=torch.float16, grad_accum_steps=1,
@@ -293,8 +667,9 @@ def train_one_epoch(model, loader, optimizers, scaler, device,
     格式 (optimizer_state_dicts list)。每个 step 都遍历列表分别 step/zero_grad。
     """
     model.train()
-    total_loss = 0
-    total_bpd = 0
+    total_loss = torch.zeros((), device=device, dtype=torch.float64)
+    total_bpd = torch.zeros((), device=device, dtype=torch.float64)
+    total_samples = 0
     steps = len(loader)
 
     for opt in optimizers:
@@ -307,6 +682,7 @@ def train_one_epoch(model, loader, optimizers, scaler, device,
             x = batch
 
         x = x.to(device)
+        batch_size = x.size(0)
 
         # DDP no_sync: 梯度累积中间步跳过 AllReduce，只在同步步通信。
         # Ref: PyTorch DDP 文档 — `DistributedDataParallel.no_sync()` 上下文
@@ -374,14 +750,28 @@ def train_one_epoch(model, loader, optimizers, scaler, device,
 
         # 用 tensor 累加，避免每步 .item() 触发 GPU→CPU 同步
         # Ref: CS336 — 只在 log 时才 .item()
-        total_loss += loss.detach()
-        total_bpd  += bpd.detach()
+        total_loss += loss.detach().double() * batch_size
+        total_bpd += bpd.detach().double() * batch_size
+        total_samples += batch_size
 
         # NaN/Inf 检测：loss 异常时提前警告，避免浪费 GPU 时间
         # Ref: PyTorch Lightning — NaN detection callback 的设计思路
         if (i + 1) % log_freq == 0:
-            loss_val = loss.item()
-            bpd_val  = bpd.item()
+            log_sums = {
+                "loss": loss.detach().double() * batch_size,
+                "bpd": bpd.detach().double() * batch_size,
+            }
+            if "ce_loss_coarse" in out and "ce_loss_fine" in out:
+                log_sums.update({
+                    "ce_coarse": out["ce_loss_coarse"].detach().double() * batch_size,
+                    "ce_fine": out["ce_loss_fine"].detach().double() * batch_size,
+                    "ctx_alpha": out["ctx_alpha"].detach().double() * batch_size,
+                })
+            log_means = _global_weighted_means(
+                log_sums, batch_size, device=device, distributed=distributed,
+            )
+            loss_val = log_means["loss"]
+            bpd_val = log_means["bpd"]
             if not math.isfinite(loss_val) and rank == 0:
                 print(f"WARNING: loss is {loss_val} at epoch {epoch} step {i+1}/{steps}. "
                       f"LR={optimizers[0].param_groups[0]['lr']:.2e}. Training may diverge.")
@@ -392,9 +782,9 @@ def train_one_epoch(model, loader, optimizers, scaler, device,
                 # iGPT 单尺度无 coarse overhead，保留 Loss + bpd 双轴。
                 if "ce_loss_coarse" in out and "ce_loss_fine" in out:
                     print(f"Epoch {epoch} Step {i+1}/{steps} | bits/dim: {bpd_val:.4f}"
-                          f" | CE_c: {out['ce_loss_coarse'].item():.4f}"
-                          f" | CE_f: {out['ce_loss_fine'].item():.4f}"
-                          f" | α: {out['ctx_alpha'].item():.3f}")
+                          f" | CE_c: {log_means['ce_coarse']:.4f}"
+                          f" | CE_f: {log_means['ce_fine']:.4f}"
+                          f" | α: {log_means['ctx_alpha']:.3f}")
                 else:
                     print(f"Epoch {epoch} Step {i+1}/{steps} | Loss: {loss_val:.4f} | bits/dim: {bpd_val:.4f}")
             if writer:
@@ -402,37 +792,38 @@ def train_one_epoch(model, loader, optimizers, scaler, device,
                 writer.add_scalar('train/loss', loss_val, step)
                 writer.add_scalar('train/bpd',  bpd_val,  step)
                 if "ce_loss_coarse" in out and "ce_loss_fine" in out:
-                    writer.add_scalar('train/ce_coarse', out['ce_loss_coarse'].item(), step)
-                    writer.add_scalar('train/ce_fine',   out['ce_loss_fine'].item(),   step)
-                    writer.add_scalar('train/ctx_alpha', out['ctx_alpha'].item(),      step)
+                    writer.add_scalar('train/ce_coarse', log_means['ce_coarse'], step)
+                    writer.add_scalar('train/ce_fine',   log_means['ce_fine'],   step)
+                    writer.add_scalar('train/ctx_alpha', log_means['ctx_alpha'], step)
 
-    return total_loss.item() / steps, total_bpd.item() / steps
+    return_values = _global_weighted_means(
+        {"loss": total_loss, "bpd": total_bpd},
+        total_samples,
+        device=device,
+        distributed=distributed,
+    )
+    return return_values["loss"], return_values["bpd"]
 
 
 # ==================== Validation ====================
 @torch.no_grad()
 def validate(model, loader, device, amp_dtype=None):
-    """验证集评估，返回 (avg_bpd, std_bpd_batch, avg_loss)。
+    """验证集评估，返回 (avg_bpd, std_bpd_per_image, avg_loss)。
 
-    DDP-aware：每个 rank 通过 DistributedSampler 处理一个分片，最后用
-    all_reduce(SUM) 聚合 weighted sums + n_total，避免 rank 0 单跑导致 barrier 超时。
+    DDP-aware：每个 rank 通过无 padding sampler 处理唯一分片，最后用
+    all_reduce(SUM) 聚合 weighted sums + n_total。调用方必须传 unwrapped model，
+    因为不等长分片不能安全经过可能执行 buffer collective 的 DDP forward。
 
     amp_dtype: 传入 AMP dtype（如 torch.bfloat16）以在验证时也使用混合精度，
                减少显存占用和加速。None 则使用 fp32。
 
-    std_bpd 语义（重要，论文报告时注意）:
-        当前的 `std_bpd` 是 **batch 级加权波动**，不是图像级标准差。
-        公式 var = E[batch_mean_bpd² · B] / n_total − avg_bpd² 里 batch_mean_bpd
-        已经是 batch 内平均，按 B 加权后得到的是 batch 间平均 bpd 的加权方差，
-        数值通常比 per-image std 小（batch 内部方差被平均抹掉）。
-        论文若要报告 per-image std，需让 forward 返回 reduction='none' 的
-        per-token/per-image CE 后重算。此处保留 batch-level 便于训练监控，
-        evaluate.py cmd_single 也使用同样语义。
+    std_bpd 是逐图样本标准差，与 evaluate.py 使用同一共享实现；改变 batch size
+    或 DDP 分片不会改变统计含义。
     """
     model.eval()
     total_bpd_weighted = 0.0
     total_loss_weighted = 0.0
-    sum_sq_bpd_batch = 0.0   # Σ (batch_mean_bpd)² · B ，batch-level std
+    sum_sq_bpd_image = 0.0
     n_total = 0
     use_amp = amp_dtype is not None and device.type == 'cuda'
     for batch in loader:
@@ -445,31 +836,28 @@ def validate(model, loader, device, amp_dtype=None):
         with autocast(device_type="cuda", dtype=amp_dtype) if use_amp else nullcontext():
             out = model(x)
         loss = out["loss"]
-        ce_loss = out["ce_loss"]
-        if "bpd" in out and out["bpd"] is not None:
-            bpd = out["bpd"]
-        else:
-            bpd = compute_bpd(ce_loss)
-        bpd_val = bpd.item()
+        bpd_image = per_image_bpd(model, x, out)
         loss_val = loss.item()
-        total_bpd_weighted += bpd_val * B
+        total_bpd_weighted += bpd_image.double().sum().item()
         total_loss_weighted += loss_val * B
-        sum_sq_bpd_batch += (bpd_val ** 2) * B
+        sum_sq_bpd_image += bpd_image.double().square().sum().item()
         n_total += B
 
     # DDP 聚合：跨 rank 求和后再求平均，结果在所有 rank 上一致
     if dist.is_available() and dist.is_initialized():
-        agg = torch.tensor([total_bpd_weighted, total_loss_weighted, sum_sq_bpd_batch, float(n_total)],
+        agg = torch.tensor([total_bpd_weighted, total_loss_weighted, sum_sq_bpd_image, float(n_total)],
                            device=device, dtype=torch.float64)
         dist.all_reduce(agg, op=dist.ReduceOp.SUM)
-        total_bpd_weighted, total_loss_weighted, sum_sq_bpd_batch, n_total_f = agg.tolist()
+        total_bpd_weighted, total_loss_weighted, sum_sq_bpd_image, n_total_f = agg.tolist()
         n_total = int(n_total_f)
 
+    if n_total <= 0:
+        raise RuntimeError("validation loader produced no samples across all ranks")
     avg_bpd = total_bpd_weighted / n_total
     avg_loss = total_loss_weighted / n_total
-    var_bpd_batch = max(sum_sq_bpd_batch / n_total - avg_bpd ** 2, 0.0)
-    std_bpd_batch = float(math.sqrt(var_bpd_batch))
-    return avg_bpd, std_bpd_batch, avg_loss
+    centered_sum = max(sum_sq_bpd_image - n_total * avg_bpd ** 2, 0.0)
+    std_bpd_image = math.sqrt(centered_sum / (n_total - 1)) if n_total > 1 else 0.0
+    return avg_bpd, std_bpd_image, avg_loss
 
 
 
@@ -477,7 +865,19 @@ def validate(model, loader, device, amp_dtype=None):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, required=True, help='Path to config yaml')
-    parser.add_argument('--resume', type=str, default=None, help='Path to checkpoint to resume from')
+    initialization = parser.add_mutually_exclusive_group()
+    initialization.add_argument(
+        '--resume', type=str, default=None,
+        help='Strictly restore a complete MDLIC training-state checkpoint',
+    )
+    initialization.add_argument(
+        '--init_from', type=str, default=None,
+        help='Initialize shape-compatible model weights only; optimizer/epoch/RNG start fresh',
+    )
+    parser.add_argument(
+        '--allow_legacy_resume', action='store_true',
+        help='Allow v2 resume checkpoints that lack source/runtime/data provenance',
+    )
     # --seed: 命令行覆盖 config 中的 seed，方便多次独立运行取均值
     # 用法: python train.py --config ... --seed 0 / --seed 1 / --seed 2
     parser.add_argument('--seed', type=int, default=None, help='Random seed (overrides config)')
@@ -485,6 +885,8 @@ def main():
     parser.add_argument('--export_csv', action='store_true',
                         help='导出 loss/bpd/LR 曲线为 CSV 文件')
     args = parser.parse_args()
+    if args.allow_legacy_resume and not args.resume:
+        parser.error("--allow_legacy_resume requires --resume")
 
     if not os.path.isfile(args.config):
         raise FileNotFoundError(f"配置文件不存在: {args.config}")
@@ -519,23 +921,21 @@ def main():
     if distributed:
         local_rank = int(os.environ.get("LOCAL_RANK", 0))
         torch.cuda.set_device(local_rank)
-        # rank 0 单独跑 validation 期间，rank 1 在 barrier 等待，需放宽 NCCL 超时（默认 10min）
+        # 训练和验证指标都在各 rank 聚合；放宽超时以容纳长序列评测及 checkpoint I/O。
         from datetime import timedelta
         dist.init_process_group(backend='nccl', timeout=timedelta(hours=2))
         rank = dist.get_rank()
+        world_size = dist.get_world_size()
     else:
         local_rank = 0
         rank = 0
+        world_size = 1
 
     device = torch.device(f'cuda:{local_rank}' if distributed else 'cuda' if torch.cuda.is_available() else 'cpu')
     writer = SummaryWriter(log_dir=log_dir) if rank == 0 else None
 
-    if args.export_csv and rank == 0:
-        csv_path = os.path.join(log_dir, 'training_curves.csv')
-        csv_file = open(csv_path, 'w', newline='')
-        csv_writer = csv.writer(csv_file)
-        csv_writer.writerow(['epoch', 'train_loss', 'train_bpd', 'val_loss',
-                             'val_bpd', 'val_bpd_std', 'lr'])
+    csv_path = (os.path.join(log_dir, 'training_curves.csv')
+                if args.export_csv and rank == 0 else None)
 
     # Dataset: 根据 config 选择 CIFAR-10 / CIFAR-100 / ImageNet64 npy
     from torchvision.datasets import CIFAR10, CIFAR100
@@ -568,7 +968,7 @@ def main():
         train_dataset = DatasetClass(root=config["data"]["train"], train=True,  download=False, transform=train_transform)
         valid_dataset = DatasetClass(root=config["data"]["valid"], train=False, download=False, transform=valid_transform)
     elif dataset_name == "imagenet64_npy":
-        from src.mdlic.data.imagenet64_npy import ImageNet64Npy
+        from mdlic.data.imagenet64_npy import ImageNet64Npy
         if rank == 0 and crop_cfg:
             print("WARNING: data.augment.random_crop 在 imagenet64_npy 路径上当前未实现，已忽略")
         hflip_flag = bool(aug_cfg.get("hflip", False))
@@ -578,6 +978,25 @@ def main():
         raise ValueError(f"未知 dataset: '{dataset_name}'，支持 cifar10/cifar100/imagenet64_npy")
     if rank == 0:
         print(f"Dataset: {dataset_name} | Train: {len(train_dataset)} | Valid: {len(valid_dataset)}")
+
+    training_provenance = (
+        _build_training_provenance(
+            config, train_dataset, valid_dataset, dataset_name, device,
+        )
+        if rank == 0 else None
+    )
+    training_provenance = _broadcast_rank0_object(
+        training_provenance,
+        distributed=distributed,
+        rank=rank,
+        device=device,
+    )
+    if rank == 0:
+        print(
+            "Provenance: "
+            f"source={training_provenance['execution_source_sha256'][:12]} "
+            f"run={training_provenance['fingerprint_sha256'][:12]}"
+        )
 
     train_sampler = DistributedSampler(train_dataset, shuffle=True) if distributed else None
     train_loader = DataLoader(
@@ -592,12 +1011,9 @@ def main():
     # 验证集: batch_size 和 num_workers 从 config 读取，支持不同 GPU 显存调整
     valid_batch_size = config['data'].get('valid_batch_size', 64)
     valid_num_workers = config['data'].get('valid_num_workers', 2)
-    # drop_last=True: 避免 DistributedSampler 默认 padding（重复 dataset 头部样本
-    # 让每个 rank 拿到整除分片）造成验证集统计偏差。代价是最多丢 world_size-1
-    # 个样本（CIFAR-10/100 val=10000、ImageNet64 val=49999 在 world=2 下分别整除/丢 1 个，
-    # 不影响 bpd 数值精度）。
-    valid_sampler = (DistributedSampler(valid_dataset, shuffle=False, drop_last=True)
-                     if distributed else None)
+    # No padding and no drop: every validation sample appears on exactly one rank.
+    # Rank shard lengths may differ by one, so validate() uses raw_model below.
+    valid_sampler = DistributedEvalSampler(valid_dataset) if distributed else None
     valid_loader = DataLoader(valid_dataset, batch_size=valid_batch_size, shuffle=False,
                               sampler=valid_sampler,
                               num_workers=valid_num_workers, pin_memory=True)
@@ -744,6 +1160,8 @@ def main():
 
     best_bpd = float('inf')
     start_epoch = 1
+    legacy_resume_used = False
+    legacy_lineage_unverified = False
 
     # ── DDP / torch.compile state_dict 统一处理 ──
     # DistributedDataParallel 会在所有参数名前加 `module.` 前缀
@@ -764,76 +1182,68 @@ def main():
 
     if args.resume:
         ckpt = torch.load(args.resume, map_location=device, weights_only=False)
-        if 'model_state_dict' not in ckpt:
-            # 允许 resume 参数指向裸 state_dict
-            raw_model.load_state_dict(clean_state_dict(ckpt))
-            start_epoch = 1
-            if rank == 0:
-                print(f"Loaded bare state_dict from '{args.resume}' (resume 将从 epoch 1 开始)")
-        else:
-            sd = clean_state_dict(ckpt['model_state_dict'])
-            model_keys = set(raw_model.state_dict().keys())
-            ckpt_keys = set(sd.keys())
-            missing = model_keys - ckpt_keys
-            unexpected = ckpt_keys - model_keys
-            if missing or unexpected:
-                critical_keys = {k for k in model_keys
-                                 if 'token_embed' in k or 'blocks.' in k or 'head.' in k}
-                critical_missing = missing & critical_keys
-                if critical_missing:
-                    raise RuntimeError(
-                        f"Checkpoint 缺少 {len(critical_missing)} 个关键参数: "
-                        f"{list(critical_missing)[:10]}。"
-                        "请确认 --resume 指向与当前 config 兼容的 checkpoint。"
-                    )
-                if rank == 0:
-                    if missing:
-                        print(f"WARNING: checkpoint 缺少 {len(missing)} 个非关键参数: {list(missing)[:5]}...")
-                    if unexpected:
-                        print(f"WARNING: checkpoint 多余 {len(unexpected)} 个参数: {list(unexpected)[:5]}...")
-                    print("尝试 non-strict 加载（missing 参数保持随机初始化）...")
-                raw_model.load_state_dict(sd, strict=False)
-            else:
-                raw_model.load_state_dict(sd)
-            if 'optimizer_state_dicts' in ckpt:
-                # 多 optimizer 格式（list）— 当前为单元素，保留 list 接口兼容
-                opt_states = ckpt['optimizer_state_dicts']
-                assert len(opt_states) == len(optimizers), (
-                    f"ckpt 含 {len(opt_states)} 个 optimizer state，当前模型用 {len(optimizers)} 个"
-                )
-                for opt, sd_opt in zip(optimizers, opt_states):
-                    opt.load_state_dict(sd_opt)
-            elif 'optimizer_state_dict' in ckpt:
-                # 历史单 optimizer 格式（标量 dict 而非 list）
-                optimizers[0].load_state_dict(ckpt['optimizer_state_dict'])
-            start_epoch = ckpt.get('epoch', 0) + 1
-            best_bpd = ckpt.get('best_bpd', float('inf'))
-            if scheduler is not None and 'scheduler_state_dict' in ckpt:
-                scheduler.load_state_dict(ckpt['scheduler_state_dict'])
-            if scaler is not None and 'scaler_state_dict' in ckpt:
-                scaler.load_state_dict(ckpt['scaler_state_dict'])
-            if swa_enabled and 'swa_state' in ckpt:
-                swa_state = ckpt['swa_state']
-                swa_n = ckpt.get('swa_n', 0)
-            if ema_enabled and 'ema_state' in ckpt:
-                ema_state = ckpt['ema_state']
-            # resume 后用 config 中的 lr 覆盖 checkpoint 里的旧值，
-            # 使得修改 yaml lr 后 resume 能立即生效。
-            for pg in optimizers[0].param_groups:
-                pg['initial_lr'] = base_lr
-                pg['lr'] = base_lr
-            # Scheduler base_lrs 同步（cosine/wsd 的 lr_lambda 乘以 base_lr）。
-            # last_epoch=start_epoch-2 后 step() 一次推进到 start_epoch-1，并触发
-            # lr_lambda 把 pg['lr'] 同步成正确的衰减值。否则 LambdaLR.__init__ 后
-            # 主循环 epoch 末才 step()，resume 后第一个 epoch 会跑全峰值 lr。
-            if scheduler is not None:
-                scheduler.base_lrs = [pg['initial_lr'] for pg in optimizers[0].param_groups]
-                scheduler.last_epoch = start_epoch - 2
-                scheduler.step()
+        legacy_resume_used = ckpt.get("schema") == LEGACY_TRAINING_STATE_SCHEMA
+        legacy_lineage_unverified = legacy_resume_used or bool(
+            ckpt.get("provenance", {}).get("legacy_resume_source_unverified", False)
+        )
+        _validate_resume_checkpoint(
+            ckpt,
+            config=config,
+            seed=seed,
+            world_size=world_size,
+            provenance_fingerprint=training_provenance["fingerprint_sha256"],
+            allow_legacy_resume=args.allow_legacy_resume,
+            optimizer_count=len(optimizers),
+            scheduler_required=scheduler is not None,
+            scaler_required=scaler is not None,
+            swa_enabled=swa_enabled,
+            ema_enabled=ema_enabled,
+        )
+        raw_model.load_state_dict(clean_state_dict(ckpt['model_state_dict']), strict=True)
+        for opt, opt_state in zip(optimizers, ckpt['optimizer_state_dicts']):
+            opt.load_state_dict(opt_state)
+        if scheduler is not None:
+            scheduler.load_state_dict(ckpt['scheduler_state_dict'])
+        if scaler is not None:
+            scaler.load_state_dict(ckpt['scaler_state_dict'])
+        if swa_enabled:
+            swa_state = ckpt['swa_state'] if rank == 0 else None
+            swa_n = ckpt['swa_n'] if rank == 0 else 0
+        if ema_enabled:
+            ema_state = ckpt['ema_state'] if rank == 0 else None
+            _ema_tick = ckpt['ema_tick']
+        start_epoch = ckpt['epoch'] + 1
+        best_bpd = ckpt['best_bpd']
+        _restore_rng_state(ckpt['rng_states_by_rank'][rank])
+        if legacy_lineage_unverified:
+            training_provenance["legacy_resume_source_unverified"] = True
+        if rank == 0:
+            current_lr = optimizers[0].param_groups[0]['lr']
+            resume_label = "Legacy-resumed" if legacy_resume_used else "Strictly resumed"
+            print(
+                f"{resume_label} '{args.resume}' at epoch {ckpt['epoch']} "
+                f"(next={start_epoch}, best_bpd={best_bpd:.4f}, lr={current_lr:.2e})"
+            )
+        del ckpt
+    elif args.init_from:
+        ckpt = torch.load(args.init_from, map_location=device, weights_only=False)
+        init_stats = _load_init_from_state_dict(raw_model, ckpt)
+        if rank == 0:
+            print(
+                f"Initialized weights from '{args.init_from}': "
+                f"{init_stats['matched_keys']} keys, "
+                f"{init_stats['parameter_coverage']:.2%} trainable parameters; "
+                f"missing={init_stats['missing_keys']}, "
+                f"unexpected={init_stats['unexpected_keys']}, "
+                f"shape_mismatch={init_stats['shape_mismatch_keys']}. "
+                "Optimizer/scheduler/RNG start fresh at epoch 1."
+            )
+        del ckpt
 
-            if rank == 0:
-                print(f"Resumed from checkpoint '{args.resume}' (epoch {ckpt.get('epoch', '?')}, best_bpd={best_bpd:.4f})")
-                print(f"  LR overridden to config value: {base_lr:.2e} (schedule continues from epoch {start_epoch})")
+    if csv_path is not None:
+        csv_file, csv_writer = _open_training_csv(
+            csv_path, resume=bool(args.resume), start_epoch=start_epoch,
+        )
 
     def _ema_step():
         """rank 0 上每个 optimizer.step() 后调用：用 fp32 累加更新影子权重。
@@ -896,7 +1306,9 @@ def main():
 
         # ── 验证 (DDP: 所有 rank 跑分片，all_reduce 聚合；rank 0 写日志/保存) ──
         if epoch % config['eval']['interval'] == 0:
-            bpd_avg, std_bpd, loss_avg = validate(model, valid_loader, device, amp_dtype=amp_dtype)
+            bpd_avg, std_bpd, loss_avg = validate(
+                raw_model, valid_loader, device, amp_dtype=amp_dtype,
+            )
             if rank == 0:
                 print(f"Validation: Loss {loss_avg:.4f} | bits/dim {bpd_avg:.4f} ± {std_bpd:.4f}")
                 if writer:
@@ -926,6 +1338,7 @@ def main():
                                 "lr": current_lr,
                             },
                             extra={"checkpoint": "best.pth"},
+                            provenance=training_provenance,
                         ),
                         os.path.join(checkpoint_dir, 'best.meta.json'),
                     )
@@ -957,26 +1370,53 @@ def main():
             if not has_nan:
                 print(f"  SWA update #{swa_n} at epoch {epoch}")
 
-        if rank == 0 and epoch % config['checkpoint']['save_interval'] == 0 \
-                and epoch >= config['checkpoint'].get('save_start_epoch', 1):
+        should_save_epoch = (
+            epoch % config['checkpoint']['save_interval'] == 0
+            and epoch >= config['checkpoint'].get('save_start_epoch', 1)
+        )
+        rng_states_by_rank = (
+            _gather_rng_states(distributed, rank) if should_save_epoch else None
+        )
+        if rank == 0 and should_save_epoch:
             # 完整保存训练状态，确保 --resume 后所有组件正确恢复
             ckpt_data = {
+                'schema': TRAINING_STATE_SCHEMA,
+                'resume_semantics': 'strict-exact-state-v3',
+                'checkpoint_semantics': 'complete-training-state',
                 'epoch': epoch,
                 'model_state_dict': raw_model.state_dict(),
                 # 多 optimizer 格式：list of state_dicts（当前为单元素 list）
                 'optimizer_state_dicts': [opt.state_dict() for opt in optimizers],
                 'loss': avg_loss,
                 'best_bpd': best_bpd,
+                'config_sha256': _canonical_config_hash(config),
+                'model_config_sha256': _canonical_config_hash(config['model']),
+                'seed': seed,
+                'world_size': world_size,
+                'rng_states_by_rank': rng_states_by_rank,
+                'provenance': training_provenance,
+                'provenance_sha256': training_provenance['fingerprint_sha256'],
+                'initialization': {
+                    'mode': (
+                        'resume' if args.resume
+                        else 'init_from' if args.init_from
+                        else 'scratch'
+                    ),
+                    'resume_path': args.resume,
+                    'init_from_path': args.init_from,
+                    'legacy_provenance_unverified': legacy_lineage_unverified,
+                },
             }
             if scheduler is not None:
                 ckpt_data['scheduler_state_dict'] = scheduler.state_dict()
             if scaler is not None:
                 ckpt_data['scaler_state_dict'] = scaler.state_dict()
-            if swa_state is not None:
+            if swa_enabled:
                 ckpt_data['swa_state'] = swa_state
                 ckpt_data['swa_n'] = swa_n
-            if ema_state is not None:
+            if ema_enabled:
                 ckpt_data['ema_state'] = ema_state
+                ckpt_data['ema_tick'] = _ema_tick
             _atomic_save(ckpt_data, os.path.join(checkpoint_dir, f'epoch_{epoch}.pth'))
 
     # EMA finalize：rank 0 替换权重 + broadcast → 全 rank 重新验证 → rank 0 保存
@@ -1001,7 +1441,9 @@ def main():
             if dist.is_available() and dist.is_initialized():
                 for p in raw_model.parameters():
                     dist.broadcast(p.data, src=0)
-            bpd_avg, std_bpd, loss_avg = validate(model, valid_loader, device, amp_dtype=amp_dtype)
+            bpd_avg, std_bpd, loss_avg = validate(
+                raw_model, valid_loader, device, amp_dtype=amp_dtype,
+            )
             if rank == 0:
                 print(f"EMA Validation: Loss {loss_avg:.4f} | bits/dim {bpd_avg:.4f} ± {std_bpd:.4f}")
                 _atomic_save(raw_model.state_dict(), os.path.join(checkpoint_dir, 'ema.pth'))
@@ -1014,6 +1456,7 @@ def main():
                             "val_bpd_std": std_bpd,
                         },
                         extra={"checkpoint": "ema.pth", "ema_decay": ema_decay},
+                        provenance=training_provenance,
                     ),
                     os.path.join(checkpoint_dir, 'ema.meta.json'),
                 )
@@ -1046,7 +1489,9 @@ def main():
             if dist.is_available() and dist.is_initialized():
                 for param in raw_model.parameters():
                     dist.broadcast(param.data, src=0)
-            bpd_avg, std_bpd, loss_avg = validate(model, valid_loader, device, amp_dtype=amp_dtype)
+            bpd_avg, std_bpd, loss_avg = validate(
+                raw_model, valid_loader, device, amp_dtype=amp_dtype,
+            )
             if rank == 0:
                 print(f"SWA Validation: Loss {loss_avg:.4f} | bits/dim {bpd_avg:.4f} ± {std_bpd:.4f}")
                 _atomic_save(raw_model.state_dict(), os.path.join(checkpoint_dir, 'swa.pth'))
@@ -1059,6 +1504,7 @@ def main():
                             "val_bpd_std": std_bpd,
                         },
                         extra={"checkpoint": "swa.pth", "swa_n": swa_n},
+                        provenance=training_provenance,
                     ),
                     os.path.join(checkpoint_dir, 'swa.meta.json'),
                 )

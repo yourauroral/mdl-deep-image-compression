@@ -13,15 +13,20 @@ DDP checkpoint / grad_accum / config validation 回归测试。
 import os
 import sys
 import math
+import csv
+import random
 import yaml
 import tempfile
+from types import SimpleNamespace
+import numpy as np
 import torch
 import torch.nn as nn
 import pytest
+from torch.utils.data import DataLoader, TensorDataset
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from src.mdlic.models.igpt import IGPT
+from mdlic.models.igpt import IGPT
 
 
 # ──────────────────────────────────────────────────────────────
@@ -134,7 +139,7 @@ def test_forward_yields_logits():
 
 
 def test_per_image_bpd_matches_batch_igpt():
-    """per-image bpd 均值应与现有 IGPT batch scalar bpd 同口径。"""
+    """per-image bpd 均值应与含首 token 的 IGPT scalar bpd 同口径。"""
     from scripts.evaluate import _per_image_bpd
 
     model = _build_tiny_igpt()
@@ -143,8 +148,7 @@ def test_per_image_bpd_matches_batch_igpt():
     with torch.no_grad():
         out = model(x)
         per_image = _per_image_bpd(model, x, out)
-    expected = out["ce_loss"] / math.log(2.0)
-    assert torch.allclose(per_image.mean(), expected, atol=1e-6, rtol=1e-6)
+    assert torch.allclose(per_image.mean(), out["bpd"], atol=1e-6, rtol=1e-6)
 
 
 def test_per_image_summary_bootstrap_optional():
@@ -174,6 +178,37 @@ def test_ensemble_log_probs_uses_probability_mixture():
     mean_member_nll = -torch.stack([probs_a.log(), probs_b.log()], dim=0).mean(dim=0) \
         .gather(-1, target.unsqueeze(-1)).squeeze(-1)
     assert mixture_nll.item() < mean_member_nll.item()
+
+
+def test_ensemble_per_image_stats_are_batch_size_invariant():
+    """Ensemble mean/std must come from images, not squared batch means."""
+    from scripts.evaluate import evaluate_ensemble
+
+    torch.manual_seed(9)
+    model_a = _build_tiny_igpt().eval()
+    torch.manual_seed(10)
+    model_b = _build_tiny_igpt().eval()
+    images = torch.rand(5, 3, 8, 8)
+    labels = torch.zeros(5, dtype=torch.long)
+    dataset = TensorDataset(images, labels)
+
+    results = []
+    for batch_size in (2, 3):
+        loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
+        mean, std, _, extras = evaluate_ensemble(
+            [model_a, model_b], loader, torch.device("cpu"),
+            collect_per_image=True,
+        )
+        values = extras["per_image_bpd"]
+        assert len(values) == len(dataset)
+        assert [row["sample_id"] for row in extras["per_image_records"]] == list(range(5))
+        assert mean == pytest.approx(float(torch.tensor(values).mean()), abs=1e-6)
+        assert std == pytest.approx(float(torch.tensor(values).std(unbiased=True)), abs=1e-6)
+        results.append((mean, std, values))
+
+    assert results[0][0] == pytest.approx(results[1][0], abs=1e-7)
+    assert results[0][1] == pytest.approx(results[1][1], abs=1e-7)
+    assert results[0][2] == pytest.approx(results[1][2], abs=1e-6)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -240,6 +275,274 @@ def test_grad_accum_divisible_case_unchanged():
         if (i + 1) % grad_accum_steps == 0 or is_last_step:
             sync_steps.append(i + 1)
     assert sync_steps == [4, 8, 12]
+
+
+def test_train_epoch_metrics_are_sample_weighted_for_short_last_batch():
+    """Epoch metrics must not give a short final batch the same weight as a full batch."""
+    from scripts.train import train_one_epoch
+
+    class BatchMeanModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.anchor = nn.Parameter(torch.tensor(0.0))
+
+        def forward(self, x, z_loss_weight=0.0):
+            value = x.mean() + self.anchor * 0.0
+            return {"loss": value, "ce_loss": value, "bpd": value}
+
+    model = BatchMeanModel()
+    loader = DataLoader(
+        TensorDataset(torch.tensor([[0.0], [0.0], [6.0]])),
+        batch_size=2,
+        shuffle=False,
+    )
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.0)
+
+    avg_loss, avg_bpd = train_one_epoch(
+        model,
+        loader,
+        [optimizer],
+        scaler=None,
+        device=torch.device("cpu"),
+        epoch=0,
+        log_freq=100,
+        writer=None,
+        clip_max_norm=1.0,
+        amp_dtype=None,
+    )
+
+    assert avg_loss == pytest.approx(2.0)
+    assert avg_bpd == pytest.approx(2.0)
+
+
+def test_rng_state_roundtrip_restores_all_cpu_generators():
+    from scripts.train import _capture_rng_state, _restore_rng_state
+
+    random.seed(101)
+    np.random.seed(102)
+    torch.manual_seed(103)
+    state = _capture_rng_state()
+    expected = (
+        random.random(),
+        float(np.random.random()),
+        torch.rand(4),
+    )
+
+    random.seed(1)
+    np.random.seed(1)
+    torch.manual_seed(1)
+    _restore_rng_state(state)
+    actual = (
+        random.random(),
+        float(np.random.random()),
+        torch.rand(4),
+    )
+    assert actual[0] == expected[0]
+    assert actual[1] == expected[1]
+    assert torch.equal(actual[2], expected[2])
+
+
+def test_training_csv_resume_appends_without_duplicate_header(tmp_path):
+    from scripts.train import _CSV_HEADER, _open_training_csv
+
+    path = tmp_path / "training_curves.csv"
+    fh, writer = _open_training_csv(str(path), resume=False, start_epoch=1)
+    writer.writerow([2, "1", "2", "3", "4", "5", "6"])
+    fh.close()
+
+    fh, writer = _open_training_csv(str(path), resume=True, start_epoch=3)
+    writer.writerow([3, "1", "2", "3", "4", "5", "6"])
+    fh.close()
+
+    with path.open(newline="") as source:
+        rows = list(csv.reader(source))
+    assert rows[0] == _CSV_HEADER
+    assert [int(row[0]) for row in rows[1:]] == [2, 3]
+
+    with pytest.raises(ValueError, match="重复/倒序"):
+        _open_training_csv(str(path), resume=True, start_epoch=3)
+
+
+def test_canonical_config_hash_is_order_independent():
+    from scripts.train import _canonical_config_hash
+
+    left = {"model": {"N": 2, "d_model": 64}, "train": {"lr": 1e-3}}
+    right = {"train": {"lr": 1e-3}, "model": {"d_model": 64, "N": 2}}
+    assert _canonical_config_hash(left) == _canonical_config_hash(right)
+    right["model"]["N"] = 3
+    assert _canonical_config_hash(left) != _canonical_config_hash(right)
+
+
+def test_distributed_eval_sampler_partitions_without_padding_or_drop():
+    from scripts.train import DistributedEvalSampler
+
+    dataset = list(range(11))
+    shards = [
+        list(DistributedEvalSampler(dataset, num_replicas=3, rank=rank))
+        for rank in range(3)
+    ]
+    flattened = [index for shard in shards for index in shard]
+
+    assert [len(shard) for shard in shards] == [4, 4, 3]
+    assert sorted(flattened) == list(range(len(dataset)))
+    assert len(flattened) == len(set(flattened))
+
+
+def _resume_fixture(config):
+    from scripts.train import TRAINING_STATE_SCHEMA, _canonical_config_hash
+
+    provenance_sha256 = "ab" * 32
+    return {
+        "schema": TRAINING_STATE_SCHEMA,
+        "epoch": 3,
+        "model_state_dict": {},
+        "optimizer_state_dicts": [{}],
+        "scheduler_state_dict": {},
+        "best_bpd": 2.9,
+        "config_sha256": _canonical_config_hash(config),
+        "model_config_sha256": _canonical_config_hash(config["model"]),
+        "seed": 42,
+        "world_size": 2,
+        "rng_states_by_rank": [{}, {}],
+        "provenance": {"fingerprint_sha256": provenance_sha256},
+        "provenance_sha256": provenance_sha256,
+    }
+
+
+def test_strict_resume_checkpoint_requires_complete_matching_state():
+    from scripts.train import _validate_resume_checkpoint
+
+    config = {"model": {"type": "igpt", "N": 2}, "train": {"seed": 42}}
+    checkpoint = _resume_fixture(config)
+    _validate_resume_checkpoint(
+        checkpoint,
+        config=config,
+        seed=42,
+        world_size=2,
+        provenance_fingerprint=checkpoint["provenance_sha256"],
+        optimizer_count=1,
+        scheduler_required=True,
+        scaler_required=False,
+        swa_enabled=False,
+        ema_enabled=False,
+    )
+
+    with pytest.raises(RuntimeError, match="--init_from"):
+        _validate_resume_checkpoint(
+            {"model_state_dict": {}}, config=config, seed=42, world_size=2,
+            provenance_fingerprint=checkpoint["provenance_sha256"],
+            optimizer_count=1, scheduler_required=True, scaler_required=False,
+            swa_enabled=False, ema_enabled=False,
+        )
+
+    incomplete = dict(checkpoint)
+    del incomplete["optimizer_state_dicts"]
+    with pytest.raises(RuntimeError, match="incomplete"):
+        _validate_resume_checkpoint(
+            incomplete, config=config, seed=42, world_size=2,
+            provenance_fingerprint=checkpoint["provenance_sha256"],
+            optimizer_count=1, scheduler_required=True, scaler_required=False,
+            swa_enabled=False, ema_enabled=False,
+        )
+
+
+def test_strict_resume_rejects_config_seed_and_world_size_changes():
+    from scripts.train import _validate_resume_checkpoint
+
+    config = {"model": {"type": "igpt", "N": 2}, "train": {"seed": 42}}
+    checkpoint = _resume_fixture(config)
+    common = dict(
+        provenance_fingerprint=checkpoint["provenance_sha256"],
+        optimizer_count=1,
+        scheduler_required=True,
+        scaler_required=False,
+        swa_enabled=False,
+        ema_enabled=False,
+    )
+    changed = {"model": dict(config["model"]), "train": {"seed": 42, "lr": 1e-3}}
+    with pytest.raises(RuntimeError, match="full config hash"):
+        _validate_resume_checkpoint(
+            checkpoint, config=changed, seed=42, world_size=2, **common,
+        )
+    with pytest.raises(RuntimeError, match="seed mismatch"):
+        _validate_resume_checkpoint(
+            checkpoint, config=config, seed=7, world_size=2, **common,
+        )
+    with pytest.raises(RuntimeError, match="world_size mismatch"):
+        _validate_resume_checkpoint(
+            checkpoint, config=config, seed=42, world_size=1, **common,
+        )
+    with pytest.raises(RuntimeError, match="provenance mismatch"):
+        _validate_resume_checkpoint(
+            checkpoint, config=config, seed=42, world_size=2,
+            **{**common, "provenance_fingerprint": "cd" * 32},
+        )
+
+
+def test_legacy_resume_requires_explicit_acknowledgement():
+    from scripts.train import (
+        LEGACY_TRAINING_STATE_SCHEMA,
+        _validate_resume_checkpoint,
+    )
+
+    config = {"model": {"type": "igpt", "N": 2}, "train": {"seed": 42}}
+    checkpoint = _resume_fixture(config)
+    checkpoint["schema"] = LEGACY_TRAINING_STATE_SCHEMA
+    del checkpoint["provenance"]
+    del checkpoint["provenance_sha256"]
+    kwargs = dict(
+        config=config,
+        seed=42,
+        world_size=2,
+        optimizer_count=1,
+        scheduler_required=True,
+        scaler_required=False,
+        swa_enabled=False,
+        ema_enabled=False,
+    )
+
+    with pytest.raises(RuntimeError, match="allow_legacy_resume"):
+        _validate_resume_checkpoint(checkpoint, **kwargs)
+    _validate_resume_checkpoint(
+        checkpoint, allow_legacy_resume=True, **kwargs,
+    )
+
+
+def test_init_from_loads_only_shape_compatible_model_weights():
+    from scripts.train import _load_init_from_state_dict
+
+    source = _build_tiny_igpt()
+    target = _build_tiny_igpt()
+    transferred = torch.full_like(source.token_embed.weight, 0.25)
+    checkpoint = {
+        "model_state_dict": {
+            "module.token_embed.weight": transferred,
+            "module.head.weight": torch.zeros(1),
+            "module.not_a_real_parameter": torch.zeros(1),
+        }
+    }
+
+    stats = _load_init_from_state_dict(target, checkpoint)
+    assert torch.equal(target.token_embed.weight, transferred)
+    assert 0.0 < stats["parameter_coverage"] < 1.0
+    assert stats["shape_mismatch_keys"] == 1
+    assert stats["unexpected_keys"] == 1
+    with pytest.raises(RuntimeError, match="matched no trainable"):
+        _load_init_from_state_dict(target, {"not_a_key": torch.zeros(1)})
+
+
+def test_checkpoint_meta_records_initialization_semantics():
+    from scripts.train import _checkpoint_meta
+
+    config = {
+        "exp_name": "test",
+        "model": {"type": "igpt"},
+        "train": {"seed": 42},
+    }
+    args = SimpleNamespace(config="config.yaml", resume=None, init_from="weights.pth")
+    meta = _checkpoint_meta(config, args, 1, "best", 42, metrics={})
+    assert meta["initialization_mode"] == "init_from"
+    assert meta["init_from_path"] == "weights.pth"
 
 
 # ──────────────────────────────────────────────────────────────

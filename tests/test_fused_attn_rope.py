@@ -1,8 +1,8 @@
 """
-Fused Attention + RoPE 单元测试 — 验证合并操作与分步操作的数值等价性。
+RoPE → Flash Attention pipeline 单元测试 — 验证与参考分步操作的数值等价性。
 
 对比:
-  Fused:  fused_attn_rope(q, k, v, cos, sin)
+  Custom: rope_then_flash_attn(q, k, v, cos, sin)
   分步:   q, k = apply_rotary_emb(q, k, cos, sin)
           o = F.scaled_dot_product_attention(q, k, v, is_causal=True)
 
@@ -20,8 +20,8 @@ import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from src.mdlic.ops.fused_attn_rope import fused_attn_rope
-from src.mdlic.models.layers import RotaryEmbedding, apply_rotary_emb
+from mdlic.ops.fused_attn_rope import rope_then_flash_attn
+from mdlic.models.layers import RotaryEmbedding, apply_rotary_emb
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton kernel requires CUDA")
 
@@ -48,7 +48,7 @@ TOLERANCES = {
                               for B, h, T, d_k in SHAPES])
 @pytest.mark.parametrize("dtype", DTYPES, ids=["fp16", "bf16"])
 class TestFusedAttnRoPE:
-    """Fused Attn+RoPE vs 分步 RoPE + SDPA"""
+    """两-kernel RoPE→FlashAttention vs PyTorch RoPE→SDPA"""
 
     def _get_cos_sin(self, T, d_k, device, dtype):
         rope = RotaryEmbedding(d_k).to(device)
@@ -65,8 +65,8 @@ class TestFusedAttnRoPE:
         cos, sin = self._get_cos_sin(T, d_k, device, dtype)
         scale = 1.0 / math.sqrt(d_k)
 
-        # Fused path
-        out_fused = fused_attn_rope(
+        # Custom two-kernel path
+        out_fused = rope_then_flash_attn(
             q.clone().contiguous(), k.clone().contiguous(), v.clone(),
             cos, sin, causal=True, softmax_scale=scale
         )
@@ -95,7 +95,7 @@ class TestFusedAttnRoPEEdgeCases:
         cos, sin = rope(T, q.device)
         cos, sin = cos.to(dtype), sin.to(dtype)
 
-        out = fused_attn_rope(q, k, v, cos, sin)
+        out = rope_then_flash_attn(q, k, v, cos, sin)
         # T=1: attention output = V (trivially)
         # 但 RoPE 会旋转 Q/K，所以 softmax(q@k^T/scale) = [1.0]
         # → output = v
@@ -104,7 +104,7 @@ class TestFusedAttnRoPEEdgeCases:
 
 
 if __name__ == "__main__":
-    print("=== Fused Attn+RoPE Unit Test ===\n")
+    print("=== RoPE -> Flash Attention Pipeline Test ===\n")
     passed = 0
     total = 0
     for B, h, T, d_k in SHAPES:
@@ -121,7 +121,7 @@ if __name__ == "__main__":
                 cos, sin = cos.to(dtype), sin.to(dtype)
                 scale = 1.0 / math.sqrt(d_k)
 
-                out_fused = fused_attn_rope(
+                out_fused = rope_then_flash_attn(
                     q.clone().contiguous(), k.clone().contiguous(), v.clone(),
                     cos, sin, causal=True, softmax_scale=scale
                 )

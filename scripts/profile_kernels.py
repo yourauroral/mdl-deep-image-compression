@@ -30,13 +30,15 @@ Usage:
 
 import os
 import sys
-import time
 import argparse
 import torch
 import torch.nn.functional as F
 import math
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+
+from mdlic.models.layers import apply_swiglu as pytorch_swiglu_reference
 
 
 # ── Benchmark 工具函数 ──────────────────────────────────────────
@@ -45,7 +47,9 @@ def benchmark_fn(fn, warmup=10, repeats=50):
     运行 fn() 多次，返回中位延迟(ms)。
     使用 CUDA event 计时，避免 CPU-GPU 同步延迟影响。
     """
-    # warmup
+    if warmup < 0 or repeats < 1:
+        raise ValueError("warmup must be >= 0 and repeats must be >= 1")
+
     for _ in range(warmup):
         fn()
     torch.cuda.synchronize()
@@ -69,130 +73,158 @@ def benchmark_fn(fn, warmup=10, repeats=50):
 
 def measure_memory(fn):
     """
-    测量 fn() 的 CUDA 峰值显存分配(MB)。
+    测量 fn() 相对调用前基线的 CUDA 峰值显存增量(MB)。
+
+    输入张量必须在调用前分配；否则会把数据生成计入算子临时显存。
     """
-    torch.cuda.reset_peak_memory_stats()
     torch.cuda.synchronize()
+    baseline = torch.cuda.memory_allocated()
+    torch.cuda.reset_peak_memory_stats()
     fn()
     torch.cuda.synchronize()
-    peak = torch.cuda.max_memory_allocated() / 1024 / 1024
-    return peak
+    peak_delta = max(0, torch.cuda.max_memory_allocated() - baseline)
+    return peak_delta / 1024 / 1024
+
+
+def _clear_grads(*tensors):
+    for tensor in tensors:
+        tensor.grad = None
 
 
 # ── Kernel Benchmarks ───────────────────────────────────────────
 
-def bench_fused_rms_norm(M, N, dtype, backward=False):
+def bench_fused_rms_norm(M, N, dtype, backward=False, warmup=10, repeats=50):
     """RMSNorm: fused triton vs pytorch"""
-    from src.mdlic.ops.fused_rms_norm import fused_rms_norm
+    from mdlic.ops.fused_rms_norm import fused_rms_norm
 
     x = torch.randn(M, N, device="cuda", dtype=dtype, requires_grad=backward)
     w = torch.ones(N, device="cuda", dtype=dtype, requires_grad=backward)
     eps = 1e-10
 
     def fused_fn():
+        _clear_grads(x, w)
         out = fused_rms_norm(x, w, eps)
         if backward:
-            out.sum().backward(retain_graph=True)
+            out.sum().backward()
+            _clear_grads(x, w)
 
     def pytorch_fn():
+        _clear_grads(x, w)
         rms = x.float().pow(2).mean(-1, keepdim=True).add(eps).sqrt()
         out = (w.float() * (x.float() / rms)).to(dtype)
         if backward:
-            out.sum().backward(retain_graph=True)
+            out.sum().backward()
+            _clear_grads(x, w)
 
-    t_fused = benchmark_fn(fused_fn)
-    t_pytorch = benchmark_fn(pytorch_fn)
+    t_fused = benchmark_fn(fused_fn, warmup, repeats)
+    t_pytorch = benchmark_fn(pytorch_fn, warmup, repeats)
     mem_fused = measure_memory(fused_fn)
     mem_pytorch = measure_memory(pytorch_fn)
 
     return t_fused, t_pytorch, mem_fused, mem_pytorch
 
 
-def bench_fused_ce_zloss(M, V, dtype, backward=False):
+def bench_fused_ce_zloss(M, V, dtype, backward=False, warmup=10, repeats=50):
     """Cross-Entropy + z-loss: fused triton vs pytorch"""
-    from src.mdlic.ops.fused_ce_zloss import fused_cross_entropy_zloss
+    from mdlic.ops.fused_ce_zloss import fused_cross_entropy_zloss
 
     logits = torch.randn(M, V, device="cuda", dtype=dtype, requires_grad=backward)
     targets = torch.randint(0, V, (M,), device="cuda")
     z_w = 1e-4
 
     def fused_fn():
+        _clear_grads(logits)
         ce, z = fused_cross_entropy_zloss(logits, targets, z_loss_weight=z_w)
         loss = ce + z_w * z
         if backward:
-            loss.backward(retain_graph=True)
+            loss.backward()
+            _clear_grads(logits)
 
     def pytorch_fn():
+        _clear_grads(logits)
         ce = F.cross_entropy(logits.float(), targets)
         lse = torch.logsumexp(logits.float(), dim=-1)
         z = (lse ** 2).mean()
         loss = ce + z_w * z
         if backward:
-            loss.backward(retain_graph=True)
+            loss.backward()
+            _clear_grads(logits)
 
-    t_fused = benchmark_fn(fused_fn)
-    t_pytorch = benchmark_fn(pytorch_fn)
+    t_fused = benchmark_fn(fused_fn, warmup, repeats)
+    t_pytorch = benchmark_fn(pytorch_fn, warmup, repeats)
     mem_fused = measure_memory(fused_fn)
     mem_pytorch = measure_memory(pytorch_fn)
 
     return t_fused, t_pytorch, mem_fused, mem_pytorch
 
 
-def bench_fused_swiglu(M, N, dtype, backward=False):
+def bench_fused_swiglu(M, N, dtype, backward=False, warmup=10, repeats=50):
     """SwiGLU: fused triton vs pytorch"""
-    from src.mdlic.ops.fused_swiglu import fused_swiglu
+    from mdlic.ops.fused_swiglu import fused_swiglu
 
     a = torch.randn(M, N, device="cuda", dtype=dtype, requires_grad=backward)
     b = torch.randn(M, N, device="cuda", dtype=dtype, requires_grad=backward)
 
     def fused_fn():
+        _clear_grads(a, b)
         out = fused_swiglu(a, b)
         if backward:
-            out.sum().backward(retain_graph=True)
+            out.sum().backward()
+            _clear_grads(a, b)
 
     def pytorch_fn():
-        out = F.silu(a.float()).to(dtype) * b
+        _clear_grads(a, b)
+        out = pytorch_swiglu_reference(a, b)
         if backward:
-            out.sum().backward(retain_graph=True)
+            out.sum().backward()
+            _clear_grads(a, b)
 
-    t_fused = benchmark_fn(fused_fn)
-    t_pytorch = benchmark_fn(pytorch_fn)
+    t_fused = benchmark_fn(fused_fn, warmup, repeats)
+    t_pytorch = benchmark_fn(pytorch_fn, warmup, repeats)
     mem_fused = measure_memory(fused_fn)
     mem_pytorch = measure_memory(pytorch_fn)
 
     return t_fused, t_pytorch, mem_fused, mem_pytorch
 
 
-def bench_fused_rope(B, h, T, d_k, dtype, backward=False):
+def bench_fused_rope(B, h, T, d_k, dtype, backward=False, warmup=10, repeats=50):
     """RoPE: fused triton vs pytorch"""
-    from src.mdlic.ops.fused_rope import fused_apply_rotary_emb
-    from src.mdlic.models.layers import RotaryEmbedding, apply_rotary_emb
+    from mdlic.ops.fused_rope import fused_apply_rotary_emb
+    from mdlic.models.layers import RotaryEmbedding, apply_rotary_emb
 
     rope = RotaryEmbedding(d_k).to("cuda")
     cos, sin = rope(T, torch.device("cuda"))
     cos, sin = cos.to(dtype), sin.to(dtype)
+    q = torch.randn(B, h, T, d_k, device="cuda", dtype=dtype,
+                    requires_grad=backward).contiguous()
+    k = torch.randn(B, h, T, d_k, device="cuda", dtype=dtype,
+                    requires_grad=backward).contiguous()
 
     def fused_fn():
-        q = torch.randn(B, h, T, d_k, device="cuda", dtype=dtype).contiguous()
-        k = torch.randn(B, h, T, d_k, device="cuda", dtype=dtype).contiguous()
-        fused_apply_rotary_emb(q, k, cos, sin)
+        _clear_grads(q, k)
+        q_out, k_out = fused_apply_rotary_emb(q, k, cos, sin)
+        if backward:
+            (q_out.sum() + k_out.sum()).backward()
+            _clear_grads(q, k)
 
     def pytorch_fn():
-        q = torch.randn(B, h, T, d_k, device="cuda", dtype=dtype)
-        k = torch.randn(B, h, T, d_k, device="cuda", dtype=dtype)
-        apply_rotary_emb(q, k, cos, sin)
+        _clear_grads(q, k)
+        q_out, k_out = apply_rotary_emb(q, k, cos, sin)
+        if backward:
+            (q_out.sum() + k_out.sum()).backward()
+            _clear_grads(q, k)
 
-    t_fused = benchmark_fn(fused_fn)
-    t_pytorch = benchmark_fn(pytorch_fn)
+    t_fused = benchmark_fn(fused_fn, warmup, repeats)
+    t_pytorch = benchmark_fn(pytorch_fn, warmup, repeats)
     mem_fused = measure_memory(fused_fn)
     mem_pytorch = measure_memory(pytorch_fn)
 
     return t_fused, t_pytorch, mem_fused, mem_pytorch
 
 
-def bench_fused_add_rms_norm(M, N, dtype, backward=False):
+def bench_fused_add_rms_norm(M, N, dtype, backward=False, warmup=10, repeats=50):
     """Add+RMSNorm: fused triton vs pytorch"""
-    from src.mdlic.ops.fused_add_rms_norm import fused_add_rms_norm
+    from mdlic.ops.fused_add_rms_norm import fused_add_rms_norm
 
     residual = torch.randn(M, N, device="cuda", dtype=dtype, requires_grad=backward)
     sublayer = torch.randn(M, N, device="cuda", dtype=dtype, requires_grad=backward)
@@ -200,126 +232,136 @@ def bench_fused_add_rms_norm(M, N, dtype, backward=False):
     eps = 1e-10
 
     def fused_fn():
+        _clear_grads(residual, sublayer, w)
         out = fused_add_rms_norm(residual, sublayer, w, eps)
         if backward:
-            out.sum().backward(retain_graph=True)
+            out.sum().backward()
+            _clear_grads(residual, sublayer, w)
 
     def pytorch_fn():
+        _clear_grads(residual, sublayer, w)
         s = sublayer.float()
         rms = s.pow(2).mean(-1, keepdim=True).add(eps).sqrt()
         out = residual + (w.float() * (s / rms)).to(dtype)
         if backward:
-            out.sum().backward(retain_graph=True)
+            out.sum().backward()
+            _clear_grads(residual, sublayer, w)
 
-    t_fused = benchmark_fn(fused_fn)
-    t_pytorch = benchmark_fn(pytorch_fn)
+    t_fused = benchmark_fn(fused_fn, warmup, repeats)
+    t_pytorch = benchmark_fn(pytorch_fn, warmup, repeats)
     mem_fused = measure_memory(fused_fn)
     mem_pytorch = measure_memory(pytorch_fn)
 
     return t_fused, t_pytorch, mem_fused, mem_pytorch
 
 
-def bench_flash_attn(B, h, T, d_k, dtype, backward=False):
+def bench_flash_attn(B, h, T, d_k, dtype, backward=False, warmup=10, repeats=50):
     """Flash Attention v2: triton vs pytorch SDPA"""
-    from src.mdlic.ops.flash_attn import TritonAttention
+    from mdlic.ops.flash_attn import TritonAttention
 
     scale = 1.0 / math.sqrt(d_k)
+    q = torch.randn(B, h, T, d_k, device="cuda", dtype=dtype,
+                    requires_grad=backward).contiguous()
+    k = torch.randn(B, h, T, d_k, device="cuda", dtype=dtype,
+                    requires_grad=backward).contiguous()
+    v = torch.randn(B, h, T, d_k, device="cuda", dtype=dtype,
+                    requires_grad=backward).contiguous()
 
     def fused_fn():
-        q = torch.randn(B, h, T, d_k, device="cuda", dtype=dtype, requires_grad=backward)
-        k = torch.randn(B, h, T, d_k, device="cuda", dtype=dtype, requires_grad=backward)
-        v = torch.randn(B, h, T, d_k, device="cuda", dtype=dtype, requires_grad=backward)
+        _clear_grads(q, k, v)
         out = TritonAttention.apply(q, k, v, True, scale)
         if backward:
             out.sum().backward()
+            _clear_grads(q, k, v)
 
     def pytorch_fn():
-        q = torch.randn(B, h, T, d_k, device="cuda", dtype=dtype, requires_grad=backward)
-        k = torch.randn(B, h, T, d_k, device="cuda", dtype=dtype, requires_grad=backward)
-        v = torch.randn(B, h, T, d_k, device="cuda", dtype=dtype, requires_grad=backward)
+        _clear_grads(q, k, v)
         out = F.scaled_dot_product_attention(q, k, v, is_causal=True)
         if backward:
             out.sum().backward()
+            _clear_grads(q, k, v)
 
-    t_fused = benchmark_fn(fused_fn)
-    t_pytorch = benchmark_fn(pytorch_fn)
+    t_fused = benchmark_fn(fused_fn, warmup, repeats)
+    t_pytorch = benchmark_fn(pytorch_fn, warmup, repeats)
     mem_fused = measure_memory(fused_fn)
     mem_pytorch = measure_memory(pytorch_fn)
 
     return t_fused, t_pytorch, mem_fused, mem_pytorch
 
 
-def bench_fused_attn_rope(B, h, T, d_k, dtype, backward=False):
-    """Fused Attn+RoPE: triton fused vs 分步 RoPE + SDPA"""
-    from src.mdlic.ops.fused_attn_rope import fused_attn_rope
-    from src.mdlic.models.layers import RotaryEmbedding, apply_rotary_emb
+def bench_rope_then_flash_attn(B, h, T, d_k, dtype, backward=False,
+                               warmup=10, repeats=50):
+    """两-kernel RoPE→FlashAttention pipeline vs PyTorch RoPE→SDPA。"""
+    from mdlic.ops.fused_attn_rope import rope_then_flash_attn
+    from mdlic.models.layers import RotaryEmbedding, apply_rotary_emb
 
     rope = RotaryEmbedding(d_k).to("cuda")
     cos, sin = rope(T, torch.device("cuda"))
     cos, sin = cos.to(dtype), sin.to(dtype)
     scale = 1.0 / math.sqrt(d_k)
+    q = torch.randn(B, h, T, d_k, device="cuda", dtype=dtype,
+                    requires_grad=backward).contiguous()
+    k = torch.randn(B, h, T, d_k, device="cuda", dtype=dtype,
+                    requires_grad=backward).contiguous()
+    v = torch.randn(B, h, T, d_k, device="cuda", dtype=dtype,
+                    requires_grad=backward).contiguous()
 
-    def fused_fn():
-        q = torch.randn(B, h, T, d_k, device="cuda", dtype=dtype,
-                         requires_grad=backward).contiguous()
-        k = torch.randn(B, h, T, d_k, device="cuda", dtype=dtype,
-                         requires_grad=backward).contiguous()
-        v = torch.randn(B, h, T, d_k, device="cuda", dtype=dtype,
-                         requires_grad=backward)
-        out = fused_attn_rope(q, k, v, cos, sin, causal=True,
-                              softmax_scale=scale)
+    def custom_fn():
+        _clear_grads(q, k, v)
+        out = rope_then_flash_attn(q, k, v, cos, sin, causal=True,
+                                   softmax_scale=scale)
         if backward:
             out.sum().backward()
+            _clear_grads(q, k, v)
 
     def pytorch_fn():
-        q = torch.randn(B, h, T, d_k, device="cuda", dtype=dtype,
-                         requires_grad=backward)
-        k = torch.randn(B, h, T, d_k, device="cuda", dtype=dtype,
-                         requires_grad=backward)
-        v = torch.randn(B, h, T, d_k, device="cuda", dtype=dtype,
-                         requires_grad=backward)
+        _clear_grads(q, k, v)
         q_r, k_r = apply_rotary_emb(q, k, cos, sin)
         out = F.scaled_dot_product_attention(q_r, k_r, v, is_causal=True)
         if backward:
             out.sum().backward()
+            _clear_grads(q, k, v)
 
-    t_fused = benchmark_fn(fused_fn)
-    t_pytorch = benchmark_fn(pytorch_fn)
-    mem_fused = measure_memory(fused_fn)
+    t_fused = benchmark_fn(custom_fn, warmup, repeats)
+    t_pytorch = benchmark_fn(pytorch_fn, warmup, repeats)
+    mem_fused = measure_memory(custom_fn)
     mem_pytorch = measure_memory(pytorch_fn)
 
     return t_fused, t_pytorch, mem_fused, mem_pytorch
 
 
-def bench_fused_linear_ce(M, D, V, dtype, backward=False):
+def bench_fused_linear_ce(M, D, V, dtype, backward=False, warmup=10, repeats=50):
     """Fused Linear+CE+z-loss: triton fused vs 分步 linear + CE + logsumexp"""
-    from src.mdlic.ops.fused_linear_ce import fused_linear_cross_entropy
+    from mdlic.ops.fused_linear_ce import fused_linear_cross_entropy
 
-    hidden = torch.randn(M, D, device="cuda", dtype=torch.float32,
+    hidden = torch.randn(M, D, device="cuda", dtype=dtype,
                           requires_grad=backward)
-    weight = torch.randn(V, D, device="cuda", dtype=torch.float32)
+    weight = torch.randn(V, D, device="cuda", dtype=dtype,
+                         requires_grad=backward)
     targets = torch.randint(0, V, (M,), device="cuda")
     z_w = 1e-4
 
     def fused_fn():
-        h = hidden.detach().clone().requires_grad_(backward)
-        ce, z = fused_linear_cross_entropy(h, weight, targets, z_loss_weight=z_w)
+        _clear_grads(hidden, weight)
+        ce, z = fused_linear_cross_entropy(hidden, weight, targets, z_loss_weight=z_w)
         loss = ce + z_w * z
         if backward:
             loss.backward()
+            _clear_grads(hidden, weight)
 
     def pytorch_fn():
-        h = hidden.detach().clone().requires_grad_(backward)
-        logits = h @ weight.T
+        _clear_grads(hidden, weight)
+        logits = hidden @ weight.T
         ce = F.cross_entropy(logits, targets)
         lse = torch.logsumexp(logits, dim=-1)
         z = (lse ** 2).mean()
         loss = ce + z_w * z
         if backward:
             loss.backward()
+            _clear_grads(hidden, weight)
 
-    t_fused = benchmark_fn(fused_fn)
-    t_pytorch = benchmark_fn(pytorch_fn)
+    t_fused = benchmark_fn(fused_fn, warmup, repeats)
+    t_pytorch = benchmark_fn(pytorch_fn, warmup, repeats)
     mem_fused = measure_memory(fused_fn)
     mem_pytorch = measure_memory(pytorch_fn)
 
@@ -380,13 +422,15 @@ def estimate_flops_bytes(kernel_name, M, N, B, h, T, d_k, V, dtype_bytes):
         flops = 2 * B * h * T * T * d_k
         bytes_rw = 4 * B * h * T * d_k * db
 
-    elif kernel_name == "fused_attn_rope":
-        # RoPE FLOPs + Flash Attn FLOPs
+    elif kernel_name == "rope_then_flash_attn":
+        # 两个独立 kernel：out-of-place RoPE 后接 Flash Attention。
         numel = B * h * T * d_k
         rope_flops = 12 * numel
         attn_flops = 2 * B * h * T * T * d_k
         flops = rope_flops + attn_flops
-        bytes_rw = 4 * B * h * T * d_k * db  # 同 flash_attn（RoPE 就地）
+        rope_bytes = (4 * numel + 2 * T * d_k) * db
+        attn_bytes = 4 * numel * db
+        bytes_rw = rope_bytes + attn_bytes
 
     elif kernel_name == "fused_linear_ce":
         # FLOPs: matmul(M*D*V) + softmax(M*V) ≈ 2*M*D*V + 3*M*V
@@ -407,7 +451,7 @@ def estimate_flops_bytes(kernel_name, M, N, B, h, T, d_k, V, dtype_bytes):
 ALL_KERNELS = [
     "fused_rms_norm", "fused_ce_zloss", "fused_swiglu",
     "fused_rope", "fused_add_rms_norm", "flash_attn",
-    "fused_attn_rope", "fused_linear_ce"
+    "rope_then_flash_attn", "fused_linear_ce"
 ]
 
 
@@ -432,6 +476,15 @@ def main():
     parser.add_argument('--warmup', type=int, default=10, help='warmup 轮数')
     parser.add_argument('--repeats', type=int, default=50, help='重复轮数')
     args = parser.parse_args()
+
+    if not torch.cuda.is_available():
+        parser.error("CUDA is required for Triton kernel profiling")
+    if args.warmup < 0 or args.repeats < 1:
+        parser.error("--warmup must be >= 0 and --repeats must be >= 1")
+    if args.h < 1 or args.d_model % args.h != 0:
+        parser.error("--h must be positive and divide --d_model exactly")
+    if args.backward and args.roofline:
+        parser.error("--roofline uses forward-only FLOP/byte estimates; omit --backward")
 
     dtype_map = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp32": torch.float32}
     dtype = dtype_map[args.dtype]
@@ -462,42 +515,43 @@ def main():
             if kernel_name == "fused_rms_norm":
                 shape_desc = f"({M}, {d_model})"
                 t_f, t_p, m_f, m_p = bench_fused_rms_norm(
-                    M, d_model, dtype, args.backward)
+                    M, d_model, dtype, args.backward, args.warmup, args.repeats)
 
             elif kernel_name == "fused_ce_zloss":
                 shape_desc = f"({M}, {V})"
                 t_f, t_p, m_f, m_p = bench_fused_ce_zloss(
-                    M, V, dtype, args.backward)
+                    M, V, dtype, args.backward, args.warmup, args.repeats)
 
             elif kernel_name == "fused_swiglu":
                 shape_desc = f"({M}, {d_ff})"
                 t_f, t_p, m_f, m_p = bench_fused_swiglu(
-                    M, d_ff, dtype, args.backward)
+                    M, d_ff, dtype, args.backward, args.warmup, args.repeats)
 
             elif kernel_name == "fused_rope":
                 shape_desc = f"({B}, {h}, {T}, {d_k})"
                 t_f, t_p, m_f, m_p = bench_fused_rope(
-                    B, h, T, d_k, dtype, args.backward)
+                    B, h, T, d_k, dtype, args.backward, args.warmup, args.repeats)
 
             elif kernel_name == "fused_add_rms_norm":
                 shape_desc = f"({M}, {d_model})"
                 t_f, t_p, m_f, m_p = bench_fused_add_rms_norm(
-                    M, d_model, dtype, args.backward)
+                    M, d_model, dtype, args.backward, args.warmup, args.repeats)
 
             elif kernel_name == "flash_attn":
                 shape_desc = f"({B}, {h}, {T}, {d_k})"
                 t_f, t_p, m_f, m_p = bench_flash_attn(
-                    B, h, T, d_k, dtype, args.backward)
+                    B, h, T, d_k, dtype, args.backward, args.warmup, args.repeats)
 
-            elif kernel_name == "fused_attn_rope":
+            elif kernel_name == "rope_then_flash_attn":
                 shape_desc = f"({B}, {h}, {T}, {d_k})"
-                t_f, t_p, m_f, m_p = bench_fused_attn_rope(
-                    B, h, T, d_k, dtype, args.backward)
+                t_f, t_p, m_f, m_p = bench_rope_then_flash_attn(
+                    B, h, T, d_k, dtype, args.backward,
+                    args.warmup, args.repeats)
 
             elif kernel_name == "fused_linear_ce":
                 shape_desc = f"({M}, {d_model}, {V})"
                 t_f, t_p, m_f, m_p = bench_fused_linear_ce(
-                    M, d_model, V, dtype, args.backward)
+                    M, d_model, V, dtype, args.backward, args.warmup, args.repeats)
 
             speedup = t_p / t_f if t_f > 0 else float('inf')
             mem_save = (m_p - m_f) / m_p * 100 if m_p > 0 else 0
@@ -512,10 +566,10 @@ def main():
             results.append({
                 "kernel": kernel_name,
                 "shape": shape_desc,
-                "fused_ms": t_f,
+                "custom_ms": t_f,
                 "pytorch_ms": t_p,
                 "speedup": speedup,
-                "fused_mem_mb": m_f,
+                "custom_mem_mb": m_f,
                 "pytorch_mem_mb": m_p,
                 "mem_save_pct": mem_save,
                 "flops": flops_est,
@@ -530,9 +584,9 @@ def main():
             results.append({
                 "kernel": kernel_name,
                 "shape": "N/A",
-                "fused_ms": 0, "pytorch_ms": 0,
+                "custom_ms": 0, "pytorch_ms": 0,
                 "speedup": 0,
-                "fused_mem_mb": 0, "pytorch_mem_mb": 0,
+                "custom_mem_mb": 0, "pytorch_mem_mb": 0,
                 "mem_save_pct": 0,
                 "error": str(e),
             })
@@ -542,14 +596,14 @@ def main():
     print(f"  性能对比表格 ({mode})")
     print(f"{'='*80}\n")
 
-    print("| Kernel | Shape | Fused (ms) | PyTorch (ms) | Speedup | Fused Mem (MB) | PyTorch Mem (MB) | Mem Save |")
+    print("| Kernel | Shape | Custom/Triton (ms) | PyTorch (ms) | Speedup | Custom Peak Δ (MB) | PyTorch Peak Δ (MB) | Mem Save |")
     print("|--------|-------|-----------|-------------|---------|---------------|-----------------|----------|")
 
     for r in results:
         if "error" in r:
             print(f"| {r['kernel']} | {r['shape']} | — | — | SKIP | — | — | {r['error']} |")
         else:
-            print(f"| {r['kernel']} | {r['shape']} | {r['fused_ms']:.3f} | {r['pytorch_ms']:.3f} | **{r['speedup']:.2f}x** | {r['fused_mem_mb']:.1f} | {r['pytorch_mem_mb']:.1f} | {r['mem_save_pct']:.1f}% |")
+            print(f"| {r['kernel']} | {r['shape']} | {r['custom_ms']:.3f} | {r['pytorch_ms']:.3f} | **{r['speedup']:.2f}x** | {r['custom_mem_mb']:.1f} | {r['pytorch_mem_mb']:.1f} | {r['mem_save_pct']:.1f}% |")
 
     print()
 

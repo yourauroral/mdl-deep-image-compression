@@ -6,6 +6,8 @@
   "accuracy": [41.69, 49.97, 53.88, 58.13, 60.10, 60.04, 63.34, 64.49, 65.92, 67.23, 67.78, 69.10, 70.61, 71.93, 72.64, 73.12, 73.19, 73.18, 72.77, 71.47, 70.84, 70.25, 70.34, 70.25, 69.23, 68.54, 67.62, 67.06, 66.64, 65.32, 65.04, 64.79],
   "best_layer": 16,
   "best_accuracy": 73.19,
+  "protocol_status": "historical_test_selected",
+  "uncertainty_status": "unavailable_legacy_single_classifier_run",
   "sparse": false,
-  "note": "ImageNet64 ep12 best.pth 冻结，在 CIFAR-10 上做 transfer linear probe（32->64 resize，with α·coarse_ctx 注入）。完整 32 层（2026-06-10 AutoDL 回填）：中层峰 L16 73.19%（L15-L17 为 73.12/73.19/73.18 平台），L0 41.69%→L16 73.19%→L31 64.79%。胜 iGPT-S native 66.93% (+6.3pp)；低于 CC-iGPT v2 CIFAR native 79.33%（transfer + resize 域偏移代价）。transfer 口径，勿与 native 32x32 横比。"
+  "note": "历史探索曲线：ImageNet64 ep12 best.pth 冻结后在 resize 32->64 的 CIFAR-10 上 probe；旧脚本使用 test curve 选择 L16，因此 73.19% 不是正式无泄漏结果，且不能与 native 32x32 横比。待按新 validation 选层协议重跑。"
 }

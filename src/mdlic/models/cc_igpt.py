@@ -1,9 +1,9 @@
-import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from .igpt import IGPT
+from ..rate import dual_stream_bpd
 
 
 class CCIGPT(nn.Module):
@@ -13,7 +13,8 @@ class CCIGPT(nn.Module):
     主线 fine iGPT，coarse 经 DOWN→UP→quantize 后通过 fine.token_embed 查表，
     作为 additive embedding (`α · coarse_ctx`) 注入 fine。
 
-    bpd_total = (CE_coarse · N_coarse + CE_fine · N_fine) / ln2 / N_fine
+    bpd_total = (8 + CE_coarse·(N_coarse-1)/ln2
+                   + 8 + CE_fine·(N_fine-1)/ln2) / N_fine
 
     序列布局：coarse / fine 都用 sub-pixel AR (pixel-first)
     [R0,G0,B0,R1,G1,B1,...]，token-level 自然学到 p(G|R), p(B|R,G)。
@@ -46,6 +47,7 @@ class CCIGPT(nn.Module):
         coarse_in_channels: int = None,
         # DropPath 仅作用于 fine（v1 24 层 / v2 32 层），coarse 浅层 6 层不需要
         drop_path: float = 0.0,
+        _fine_model_cls=IGPT,
     ):
         super().__init__()
         assert image_size % pool_factor == 0, (
@@ -77,12 +79,12 @@ class CCIGPT(nn.Module):
                            d_model=coarse_d_model, N=coarse_N,
                            h=coarse_h, d_ff=coarse_d_ff,
                            drop_path=0.0, **shared)
-        self.fine = IGPT(image_size=image_size,
-                         in_channels=in_channels,
-                         d_model=fine_d_model, N=fine_N,
-                         h=fine_h, d_ff=fine_d_ff,
-                         drop_path=drop_path,
-                         **shared)
+        self.fine = _fine_model_cls(image_size=image_size,
+                                    in_channels=in_channels,
+                                    d_model=fine_d_model, N=fine_N,
+                                    h=fine_h, d_ff=fine_d_ff,
+                                    drop_path=drop_path,
+                                    **shared)
 
         # 可学习注入强度 α，初始 1.0。允许模型自适应 ctx 贡献度，
         # 避免 ctx 过强压制 fine 自身的 token embed。
@@ -102,8 +104,8 @@ class CCIGPT(nn.Module):
             x_c = x_c[:, :self.coarse.in_channels]
         return x_c
 
-    def _compute_coarse_ctx(self, coarse_tokens: torch.Tensor) -> torch.Tensor:
-        """coarse 量化 token (B, N_c) → fine 用 additive coarse context (B, T_fine-1, d_model)。
+    def _compute_coarse_ctx_full(self, coarse_tokens: torch.Tensor) -> torch.Tensor:
+        """coarse token (B, N_c) -> unshifted fine context (B, T_fine, d_model).
 
         Bit-exact 一致性约束：bitstream 只携带 coarse 量化 token，decoder 必须
         独立从 token 重建出与 encoder 相同的 fine 条件分布。因此本路径输入是
@@ -115,8 +117,7 @@ class CCIGPT(nn.Module):
           3. bilinear UP 到 fine 分辨率
           4. 用 fine encoder 的 tokenize 规则重新 tokenize：(*255).round().long()
           5. permute(0,2,3,1).reshape(B,-1) 排成 pixel-first，fine.token_embed 查表
-          6. 丢掉第一个 token 做 AR shift —— ctx[i] 与 fine 被预测位置 i 对齐
-             （PixelCNN++ conditional / VAR multi-scale 标准语义）
+          6. 返回完整未移位 context；AR wrapper 再丢掉第一个位置，masked 路径保留全部
 
         强制 autocast(enabled=False)：encoder/decoder 必须在完全相同的 dtype 下
         跑此函数才能 bit-exact。bilinear interp + round + token_embed 在 bf16/fp16
@@ -147,21 +148,23 @@ class CCIGPT(nn.Module):
 
             x_up_tok = (x_up.clamp(0, 1) * 255).round().long()
             x_up_tok = x_up_tok.permute(0, 2, 3, 1).reshape(B, -1)
-            coarse_ctx = self.fine.token_embed(x_up_tok)         # (B, T, d_model)
-            # AR 对齐：ctx[i] 与 fine 被预测位置 i 同位对齐（PixelCNN++ conditional /
-            # VAR multi-scale 标准语义）。不作弊：coarse 走独立 bitstream，decoder 先
-            # 解完整段 coarse token 得到完整 ctx 再按序解 fine；ctx 是 lossy 低频先验，
-            # 不能反推 fine_tok[i] 的精确 0-255 整数值。
-            return coarse_ctx[:, 1:]
+            return self.fine.token_embed(x_up_tok)                # (B, T, d_model)
+
+    def _compute_coarse_ctx(self, coarse_tokens: torch.Tensor) -> torch.Tensor:
+        """Return the shifted context used by the original causal AR path."""
+        coarse_ctx = self._compute_coarse_ctx_full(coarse_tokens)
+        # AR NTP input/target are shifted by one. Masked models use the full context.
+        return coarse_ctx[:, 1:]
 
     def forward(self, x, z_loss_weight: float = 1e-4):
         """
         返回 dict:
-          loss / ce_loss (= ce_fine, 与 train.py 主指标兼容) /
+          loss（历史训练目标：coarse/fine 两流平均 CE 等权，并非严格 rate weighting） /
+          ce_loss (= ce_fine, 与 train.py 主指标兼容) /
           ce_loss_coarse / ce_loss_fine /
-          bpd (bits/dim, 按 H·W·C 子像素数归一化；
-               对应 BPD_total = (CE_c·N_c + CE_f·N_f) / ln2 / N_f) /
-          ctx_alpha (detached) / logits (fine 分支 (B, T_f-1, V) fp32)
+          bpd (理想模型 bits/dim，按 H·W·C 子像素数归一化；两个流各自的
+               首 token 使用均匀 256-way 先验，CE 仅覆盖 N-1 个预测 token) /
+          ctx_alpha (detached) / logits (fine 分支) / logits_coarse (coarse 分支)
         """
         x = x.clamp(0, 1).to(torch.float32)              # encoder/decoder 一致性
         x_c_float = self._coarse_input(x)
@@ -174,9 +177,13 @@ class CCIGPT(nn.Module):
                           coarse_ctx=self.ctx_alpha * coarse_ctx)
 
         N_c, N_f = self.coarse.seq_len, self.fine.seq_len
-        bpd_total = (out_c["ce_loss"] * N_c + out_f["ce_loss"] * N_f) / math.log(2.0) / N_f
+        bpd_total = dual_stream_bpd(
+            out_c["ce_loss"], N_c, out_f["ce_loss"], N_f,
+        )
 
         return {
+            # Keep the objective used by existing checkpoints. bpd_total below is
+            # independently rate-aligned and must not be substituted silently here.
             "loss": out_c["loss"] + out_f["loss"],
             "ce_loss": out_f["ce_loss"],
             "ce_loss_coarse": out_c["ce_loss"],
@@ -184,6 +191,7 @@ class CCIGPT(nn.Module):
             "bpd": bpd_total,
             "ctx_alpha": self.ctx_alpha.detach(),
             "logits": out_f["logits"],
+            "logits_coarse": out_c["logits"],
         }
 
     @torch.no_grad()

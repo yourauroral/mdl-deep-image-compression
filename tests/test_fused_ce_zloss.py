@@ -19,7 +19,7 @@ import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from src.mdlic.ops.fused_ce_zloss import fused_cross_entropy_zloss
+from mdlic.ops.fused_ce_zloss import fused_cross_entropy_zloss
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton kernel requires CUDA")
 

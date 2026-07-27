@@ -1,5 +1,5 @@
 % =============================================================
-%  CC-iGPT v2 答辩 beamer (精简版，10 页，图片用户自插)
+%  CC-iGPT v2 答辩 beamer
 %  编译: xelatex defense.tex (双编译保 TOC/目录正确)
 %  Overleaf: 上传本单文件，编译器选 XeLaTeX 即可
 % =============================================================
@@ -69,12 +69,13 @@ L^{\star}(x) \;=\; -\log_2 p(x) \quad \text{(bits)}.
 \[
 p_\theta(x) \;=\; \prod_t p_\theta(x_t \mid x_{<t}),
 \qquad
-\text{\alert{bpd} } = \frac{\mathrm{CE}_\theta(x)}{\ln 2 \cdot H W C}.
+\text{\alert{bpd} } = \frac{-\log_2 p_\theta(x)}{H W C}.
 \]
 
 \medskip
 \begin{itemize}
-  \item \textbf{CE loss 直接等于压缩率} —— 训练目标与评估指标完全对齐
+  \item teacher-forced CE 覆盖 $T-1$ 个预测；完整 stream 另计首 token 先验
+  \item 当前 bpd 是预共享模型下的 $L(x\mid\theta)$，不包含 $L(\theta)$
   \item 全程 \textbf{RGB-bit-exact} 域，不经色彩前端，与主流基线同域可比
 \end{itemize}
 \end{frame}
@@ -111,7 +112,7 @@ p_\theta(x) \;=\; \prod_t p_\theta(x_t \mid x_{<t}),
 \vfill
 \centering\small
 \color{muted}
-回应导师反馈「下游不清晰」 $\Rightarrow$ \color{ours}\textbf{§5 MDL 下游主线：压得好 $\Rightarrow$ 学得好}
+回应导师反馈「下游不清晰」 $\Rightarrow$ \color{ours}\textbf{§5：分别测量条件码长与表征可提取性}
 \end{frame}
 
 % ============================== 2c. 国内外研究现状 ==============================
@@ -154,11 +155,11 @@ p_\theta(x) \;=\; \prod_t p_\theta(x_t \mid x_{<t}),
 
 \vfill
 \centering\small\color{muted}
-本工作定位 $\Rightarrow$ \color{ours}\textbf{RGB-bit-exact 像素 AR（追 bpd）$+$ MDL 下游主线（压得好 $\Rightarrow$ 学得好），统一两条血脉}
+本工作定位 $\Rightarrow$ \color{ours}\textbf{RGB-bit-exact 像素 AR（条件码长）$+$ 表征可提取性分析；二者关系由实验检验}
 \end{frame}
 
-% ============================== 3. 主表结果 ==============================
-\begin{frame}{主表结果：CIFAR-10 RGB-bit-exact}
+% ============================== 3. 历史结果与正式协议 ==============================
+\begin{frame}{历史诊断：CIFAR-10 RGB-bit-exact}
 \begin{center}
 \includegraphics[width=0.92\linewidth]{baseline.png}
 \end{center}
@@ -166,26 +167,37 @@ p_\theta(x) \;=\; \prod_t p_\theta(x_t \mid x_{<t}),
 \vspace{-2mm}
 \centering
 \small
-\textbf{CC-iGPT v2 R-only}: \alert{\textbf{2.8296}} $\pm$ 0.0854 bpd \;
-(82.95\,M params, 200 ep, ensemble + TTA hflip)
+\textbf{CC-iGPT v2 R-only}: \alert{\textbf{2.8296}} bpd \;
+(3$\times$82.95\,M stored params, 200 ep, ensemble + TTA hflip, 6 forwards/image)
 
 \smallskip
-{\scriptsize vs PixelSNAIL $\approx$91M (2.85) \textbf{$-0.020$} \;\; $\cdot$ \;\; vs Sparse Transformer 59M (2.80) $+0.020$}
+{\scriptsize 历史探索值，不作为单模型正式主表；正式结果待 single checkpoint / no-TTA / per-image manifest 重评。}
 \end{frame}
 
 % ============================== 3b. ImageNet64 第二轨道（完成 2026-06-07） ==============================
-\begin{frame}{第二轨道：ImageNet 64$\times$64（主表 3.4800 bpd）}
+\begin{frame}{第二轨道：ImageNet 64$\times$64（历史诊断）}
 \centering
-\includegraphics[width=0.92\linewidth]{ImageNet64baseline.pdf}
+\begin{tabular}{lcc}
+\toprule
+方法 & 参数量 & bpd $\downarrow$ \\
+\midrule
+Sparse Transformer & 152M & 3.44 \\
+SPN & -- & 3.52 \\
+Gated PixelCNN & -- & 3.57 \\
+PixelRNN & -- & 3.63 \\
+\textcolor{ours}{CC-iGPT 历史 ensemble+TTA} & $3\times82.95$M & \textcolor{ours}{3.4800} \\
+\textbf{CC-iGPT 正式单模型} & 82.95M & \textbf{待重评} \\
+\bottomrule
+\end{tabular}
 
 \medskip
-{\small 主表 ensemble (best+SWA+EMA) + TTA hflip = \textbf{3.4800 bpd}：超 SPN 3.52、逼近未达 Sparse Transformer 152M 3.44}
+{\small 3.4800 只描述三成员、6-forward/image 历史配置；正式比较需单模型重评并记录实际数据 hash。}
 \end{frame}
 
 % ============================== 4. 模型架构总览（图） ==============================
 \begin{frame}{模型架构：CC-iGPT 双尺度条件 AR}
 \begin{center}
-\includegraphics[height=0.78\textheight,keepaspectratio]{cc-igpt_arch.pdf}
+\includegraphics[height=0.78\textheight,keepaspectratio]{cc-igpt_arch.png}
 \end{center}
 \end{frame}
 
@@ -206,36 +218,29 @@ p_\theta(x) \;=\; \prod_t p_\theta(x_t \mid x_{<t}),
 \[
 \mathcal{L} = \mathcal{L}_{\text{coarse}} + \mathcal{L}_{\text{fine}}
 \]
-无尺度间加权，回避多尺度 loss 平衡难题
+历史训练按两流平均 CE 等权；它不等于真实码长加权，本轮保持 checkpoint 口径不变
 \end{column}
 \begin{column}{0.50\textwidth}
 \textbf{联合 bits/dim}
 \[
-\mathrm{bpd}_{\text{total}} \;=\; \frac{\mathrm{CE}_c\,N_c + \mathrm{CE}_f\,N_f}{\ln 2 \cdot N_f}
+\mathrm{bpd}_{\text{total}} \;=\; \frac{8+\mathrm{CE}_c(N_c-1)/\ln2+8+\mathrm{CE}_f(N_f-1)/\ln2}{N_f}
 \]
 
 \medskip
 其中 $N_c = 64$ (coarse 8$\times$8 R), $N_f = 3072$ ($32{\times}32{\times}3$)。
 
 \medskip
-\textbf{实测分解（CIFAR-10 主表）}
+\textbf{历史诊断分解（展示 CE 已四舍五入）}
 \begin{itemize}
   \item $\mathrm{CE}_c = 4.3302$ \quad bpd 占比 \alert{4.6\%}
   \item $\mathrm{CE}_f = 1.8711$ \quad bpd 占比 \alert{95.4\%}
-  \item $\Rightarrow$ \alert{\textbf{2.8296}} bpd
+  \item 精确 bpd 必须由原始逐图结果按上式重算
 \end{itemize}
 \end{column}
 \end{columns}
 \end{frame}
 
-% ============================== 5. Coarse pipeline (图) ==============================
-\begin{frame}{Coarse GPT pipeline —— $\sim$2\% 预算的「轮廓码」}
-\begin{center}
-\includegraphics[height=0.78\textheight,keepaspectratio]{Coarse branch pipeline.pdf}
-\end{center}
-\end{frame}
-
-% ============================== 5b. Coarse pipeline (文字) ==============================
+% ============================== 5. Coarse pipeline ==============================
 \begin{frame}{Coarse 分支：模块组成与产出}
 \begin{columns}[T]
 \begin{column}{0.48\textwidth}
@@ -275,14 +280,7 @@ p_\theta(x) \;=\; \prod_t p_\theta(x_t \mid x_{<t}),
 \end{columns}
 \end{frame}
 
-% ============================== 6. Fine pipeline (图) ==============================
-\begin{frame}{Fine GPT pipeline —— 主压缩主体（占 95.4\% bpd）}
-\begin{center}
-\includegraphics[height=0.78\textheight,keepaspectratio]{Fine branch pipeline.pdf}
-\end{center}
-\end{frame}
-
-% ============================== 6b. Fine pipeline (文字) ==============================
+% ============================== 6. Fine pipeline ==============================
 \begin{frame}{Fine 分支：Ctx 注入与子像素 AR}
 \begin{columns}[T]
 \begin{column}{0.48\textwidth}
@@ -299,7 +297,7 @@ p_\theta(x) \;=\; \prod_t p_\theta(x_t \mid x_{<t}),
 \textbf{Fine iGPT（深窄）}
 \begin{itemize}
   \item $d_{\text{model}} = 448$, $N = 32$ 层 \\
-        (\textbf{82.95\,M} params)
+        (fine \textbf{78.14\,M}；全模型 \textbf{82.95\,M})
   \item Flash Attn v2, SwiGLU, \\
         RoPE, RMSNorm (post-norm)
 \end{itemize}
@@ -328,7 +326,7 @@ p(G \mid R), \quad p(B \mid R, G)
 % ============================== 7. Bit-exact ctx (图) ==============================
 \begin{frame}{Bit-exact ctx pipeline}
 \begin{center}
-\includegraphics[height=0.78\textheight,keepaspectratio]{bit-exact ctx pipeline.pdf}
+\includegraphics[height=0.78\textheight,keepaspectratio]{bit-exact-ctx-pipeline.png}
 \end{center}
 \end{frame}
 
@@ -344,7 +342,7 @@ $\to$ \texttt{re-tokenize} $\to$ \texttt{fine.token\_embed} $\to$ \texttt{AR shi
 \medskip
 \begin{itemize}
   \item \textbf{Encoder / decoder 共用同一函数} —— bitstream 真实可解，不是「训练时 oracle」
-  \item \textbf{整条 ctx 通路仅引入 1 个标量参数 $\alpha$} —— 零新参注入，避开多尺度联合 AR 的 loss 平衡难题
+  \item \textbf{整条 ctx 通路仅引入 1 个标量参数 $\alpha$} —— 不引入额外条件编码网络
   \item 复用 \texttt{fine.token\_embed} 完成 ctx 编码 —— 与下游 token 共享语义空间
   \item AR shift \texttt{[:, 1:]} —— ctx[i] 对应 fine 被预测位置 $i$（PixelCNN++ conditional 标准语义）
 \end{itemize}
@@ -353,7 +351,7 @@ $\to$ \texttt{re-tokenize} $\to$ \texttt{fine.token\_embed} $\to$ \texttt{AR shi
 % ============================== 7c. 编码/解码数据流程图 ==============================
 \begin{frame}{Codec 数据流：编码 / 解码对称性}
 \begin{center}
-\includegraphics[height=0.78\textheight,keepaspectratio]{CC-iGPT codec dataflow.pdf}
+\includegraphics[height=0.78\textheight,keepaspectratio]{CC-iGPT-codec-dataflow.png}
 \end{center}
 \end{frame}
 
@@ -392,37 +390,51 @@ $\to$ \texttt{re-tokenize} $\to$ \texttt{fine.token\_embed} $\to$ \texttt{AR shi
 
 % ============================== 8. 训练 (图) ==============================
 \begin{frame}{训练动力学：CIFAR-10 与 ImageNet64 训练曲线}
-\centering
-% 两图按同一高度并排（CIFAR 曲线偏扁，IN64 偏方）；resizebox 锁定总宽=\linewidth，等高且不出框
-\resizebox{\linewidth}{!}{%
-  \includegraphics[height=4cm]{CC-iGPT R-only training curves.pdf}\hspace{3mm}%
-  \includegraphics[height=4cm]{ImageNet_trainning_curve.pdf}%
-}
+\begin{columns}[T]
+\begin{column}{0.62\textwidth}
+\includegraphics[width=\linewidth]{CC-iGPT-R-only-training-curves.png}
+\end{column}
+\begin{column}{0.36\textwidth}
+\small
+\textbf{ImageNet64 v1，12 ep}
+\begin{itemize}\setlength{\itemsep}{2pt}
+  \item val: 3.6624 $\to$ 3.4810
+  \item train: 4.3969 $\to$ 3.4124
+  \item best / EMA / SWA 末点接近
+  \item 正式 single/no-TTA 待重评
+\end{itemize}
+\end{column}
+\end{columns}
 
-\vspace{2mm}
-{\centering\footnotesize\color{muted}
-左：CIFAR-10 v2 R-only 200 ep（主表 2.8296）\quad 右：ImageNet 64$\times$64 12 ep cosine（主表 ensemble+TTA 3.4800）\par}
+\medskip
+{\centering\footnotesize\color{muted}图中与文中 ensemble+TTA 数字均只作历史诊断。\par}
 \end{frame}
 
 % ============================== 9. Triton Kernel (图) ==============================
-\begin{frame}{工程：8 个手写 Triton Kernel —— Speedup}
-\begin{center}
-\includegraphics[height=0.78\textheight,keepaspectratio]{Triton-kernel-speedup-bar-chart.pdf}
-\end{center}
+\begin{frame}{工程：Triton primitive —— profiling 状态}
+\begin{block}{历史数字已撤回}
+旧 H800 benchmark 把输入分配计入部分 PyTorch 路径，且显存增量口径不一致。修正后的 harness 尚未在 CUDA 环境重跑，因此当前不展示 speedup 数值。
+\end{block}
+\medskip
+\centering
+正式报告将同时给出 forward-only、forward+backward、输入 shape、warmup/repeat、峰值显存与完整软硬件环境。
 \end{frame}
 
 % ============================== 9a. Triton Kernel 显存 (图) ==============================
-\begin{frame}{工程：Triton Kernel —— 显存节省}
-\begin{center}
-\includegraphics[height=0.78\textheight,keepaspectratio]{Triton-kernel-memory-savings-bar-chart.pdf}
-\end{center}
+\begin{frame}{工程：Triton Kernel —— 验证边界}
+\begin{itemize}
+  \item CPU 测试验证接口、fallback 与错误处理
+  \item CUDA correctness 需逐 primitive 对齐 PyTorch forward/backward
+  \item 性能结论等待修正 harness 在目标 GPU 上重跑
+  \item RoPE$\to$FlashAttention 是组合 pipeline，不另计融合 primitive
+\end{itemize}
 \end{frame}
 
 % ============================== 9b. Triton Kernel (文字) ==============================
 \begin{frame}{工程：Kernel 清单与反面案例}
 \begin{columns}[T]
 \begin{column}{0.50\textwidth}
-\textbf{7 个进入训练栈}
+\textbf{6 类 primitive 进入训练栈}
 \begin{itemize}\setlength{\itemsep}{2pt}
   \item Flash Attention v2 ($\sim$960 行)
   \item Fused CE + z-loss
@@ -430,7 +442,7 @@ $\to$ \texttt{re-tokenize} $\to$ \texttt{fine.token\_embed} $\to$ \texttt{AR shi
   \item Fused Add + RMSNorm
   \item Fused SwiGLU
   \item Fused RoPE
-  \item Fused Attn + RoPE
+  \item RoPE $\to$ FlashAttention pipeline（组合前两项，不另计 primitive）
 \end{itemize}
 \end{column}
 \begin{column}{0.48\textwidth}
@@ -456,35 +468,28 @@ $\to$ \texttt{re-tokenize} $\to$ \texttt{fine.token\_embed} $\to$ \texttt{AR shi
 \end{frame}
 
 % ============================== 10. 下游任务：MDL 主线总览 ==============================
-\begin{frame}{下游任务：MDL 主线「压得好 $\Rightarrow$ 学得好」}
-同一份 CC-iGPT 权重（\textbf{不重训、不微调}），从三个侧面验证它学到的是\\
-自然图像的通用统计，而非数据集记忆：
+\begin{frame}{下游任务：条件码长与表征分析}
+同一份 CC-iGPT 权重（\textbf{不微调 backbone}），从三个侧面提出可检验的证据；\\
+probe 仍需无泄漏选层和匹配对照，不能单独排除数据集记忆：
 
 \medskip
 \centering\small
 \begin{tabular}{@{}lll@{}}
 \toprule
-\textbf{侧面} & \textbf{任务} & \textbf{验证的 MDL 命题} \\
+\textbf{侧面} & \textbf{任务} & \textbf{测量对象} \\
 \midrule
 表征 & Linear probe       & 线性可分表征更强        \\
 生成 & 图像补全 (inpaint) & AR 条件生成能力         \\
 \midrule
 \multicolumn{3}{@{}l}{\textbf{地基}\;：真实可解性 —— 图像 $\leftrightarrow$ .bin 逐 token gold 编解码 bit-identical，} \\
-\multicolumn{3}{@{}l}{\quad\quad\;\; 证明所报 bpd 是\alert{真实可逆码长}而非 proxy} \\
+\multicolumn{3}{@{}l}{\quad\quad\;\; 验证指定模型/协议下样本 payload 的真实可逆码长} \\
 \bottomrule
 \end{tabular}
 
 \medskip
 \footnotesize\color{muted}
 representation 血脉承 iGPT，density 血脉承 Sparse Transformer（纯生成）；\\
-本工作用 MDL 把两者串成一条因果链。
-\end{frame}
-
-% ============================== 下游 1 表征：Linear probe (图) ==============================
-\begin{frame}{下游 1 表征：Linear probe（逐层 top-1 准确率）}
-\begin{center}
-\includegraphics[width=\linewidth,keepaspectratio]{下游任务线性表征.png}
-\end{center}
+本工作用统一的比特度量组织问题，但不预设二者存在因果链。
 \end{frame}
 
 % ============================== 下游 1 表征：Linear probe (文字) ==============================
@@ -500,23 +505,23 @@ representation 血脉承 iGPT，density 血脉承 Sparse Transformer（纯生成
 \end{itemize}
 
 \bigskip
-\textbf{MDL 命题}
+\textbf{待检验假设}
 \begin{itemize}
-  \item 压得越好 $\Rightarrow$ 线性可分表征越强
-  \item ctx 注入显著抬高中层语义表征
+  \item 条件码长与线性可提取性可能相关
+  \item ctx 注入的因果贡献需要匹配训练消融
 \end{itemize}
 \end{column}
 \begin{column}{0.50\textwidth}
 \small
-\textbf{结果}
+\textbf{旧协议探索结果}
 \begin{itemize}\setlength{\itemsep}{2pt}
   \item best \textbf{L19} = \alert{\textbf{79.33\%}}
   \item iGPT-S baseline best L22 = 66.93\%
-  \item \alert{\textbf{+12.4\,pp}}
+  \item 架构/预算不同，差值不能归因于 ctx
 \end{itemize}
 
 \bigskip
-{\scriptsize L0$\to$L19 单调上升至峰值，末段缓降 —— AR 模型典型表征曲线（末层过拟合到 token-level NLL，丢弃部分语义）。}
+{\scriptsize 旧脚本使用 test curve 选层；正式结果待 validation 选层、多 seed、完整 train 重训后回填。}
 \end{column}
 \end{columns}
 \end{frame}
@@ -566,13 +571,6 @@ representation 血脉承 iGPT，density 血脉承 Sparse Transformer（纯生成
 \end{columns}
 \end{frame}
 
-% ============================== 下游 3 地基：真实可解性 (图) ==============================
-\begin{frame}{下游 3 地基：真实可解性 —— 图像 $\leftrightarrow$ .bin 编解码}
-\begin{center}
-\includegraphics[width=0.95\linewidth,height=0.78\textheight,keepaspectratio]{下游任务真实编码解码.png}
-\end{center}
-\end{frame}
-
 % ============================== 下游 3 地基：真实可解性 roundtrip (文字) ==============================
 \begin{frame}{下游 3 地基：可解性方法与命题}
 \begin{columns}[T]
@@ -590,23 +588,24 @@ representation 血脉承 iGPT，density 血脉承 Sparse Transformer（纯生成
 \textbf{可逆性保证}
 \begin{itemize}
   \item 无 KV-cache，\textbf{encode / decode 同一逐 token forward}
-  \item $\Rightarrow$ logits 逐位相同 $\Rightarrow$ 严格可逆（bit-exact）
+  \item 同一模型、数值环境和量化 CDF 下分布逐项一致，才可推出严格可逆
 \end{itemize}
 \end{column}
 \begin{column}{0.50\textwidth}
 \small
-\textbf{MDL 命题（整条主线的地基）}
+\textbf{Codec 证据边界}
 \begin{itemize}\setlength{\itemsep}{2pt}
-  \item 所报 bpd 是\alert{真实可逆码长}，非 proxy
-  \item 区别于只报 bpd、不验可逆性的工作
+  \item CPU：算术 coder、MDLC v2 容器、grouped codec 与 tiny-model roundtrip 已由测试覆盖
+  \item 真实 checkpoint 的 GPU roundtrip、文件 overhead 与跨环境复现仍待重跑
+  \item 历史 ensemble/TTA NLL 不是当前 codec 的文件码长
 \end{itemize}
 
 \bigskip
 \textbf{结果}
 \begin{itemize}\setlength{\itemsep}{2pt}
-  \item codec 单测 6/6 过 $+$ \textbf{2/2 图 bit-identical}
-  \item achieved 码长 $\approx$ 理论 NLL，\alert{量化+收尾 overhead 仅 0.1–0.2\%}
-  \item {\scriptsize 例：img0 3.093 bpd (NLL 3.090) / img1 2.322 (NLL 2.316)，逐图随复杂度变，关键是 overhead 极小 $\Rightarrow$ 报的 bpd = 真码长}
+  \item 当前可确认：CPU 单测覆盖的符号流与 tiny model 可 bit-identical roundtrip
+  \item 历史 2/2 图和 0.1--0.2\% overhead 尚无当前 schema v2 manifest，\alert{不作为正式结果}
+  \item {\scriptsize 正式回填需记录 checkpoint/config/CDF/runtime hash，并同时报告 payload bpd 与 file bpd。}
 \end{itemize}
 \end{column}
 \end{columns}
@@ -620,31 +619,30 @@ representation 血脉承 iGPT，density 血脉承 Sparse Transformer（纯生成
 \textbf{三大创新}
 
 \smallskip
-\textbf{1 方法} —— 零新参的双尺度条件注入 \\
+\textbf{1 方法} —— 单标量参数的双尺度条件注入 \\
 {\scriptsize coarse 量化 token $\to$ bit-exact ctx $\to$ $\alpha\cdot$additive，仅 1 个标量参数}
 
 \smallskip
-\textbf{2 工程} —— 8 个手写 Triton kernel \\
-{\scriptsize 7 进入训练栈 $+$ 1 反面案例（$V{=}256$ roofline 证伪）}
+\textbf{2 工程} —— 6 类手写 Triton primitive \\
+{\scriptsize $+$ RoPE$\to$FlashAttention pipeline $+$ 1 反面案例；性能图待按修正 harness 重跑}
 
 \smallskip
-\textbf{3 分析} —— RGB-bit-exact 主表（双轨道） \\
-{\scriptsize CIFAR-10 \alert{\textbf{2.8296}} 超越 PixelSNAIL $\approx$91M (2.85)、逼近 Sparse Transformer 59M (2.80)，82.95M 参数；\\
-ImageNet 64$\times$64 第二轨道主表 ensemble+TTA \textbf{3.4800}（超过 SPN 3.52，逼近 Sparse Transformer 152M 3.44）}
+\textbf{3 分析} —— RGB-bit-exact 评估与 codec 对账 \\
+{\scriptsize 2.8296 / 3.4800 为三成员 ensemble+TTA 历史诊断；正式单模型主表、probe 与 GPU profiling 待按新协议回填。}
 \end{column}
 \begin{column}{0.50\textwidth}
 \small
-\textbf{MDL 主线：压得好 $\Rightarrow$ 学得好}
+\textbf{信息论主线：分别测量，再检验关系}
 
 \smallskip
 \begin{itemize}\setlength{\itemsep}{2pt}
-  \item \textbf{表征} —— probe best \alert{79.33\%}（$+$12.4\,pp）
+  \item \textbf{表征} —— validation 选层 probe（待重跑）
   \item \textbf{生成} —— AR 图像补全
-  \item \textbf{地基} —— 真实可解性（图像 $\leftrightarrow$ .bin bit-identical）
+  \item \textbf{地基} —— CPU/tiny 已验证 bit-identical；真实 checkpoint v2 待 GPU 重跑
 \end{itemize}
 
 \smallskip
-{\scriptsize 把压缩与表征 / 生成 / 可解性串成因果链，统一 density 与 representation 两条血脉。}
+{\scriptsize 用统一的比特度量组织压缩、表征、生成与可解性，并通过后续消融检验它们之间的关系。}
 \end{column}
 \end{columns}
 

@@ -692,9 +692,8 @@ class TritonAttention(torch.autograd.Function):
         ALIGN = BLOCK_MACRO  # 使用最大 block size 对齐
         PAD = (ALIGN - SEQ_LEN % ALIGN) % ALIGN
         # 非 causal 路径下，pad 的 key 不会被任何 mask 屏蔽，会污染 softmax。
-        # 当前所有训练/评测调用点都是 causal=True（pad key 仅被 pad query 看到，
-        # 对真实位置无影响），故只在 causal=False + 需要 padding 时 fail-fast，
-        # 避免未来非 causal 调用静默得到错误结果。
+        # MaskedIGPT 的完整图像序列天然按 64 对齐；模型层对其它非 causal shape
+        # 回退到 SDPA。直接调用本 Function 时仍 fail-fast，避免 pad key 静默污染。
         assert causal or PAD == 0, (
             f"non-causal attention 要求 seq_len ({SEQ_LEN}) 已对齐到 {ALIGN}；"
             f"否则 pad key 未被屏蔽会污染 softmax。需在调用方预对齐或显式 mask。"

@@ -2,11 +2,15 @@
 """Compute PNG/WebP lossless bits-per-dimension for an ImageNet64 .npy file."""
 
 import argparse
-import io
+import os
+import sys
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+
+from mdlic.traditional_codecs import codec_metadata, encode_rgb_array
 
 
 def compute_bpd(path: Path, limit: int | None) -> tuple[float, float]:
@@ -18,20 +22,16 @@ def compute_bpd(path: Path, limit: int | None) -> tuple[float, float]:
         )
 
     n = data.shape[0] if limit is None else min(limit, data.shape[0])
+    if n <= 0:
+        raise ValueError("dataset and --limit must select at least one image")
     dims = data.shape[1] * data.shape[2] * data.shape[3]
     png_bits = 0
     webp_bits = 0
 
     for i in range(n):
-        image = Image.fromarray(np.asarray(data[i], dtype=np.uint8))
-
-        png_buf = io.BytesIO()
-        image.save(png_buf, "PNG")
-        png_bits += png_buf.tell() * 8
-
-        webp_buf = io.BytesIO()
-        image.save(webp_buf, "WEBP", lossless=True)
-        webp_bits += webp_buf.tell() * 8
+        image = np.asarray(data[i], dtype=np.uint8)
+        png_bits += len(encode_rgb_array(image, "png")) * 8
+        webp_bits += len(encode_rgb_array(image, "webp")) * 8
 
     return png_bits / n / dims, webp_bits / n / dims
 
@@ -57,6 +57,13 @@ def main() -> None:
     png_bpd, webp_bpd = compute_bpd(args.path, limit)
     print(f"PNG  bpd = {png_bpd:.3f}")
     print(f"WebP bpd = {webp_bpd:.3f}")
+    for method in ("png", "webp"):
+        meta = codec_metadata(method)
+        print(
+            f"{meta['display_name']}: Pillow {meta['pillow_version']}, "
+            f"{meta['backend']} {meta['backend_version']}, "
+            f"settings={meta['save_kwargs']}"
+        )
 
 
 if __name__ == "__main__":

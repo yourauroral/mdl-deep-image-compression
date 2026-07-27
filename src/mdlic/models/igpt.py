@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import math
 
 from .layers import GPTBlock, RMSNorm
+from ..rate import single_stream_bpd
 
 # Fused CE + z-loss Triton kernel（可选）：
 # 将 softmax、cross-entropy、z-loss 合并为一次 kernel launch，
@@ -16,6 +17,32 @@ try:
 except ImportError:
     _fused_ce_zloss = None
     _USE_FUSED_CE = False
+
+
+def _categorical_ce_zloss(logits, target_tokens, z_loss_weight: float):
+  """Shared 256-way CE/z-loss implementation for causal and masked paths."""
+  z_w = float(z_loss_weight)
+  vocab_size = logits.shape[-1]
+  if _USE_FUSED_CE and logits.is_cuda and z_w > 0:
+    ce_loss, z_loss = _fused_ce_zloss(
+      logits.reshape(-1, vocab_size),
+      target_tokens.reshape(-1),
+      z_loss_weight=z_w,
+    )
+    return ce_loss + z_w * z_loss, ce_loss, logits
+
+  # PyTorch fallback: use fp32 reductions under bf16/fp16 execution.
+  logits = logits.float()
+  ce_loss = F.cross_entropy(
+    logits.reshape(-1, vocab_size),
+    target_tokens.reshape(-1),
+    reduction="mean",
+  )
+  if z_w <= 0:
+    return ce_loss, ce_loss, logits
+  log_z = torch.logsumexp(logits, dim=-1)
+  z_loss = (log_z ** 2).mean()
+  return ce_loss + z_w * z_loss, ce_loss, logits
 
 
 class IGPT(nn.Module):
@@ -157,7 +184,7 @@ class IGPT(nn.Module):
       coarse_ctx:    可选 (B, T-1, d_model) tensor，作为 additive 全局上下文
                      注入到 token embedding 之上。用于 CC-iGPT 的 fine 模型。
 
-    返回 dict: {loss, ce_loss, logits (B, T-1, V)}
+    返回 dict: {loss, ce_loss, bpd, logits (B, T-1, V)}
     """
     tokens = self._tokenize(x)
     # NTP：输入 x[0..T-1]，预测 x[1..T]
@@ -169,38 +196,15 @@ class IGPT(nn.Module):
     for block in self.blocks:
       hidden = block(hidden, position_ids=position_ids)
 
-    z_w = float(z_loss_weight)
-
     logits = self.head(hidden)
-
-    # Fused CE + z-loss: 一次 kernel launch 完成 softmax → CE → z-loss
-    # （V=256 下 Fused Linear+CE kernel 经 profile_kernels.py --roofline 证伪、未采用）
-    if _USE_FUSED_CE and logits.is_cuda and z_w > 0:
-        # kernel 内 .to(tl.float32) 完成所有累加，无需在外层再 cast
-        ce_loss, z_loss = _fused_ce_zloss(
-            logits.reshape(-1, self.vocab_size),
-            target_tokens.reshape(-1),
-            z_loss_weight=z_w,
-        )
-        loss = ce_loss + z_w * z_loss
-    else:
-        # PyTorch fallback：bf16 下 logsumexp 精度不足，cast 到 fp32 再算
-        logits = logits.float()
-        ce_loss = F.cross_entropy(
-          logits.reshape(-1, self.vocab_size),
-          target_tokens.reshape(-1),
-          reduction="mean"
-        )
-        if z_w > 0:
-            log_z = torch.logsumexp(logits, dim=-1)
-            z_loss = (log_z ** 2).mean()
-            loss = ce_loss + z_w * z_loss
-        else:
-            loss = ce_loss
+    loss, ce_loss, logits = _categorical_ce_zloss(
+      logits, target_tokens, z_loss_weight,
+    )
 
     return {
       "loss": loss,
       "ce_loss": ce_loss,
+      "bpd": single_stream_bpd(ce_loss, self.seq_len),
       "logits": logits
     }
 

@@ -7,11 +7,11 @@
 %   Gated PixelCNN      3.57   van den Oord et al., NeurIPS 2016
 %   SPN (Subscale)      3.52   Menick & Kalchbrenner, ICLR 2019 (coarse-to-fine 最近邻)
 %   Sparse Transformer  3.44   Child et al., 2019  ← 目标线
-%   CC-iGPT (Ours)      3.4800 本工作，IN64 v1 12ep，主表 ensemble(best+SWA+EMA)+TTA hflip（4卡实测 2026-06-07）
+%   CC-iGPT (historical) 3.4800 本工作，IN64 v1 12ep，ensemble(best+SWA+EMA)+TTA hflip（4卡实测 2026-06-07）
 %
-% 主表数字 3.4800 ± 0.1161（ensemble best/SWA/EMA + TTA hflip；单 ckpt best+TTA=3.4810）。
-%   超 SPN 3.52 by 0.040、逼近但未达 Sparse Transformer 152M 3.44（差 0.040）。叙事"超 SPN、逼近 Sparse Transformer"。
-%   注：± 0.1161 是 4卡 batch-level std，与 CIFAR 主表 per-image 口径不同（要可比需单卡 --per_image_stats 重取）。
+% 历史诊断 3.4800（ensemble best/SWA/EMA + TTA hflip；单 ckpt best+TTA=3.4810）。
+%   数值位于 SPN 3.52 与 Sparse Transformer 3.44 之间，但协议不同，不作正式优劣声明。
+%   旧 ±0.1161 是 batch-level std，已作废；正式结果等待单 checkpoint/no-TTA 逐图重评。
 \documentclass[tikz,border=8pt]{standalone}
 \usepackage{tikz}
 \usepackage{pgfplots}
@@ -50,7 +50,7 @@
     (PixelRNN,    3.63)
 };
 
-% 第5个橘黄柱子（Ours，主表 ensemble+TTA 3.4800）
+% 第5个橘黄柱子（Ours，历史 ensemble+TTA 3.4800）
 \addplot[draw=orange!70!black, fill=orange!30!yellow!80, bar shift=0pt] coordinates {
     (Ours, 3.4800)
 };
@@ -85,7 +85,7 @@
 % --- 占位脚注 (ASCII only, pdflatex 可编译) ---
 \node[font=\scriptsize\itshape, gray!50!black, anchor=north, yshift=-2pt]
     at (current bounding box.south)
-    {CC-iGPT v1 12ep: ensemble(best+SWA+EMA)+TTA = 3.4800 bpd (4-GPU)};
+    {Historical diagnostic: 3-member ensemble+TTA = 3.4800 bpd; formal single-model result pending};
 
 \end{tikzpicture}
 \end{document}

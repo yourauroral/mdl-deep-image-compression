@@ -26,11 +26,12 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
 
 def _build_model(config, checkpoint, device):
     import torch
-    from src.mdlic.utils import clean_state_dict
+    from mdlic.utils import clean_state_dict
     from scripts.train import _build_ccigpt_from_config, _build_model_from_config
 
     mcfg = config["model"]

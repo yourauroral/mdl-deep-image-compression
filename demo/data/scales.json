@@ -2,12 +2,14 @@
   "model": "CC-iGPT (R-only) v2",
   "image_size": 32,
   "scales": [
-    {"scale": "Coarse (R-only)", "resolution": "8x8x1",   "tokens": 64,   "role": "灰度先验，独立编码进 bitstream",                                       "ce_nats": 4.3302, "bpd_share": 0.1302, "share_pct": 4.6},
-    {"scale": "Fine",            "resolution": "32x32x3", "tokens": 3072, "role": "条件 fine NTP（注入 α·coarse_ctx）+ pixel-first AR 自学 G/B 偏色", "ce_nats": 1.8711, "bpd_share": 2.6995, "share_pct": 95.4}
+    {"scale": "Coarse (R-only)", "resolution": "8x8x1",   "tokens": 64,   "role": "灰度先验，独立编码进 bitstream",                                       "ce_nats": 4.3302, "bpd_share": 0.1307, "share_pct": 4.6},
+    {"scale": "Fine",            "resolution": "32x32x3", "tokens": 3072, "role": "条件 fine NTP（注入 α·coarse_ctx）+ pixel-first AR 自学 G/B 偏色", "ce_nats": 1.8711, "bpd_share": 2.7012, "share_pct": 95.4}
   ],
   "total_tokens": 3136,
-  "bpd_total": 2.8296,
-  "bpd_std": 0.0854,
+  "bpd_total": 2.8319,
+  "derived_from_rounded_ce": true,
+  "historical_reported_bpd": 2.8296,
+  "historical_reported_std": 0.0854,
   "ctx_alpha": 0.1009,
-  "note": "softmax head 主表 v2 (2026-05-27, N=32/d=448, 200ep + RandomCrop + DropPath 0.1 + EMA 0.9998 + SWA last 31 ckpts + ensemble best/SWA/EMA + TTA hflip)"
+  "note": "历史诊断分解；bpd_total 按两个 8-bit 首 token + CE*(N-1) 从已四舍五入 CE 近似重算；旧 std 口径已作废，不是正式单 checkpoint/no-TTA 结果"
 }

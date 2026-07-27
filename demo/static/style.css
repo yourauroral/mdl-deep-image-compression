@@ -36,7 +36,10 @@ header h1 {
 
 /* 顶栏数据集 toggle：segmented control 风格 */
 .dataset-toggle {
-  display: inline-flex;
+  display: flex;
+  width: min(100%, 430px);
+  margin-left: auto;
+  margin-right: auto;
   margin-top: 1.1rem;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -45,6 +48,8 @@ header h1 {
 }
 .dataset-opt {
   cursor: pointer;
+  flex: 1;
+  min-width: 0;
 }
 .dataset-opt input {
   position: absolute;
@@ -60,6 +65,7 @@ header h1 {
   font-weight: 600;
   color: var(--text-dim);
   transition: background 0.15s, color 0.15s;
+  overflow-wrap: anywhere;
 }
 .dataset-opt span small {
   font-size: 0.72rem;
@@ -117,6 +123,28 @@ main {
   color: var(--text-dim);
   font-size: 0.82rem;
   margin-bottom: 1rem;
+}
+
+.data-status {
+  margin: 0 0 1rem;
+  padding: 0.6rem 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-dim);
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+.data-status-warning {
+  border-color: rgba(255, 152, 0, 0.4);
+  background: rgba(255, 152, 0, 0.1);
+  color: #ffb74d;
+}
+
+.data-status-valid {
+  border-color: rgba(127, 224, 163, 0.4);
+  background: rgba(127, 224, 163, 0.08);
+  color: #7fe0a3;
 }
 
 /* Upload area */

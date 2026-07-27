@@ -15,11 +15,11 @@
   <div class="dataset-toggle" role="radiogroup" aria-label="数据集切换">
     <label class="dataset-opt">
       <input type="radio" name="dataset-toggle" value="cifar10" checked>
-      <span>CIFAR-10 <small>2.8296 bpd</small></span>
+      <span>CIFAR-10 <small>legacy ens.+TTA 2.8296</small></span>
     </label>
     <label class="dataset-opt">
       <input type="radio" name="dataset-toggle" value="imagenet64">
-      <span>ImageNet64 <small>3.4800 bpd</small></span>
+      <span>ImageNet64 <small>legacy ens.+TTA 3.4800</small></span>
     </label>
   </div>
 </header>
@@ -35,7 +35,7 @@
       <div class="upload-placeholder" id="upload-placeholder">
         <span class="upload-icon">+</span>
         <p>点击或拖拽上传图片</p>
-        <p class="hint">支持 PNG / JPG，将缩放至 32×32</p>
+        <p class="hint" id="predict-size-hint">支持 PNG / JPG；分析前转为 32x32 RGB</p>
       </div>
       <img id="preview-img" class="preview-img" hidden>
     </div>
@@ -59,6 +59,7 @@
         <span class="extra-item">CE<sub>fine</sub>: <b id="result-ce-fine">—</b></span>
         <span class="extra-item">α: <b id="result-alpha">—</b></span>
       </div>
+      <p id="result-preprocessing" class="hint" hidden></p>
       <div class="heatmap-container">
         <p class="heatmap-title">Per-position BPP 热力图 (bits/pixel)</p>
         <img id="heatmap-img" class="heatmap-img" hidden>
@@ -83,7 +84,8 @@
 <!-- Panel 4: Linear Probe -->
 <section class="panel" id="panel-probe">
   <h2>Linear Probe 各层分类准确率</h2>
-  <p class="panel-desc">冻结预训练模型，在各层 hidden state 上训练线性分类器，衡量表征质量 (Chen et al., 2020)。CC-iGPT v2 fine 分支（32 层，with α·coarse_ctx 注入）逐层 top-1 acc：L0→L19 单调上升至峰值 79.33%，末段缓降是 AR 模型典型表征曲线（末层过拟合到 token-level NLL 目标，丢弃部分语义信息）。</p>
+  <p class="panel-desc" id="probe-desc">冻结预训练模型，在 hidden state 上训练线性分类器；结果状态以实验 manifest 为准。</p>
+  <p class="data-status" id="probe-status" role="status" hidden></p>
   <div class="chart-container">
     <canvas id="chart-probe"></canvas>
   </div>
@@ -92,8 +94,8 @@
 <!-- Panel 5: Kernel 性能 -->
 <section class="panel" id="panel-kernels">
   <h2>Triton Kernel 性能对比</h2>
-  <p class="panel-desc">7 个进入训练栈的手写 Triton Kernel vs PyTorch 原生实现</p>
-  <div class="chart-container">
+  <p class="panel-desc" id="kernels-desc">Triton/custom 路径 vs PyTorch 原生实现</p>
+  <div class="chart-container" id="kernels-chart-wrap">
     <canvas id="chart-kernels"></canvas>
   </div>
 </section>
@@ -101,7 +103,8 @@
 <!-- Panel 6: CC-iGPT coarse/fine token 分配 -->
 <section class="panel" id="panel-scales">
   <h2>CC-iGPT 双尺度 Token 分配</h2>
-  <p class="panel-desc">浅层 coarse iGPT (R-only, 8×8×1, 64 token) 独立编码进 bitstream，UP+量化后注入 fine iGPT (32×32×3, 3072 token)</p>
+  <p class="panel-desc" id="scales-desc"></p>
+  <p class="data-status" id="scales-status" role="status" hidden></p>
   <div class="chart-container">
     <canvas id="chart-scales"></canvas>
   </div>
@@ -111,9 +114,9 @@
   </table>
 </section>
 
-<!-- ────────── 下游任务（论文 §5 MDL 主线：压得好 → 学得好）────────── -->
+<!-- ────────── 下游任务：分别测量压缩、表征与生成 ────────── -->
 <div class="section-divider">
-  <span>下游任务 — MDL 主线：压得越好 ⇒ 学得越好</span>
+  <span>下游任务 — 分别测量压缩、表征与生成</span>
 </div>
 
 <!-- Panel 7: 图像补全 (AR inpainting) -->
@@ -131,7 +134,7 @@
         <div class="upload-placeholder" id="cmp-upload-placeholder">
           <span class="upload-icon">+</span>
           <p>点击或拖拽上传图片</p>
-          <p class="hint">缩放至 32×32 后 AR 补全</p>
+          <p class="hint" id="complete-size-hint">转为 32x32 RGB 后 AR 补全</p>
         </div>
         <img id="cmp-preview-img" class="preview-img" hidden>
       </div>
@@ -152,7 +155,7 @@
     <div class="result-area">
       <div class="cmp-pipeline">
         <div class="cmp-stage">
-          <span class="cmp-stage-label">原图 32×32</span>
+          <span class="cmp-stage-label" id="cmp-orig-label">原图 32×32</span>
           <img id="cmp-orig" class="cmp-img" hidden>
           <span class="cmp-img-ph" id="cmp-orig-ph">—</span>
         </div>
@@ -180,9 +183,10 @@
   <h2>真实可解性验证 — 无损 codec 图像 ⇄ .bin 文件</h2>
   <p class="dataset-warning" hidden>⚠ ImageNet64 模式：64×64 编/解各 ~12500 步，单向约 4–8 分钟（CIFAR 的 ~4×）。.bin 容器记录图像几何，只能用同款 IN64 模型解码（CIFAR↔IN64 互解会被几何校验拒绝）。</p>
   <p class="panel-desc">
-    把模型当真实无损 codec：上传图 → <b>逐 token gold 算术编码</b>下载真实<b>自包含 .bin</b>（MDLC 容器，与 CLI
-    <code>verify_lossless.py --dump_dir</code> 逐字节一致）；再把 .bin 传回 → <b>仅凭文件</b>即时解析结构，
-    或<b>逐 token 盲解码</b>还原图像、逐像素比对。编/解同一逐 token 路径 → bit-exact 可解（指纹一致即证）。
+    把模型当真实无损 codec：上传图 → <b>逐 token gold 算术编码</b>下载<b>模型绑定的 .bin</b>（MDLC v2，与 CLI
+    <code>verify_lossless.py --dump_dir</code> 共用协议）；再把 .bin 传回 → <b>仅凭文件</b>即时解析结构和 identity，
+    或使用匹配的 checkpoint <b>逐 token 盲解码</b>还原图像并校验 RGB SHA-256。这里的无损指输入转为 RGB 后的像素逐值一致；
+    原 PNG/JPEG 文件字节、压缩参数和元数据不在 MDLC 容器中。
     解码无 KV-cache → 每 token 一次完整 forward，CIFAR ≈ 3100 步、约
     1–2 分钟，流式进度条实时显示（绕开反代超时）。
   </p>
@@ -196,7 +200,7 @@
         <div class="upload-placeholder" id="co-enc-placeholder">
           <span class="upload-icon">+</span>
           <p>点击或拖拽上传图片</p>
-          <p class="hint">缩放至 32×32 后编码</p>
+          <p class="hint" id="encode-size-hint">须恰好为 32x32；不做静默缩放</p>
         </div>
         <img id="co-enc-preview" class="preview-img" hidden>
       </div>
@@ -209,7 +213,7 @@
         <div class="codec-stats" id="co-enc-stats"></div>
         <a id="co-enc-download" class="co-download" download>⬇ 下载 .bin</a>
       </div>
-      <p id="co-enc-note" class="hint codec-note">编码用逐 token gold 算术编码（与解码端同源，bit-exact 可解），约 1–2 分钟、流式显示进度。</p>
+      <p id="co-enc-note" class="hint codec-note">编码用逐 token gold 算术编码；校验范围是预处理后的 RGB 像素，约 1–2 分钟。</p>
     </div>
 
     <!-- 解码块 -->
@@ -246,7 +250,7 @@
         <div id="co-dec-badge" class="ll-badge"></div>
       </div>
       <p id="co-dec-note" class="hint codec-note">
-        盲解码：只给文件、无原图，逐 token 重跑 forward（与 verify_lossless gold 路径同源）。
+        盲解码：给出 MDLC 文件和 identity 匹配的外部模型、无原图，逐 token 重跑 forward；不恢复原始 PNG/JPEG 文件字节。
       </p>
     </div>
 

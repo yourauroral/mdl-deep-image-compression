@@ -6,6 +6,9 @@ __pycache__/
 .venv/
 .env
 .ipynb_checkpoints/
+build/
+dist/
+*.egg-info/
 
 # Experiments / outputs (DO NOT COMMIT)
 experiments/
@@ -28,7 +31,6 @@ assets/
 
 # AI files (DO NOT COMMIT)
 CLAUDE.md
-future.md
 .claude/
 cv_template.tex
 
@@ -40,5 +42,6 @@ cv_template.tex
 !requirements-dev.txt
 *.log
 reading_plan.md
+plan.md
 # 论文草稿（local-only，markdown 草稿 → 复制到 Word）
 thesis/

@@ -14,7 +14,7 @@ Demo 可视化后端 — FastAPI + 静态文件。
   GET  /api/scales      — CC-iGPT coarse/fine token 分配
   POST /api/predict     — 上传图片 → 返回 bpd / 双尺度 CE / 热力图
   POST /api/complete    — 上传图片 → AR 补全下半（下游 §6.2，实时采样，~20–40s）
-  POST /api/encode      — 上传图片 → 逐 token gold 算术编码为自包含 MDLC .bin（流式 NDJSON）
+  POST /api/encode      — 上传图片 → 逐 token gold 算术编码为模型绑定 MDLC .bin（流式 NDJSON）
   POST /api/inspect     — 上传 .bin → 即时解析容器结构/码长/bpd（无需 GPU/ckpt）
   POST /api/decode      — 上传 .bin → 流式逐 token 盲解码还原图像（NDJSON 进度）
 """
@@ -25,13 +25,15 @@ import sys
 import io
 import math
 import base64
+import gc
 import hashlib
+import hmac
 import logging
 import threading
 
 import numpy as np
 from pathlib import Path
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -46,6 +48,10 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg
 # 项目根目录
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "src"))
+
+from mdlic.rate import num_model_predictions
+from mdlic.request_limits import SlidingWindowRateLimiter
 
 DATA_DIR = Path(__file__).resolve().parent / "data"
 
@@ -81,6 +87,7 @@ def _dataset_json(stem: str, dataset: str) -> str:
 # 上传图片大小上限（10 MB）和允许的 MIME 类型，防止 /api/predict 被恶意大文件
 # 或非图片文件耗尽内存。
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+MAX_DECODED_PIXELS = 25_000_000
 ALLOWED_CONTENT_TYPES = {
     "image/jpeg", "image/png", "image/webp", "image/gif", "image/bmp",
 }
@@ -90,6 +97,98 @@ app = FastAPI(title="MDL Deep Image Compression Demo")
 # 流式端点出错时：完整堆栈记到服务端日志，客户端只收通用提示（避免在公网
 # AutoDL --host 0.0.0.0 映射下把 CUDA OOM / 主机路径等内部细节泄漏给访问者）。
 logger = logging.getLogger("mdlic.demo")
+
+
+def _env_number(name, default, cast, minimum):
+    try:
+        value = cast(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        value = cast(default)
+    return max(minimum, value)
+
+
+# 模型缓存是全局单槽，因此模型任务固定串行。这样切换 CIFAR/ImageNet64 时，旧模型
+# 已无在途使用者，可以先释放显存再加载新模型，不会在切换窗口同时常驻两份权重。
+_COMPUTE_CONCURRENCY = 1
+_COMPUTE_QUEUE_LIMIT = _env_number("MDLIC_DEMO_GPU_QUEUE", 2, int, 0)
+_COMPUTE_WAIT_SECONDS = _env_number("MDLIC_DEMO_GPU_WAIT_SECONDS", 30.0, float, 0.1)
+_COMPUTE_SLOTS = threading.BoundedSemaphore(_COMPUTE_CONCURRENCY)
+_COMPUTE_ADMISSION = threading.BoundedSemaphore(
+    _COMPUTE_CONCURRENCY + _COMPUTE_QUEUE_LIMIT
+)
+
+_POST_RATE_LIMIT = _env_number("MDLIC_DEMO_RATE_LIMIT", 8, int, 0)
+_POST_RATE_WINDOW = _env_number(
+    "MDLIC_DEMO_RATE_WINDOW_SECONDS", 60.0, float, 1.0,
+)
+_REQUEST_LIMITER = SlidingWindowRateLimiter(
+    limit=_POST_RATE_LIMIT,
+    window_seconds=_POST_RATE_WINDOW,
+)
+_API_KEY = os.environ.get("MDLIC_DEMO_API_KEY")
+_TRUST_PROXY = os.environ.get("MDLIC_DEMO_TRUST_PROXY", "").lower() in {
+    "1", "true", "yes",
+}
+
+
+def _request_client_key(request: Request) -> str:
+    if _TRUST_PROXY:
+        forwarded = request.headers.get("x-forwarded-for")
+        if forwarded:
+            return forwarded.split(",", 1)[0].strip()
+    return request.client.host if request.client is not None else "unknown"
+
+
+@app.middleware("http")
+async def protect_compute_endpoints(request: Request, call_next):
+    """Authenticate and rate-limit POST APIs before they can enter the GPU queue."""
+    if request.method == "POST" and request.url.path.startswith("/api/"):
+        if _API_KEY:
+            supplied = request.headers.get("x-api-key", "")
+            if not hmac.compare_digest(supplied, _API_KEY):
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "API key required"},
+                    headers={"X-MDLIC-API-Key-Required": "1"},
+                )
+        allowed, retry_after = _REQUEST_LIMITER.admit(_request_client_key(request))
+        if not allowed:
+            return JSONResponse(
+                status_code=429,
+                content={"detail": "请求过于频繁，请稍后重试"},
+                headers={"Retry-After": str(retry_after)},
+            )
+    return await call_next(request)
+
+
+class _ComputeLease:
+    def __init__(self):
+        self._released = False
+
+    def release(self):
+        if not self._released:
+            self._released = True
+            _COMPUTE_SLOTS.release()
+            _COMPUTE_ADMISSION.release()
+
+
+def _acquire_compute_lease():
+    """取得一个有界模型执行槽；调用方必须在 finally 中 release。"""
+    retry_after = str(max(1, math.ceil(_COMPUTE_WAIT_SECONDS)))
+    if not _COMPUTE_ADMISSION.acquire(blocking=False):
+        raise HTTPException(
+            status_code=429,
+            detail="模型请求队列已满，请稍后重试",
+            headers={"Retry-After": retry_after},
+        )
+    if not _COMPUTE_SLOTS.acquire(timeout=_COMPUTE_WAIT_SECONDS):
+        _COMPUTE_ADMISSION.release()
+        raise HTTPException(
+            status_code=429,
+            detail=f"等待模型执行超过 {_COMPUTE_WAIT_SECONDS:g} 秒，请稍后重试",
+            headers={"Retry-After": retry_after},
+        )
+    return _ComputeLease()
 
 # 显式 CORS 白名单：仅允许本地开发用 origin。部署到公网时按需扩充。
 app.add_middleware(
@@ -146,17 +245,13 @@ def _model_image_size(model, model_type) -> int:
     return model.fine.image_size if model_type == "ccigpt" else model.image_size
 
 
-def _read_upload_to_tensor(file: UploadFile, size: int = 32):
-    """上传图片 → 校验 → resize → (1,3,size,size) float[0,1] tensor + PIL Image。
-
-    /api/predict / /api/encode / /api/complete 共用，保证各路径对上传走完全一致的
-    校验 / 解码 / 缩放，避免 bpd 与编码/补全因预处理口径漂移而对不上。
-    """
+def _read_upload_to_tensor(file: UploadFile, size: int = 32, allow_resize: bool = True):
+    """上传图片转模型 RGB tensor，并返回可审计的预处理元数据。"""
     try:
         from PIL import Image
-        from torchvision import transforms
+        import torch
     except ImportError:
-        raise HTTPException(status_code=500, detail="torch/torchvision not installed")
+        raise HTTPException(status_code=500, detail="torch/Pillow not installed")
 
     if file.content_type and file.content_type not in ALLOWED_CONTENT_TYPES:
         raise HTTPException(status_code=415, detail=f"Unsupported media type: {file.content_type}")
@@ -164,13 +259,50 @@ def _read_upload_to_tensor(file: UploadFile, size: int = 32):
     if len(contents) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail=f"File too large (>{MAX_UPLOAD_BYTES // 1024 // 1024} MB)")
     try:
-        img = Image.open(io.BytesIO(contents)).convert("RGB")
+        source = Image.open(io.BytesIO(contents))
+        source_size = source.size
+        source_mode = source.mode
+        if source_size[0] * source_size[1] > MAX_DECODED_PIXELS:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Decoded image is too large (>{MAX_DECODED_PIXELS} pixels)",
+            )
+        source.load()
+    except HTTPException:
+        raise
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid image file")
 
-    img = img.resize((size, size), Image.Resampling.BILINEAR)
-    x = transforms.ToTensor()(img).unsqueeze(0)   # (1, 3, size, size)
-    return x, img
+    expected_size = (size, size)
+    resized = source_size != expected_size
+    if resized and not allow_resize:
+        raise HTTPException(
+            status_code=422,
+            detail=(f"编码要求输入恰好为 {size}x{size} 像素；收到 "
+                    f"{source_size[0]}x{source_size[1]}。请先显式预处理后再编码"),
+        )
+
+    img = source.convert("RGB")
+    if resized:
+        img = img.resize(expected_size, Image.Resampling.BILINEAR)
+    rgb = np.asarray(img, dtype=np.uint8).copy()
+    x = torch.from_numpy(rgb).permute(2, 0, 1).float().div_(255).unsqueeze(0)
+    preprocessing = {
+        "source_width": source_size[0],
+        "source_height": source_size[1],
+        "source_mode": source_mode,
+        "model_width": size,
+        "model_height": size,
+        "output_mode": "RGB",
+        "converted_to_rgb": source_mode != "RGB",
+        "resized": resized,
+        "resize_filter": "bilinear" if resized else None,
+        "pixel_exact_scope": (
+            "decoded RGB pixels after preprocessing; original PNG/JPEG bytes and metadata "
+            "are not preserved"
+        ),
+    }
+    return x, img, preprocessing
 
 
 @app.post("/api/predict")
@@ -180,7 +312,7 @@ def predict(file: UploadFile = File(...), dataset: str = Form("cifar10")):
       - bpd: 整体 bits/dim（CC-iGPT 为 bpd_total，iGPT 由 CE 推算）
       - heatmap: base64 编码的 fine 分支 BPP 热力图 PNG
                  （单位 bits/pixel = bpd × C；CC-iGPT 仅画 fine 段，
-                 coarse 8×8 的 ~2% overhead 不在该图上）
+                 coarse 分支不在该图上）
 
     注：sync def 形式让 FastAPI 自动放进 threadpool，避免 GPU forward 阻塞
     event loop（async def 里直接调 model(x) 会卡住其它并发请求）。
@@ -190,47 +322,46 @@ def predict(file: UploadFile = File(...), dataset: str = Form("cifar10")):
     except ImportError:
         raise HTTPException(status_code=500, detail="torch/torchvision not installed")
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model, model_type = _get_cached_model(device, dataset)
-    if model is None:
-        raise HTTPException(status_code=503, detail="No checkpoint available. Place a checkpoint in experiments/*/checkpoints/best.pth")
+    lease = _acquire_compute_lease()
+    try:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model, model_type = _get_cached_model(device, dataset)
+        if model is None:
+            raise HTTPException(status_code=503, detail="No checkpoint available. Place a checkpoint in experiments/*/checkpoints/best.pth")
 
-    # 先加载模型再按其几何 resize 上传图（CIFAR 32 / IN64 64），避免写死 32 在 IN64 下喂错尺寸
-    x, _ = _read_upload_to_tensor(file, size=_model_image_size(model, model_type))
+        size = _model_image_size(model, model_type)
+        x, _, preprocessing = _read_upload_to_tensor(file, size=size, allow_resize=True)
 
-    x = x.to(device)
-    model.eval()
-    with torch.no_grad():
-        out = model(x)
+        x = x.to(device)
+        model.eval()
+        with torch.no_grad():
+            out = model(x)
 
-    ce_loss = out["ce_loss"].item()
-    if "bpd" in out and out["bpd"] is not None:
-        bpd = out["bpd"].item()
-    else:
-        # iGPT: CE 是 per-token nats，bits/dim = CE / ln2 （已按 H·W·C 归一化）
-        bpd = ce_loss / math.log(2)
+        ce_loss = out["ce_loss"].item()
+        if "bpd" in out and out["bpd"] is not None:
+            bpd = out["bpd"].item()
+        else:
+            bpd = ce_loss / math.log(2)
 
-    # CC-iGPT 的 ce_loss 仅含 fine 分支 CE，与 bpd_total（含 coarse overhead）
-    # 在尺度上不对应；前端"CE Loss"卡片若直接显示 ce_loss 会误导观感。
-    # 这里把 ce_coarse / ce_fine / α 也一起返回，前端按 model_type 分别渲染。
-    extras = {}
-    if "ce_loss_coarse" in out and out["ce_loss_coarse"] is not None:
-        extras["ce_coarse"] = round(out["ce_loss_coarse"].item(), 4)
-        extras["ce_fine"] = round(out["ce_loss_fine"].item(), 4)
-        if "ctx_alpha" in out and out["ctx_alpha"] is not None:
-            extras["ctx_alpha"] = round(out["ctx_alpha"].item(), 4)
+        extras = {}
+        if "ce_loss_coarse" in out and out["ce_loss_coarse"] is not None:
+            extras["ce_coarse"] = round(out["ce_loss_coarse"].item(), 4)
+            extras["ce_fine"] = round(out["ce_loss_fine"].item(), 4)
+            if "ctx_alpha" in out and out["ctx_alpha"] is not None:
+                extras["ctx_alpha"] = round(out["ctx_alpha"].item(), 4)
 
-    # Per-position 热力图：对 fine 分支（CC-iGPT）或单尺度 GPT（iGPT）的
-    # logits 计算 per-token CE，画 32×32 bits/pixel 热力图。
-    heatmap_b64 = None
-    if out.get("logits") is not None:
-        heatmap_b64 = _make_heatmap_b64(model, x, out["logits"])
+        heatmap_b64 = None
+        if out.get("logits") is not None:
+            heatmap_b64 = _make_heatmap_b64(model, x, out["logits"])
+    finally:
+        lease.release()
 
     return JSONResponse({
         "bpd": round(bpd, 4),
         "ce_loss": round(ce_loss, 4),
         "model_type": model_type,
         "heatmap": heatmap_b64,
+        "preprocessing": preprocessing,
         **extras,
     })
 
@@ -261,10 +392,11 @@ _DECODE_PROGRESS_EVERY = 128
 
 
 def _drive_coder(gen, stage, base, total):
-    """驱动 _encode/_decode_sequence_iter，按**累积**步数 gate 进度并 yield NDJSON 行，
+    """驱动 _encode/_decode_sequence_iter，按**累积模型预测数** gate NDJSON 进度，
     StopIteration 时返回 (coder 结果, 新 base)。
 
-    base = 之前各 stage 已完成步数；累积 done = base + m。gate 条件 `cum % N == 0`
+    每条独立流的首 token 走均匀先验，不触发 forward，故不计入 total。base 是之前
+    stage 已完成的预测数；累积 done = base + m。gate 条件 `cum % N == 0`
     **或** `m == per_stage_total`（每个 stage 末步必发）—— 修掉两个老坑：
       1. coarse N_c=64 < N=128 时整段零进度（per-stage `m % N` 永不命中）；
       2. fine 末段 m∈(2944, 3071] 静默 127 步，bar 卡 95.9% 直到 done。
@@ -286,14 +418,14 @@ def _drive_coder(gen, stage, base, total):
 
 @app.post("/api/encode")
 def encode(file: UploadFile = File(...), dataset: str = Form("cifar10")):
-    """上传图 → **逐 token gold 算术编码** → 自包含 MDLC .bin（流式 NDJSON 进度）。
+    """上传图 → **逐 token gold 算术编码** → 模型绑定 MDLC v2（流式 NDJSON 进度）。
 
     编码必须与 /api/decode 走**同一**逐 token 路径（verify_lossless._encode_sequence_iter
     与 _decode_sequence_iter 共用 _logits_from_tokens，prefix+0 缓冲逐位相同）：算术编码
     零容忍，logits 差一个 ULP 即可让某 token 跨累积频数边界翻符号、解码失步成噪点。同源
     保证 encode 写的 bits 与 decode 逐 token 读所需分布逐位相同 → bit-exact 可解。
 
-    代价：coarse N_c + fine N_f ≈ 3100 次 forward（与解码同量级），故同样流式吐进度
+    代价：(N_c-1) + (N_f-1) ≈ 3100 次 forward（与解码同量级），故同样流式吐进度
     （每 ~128 步一行 NDJSON）绕开 AutoDL 反代 idle 超时。
     """
     try:
@@ -301,81 +433,110 @@ def encode(file: UploadFile = File(...), dataset: str = Form("cifar10")):
     except ImportError:
         raise HTTPException(status_code=500, detail="torch/torchvision not installed")
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model, model_type = _get_cached_model(device, dataset)
-    if model is None:
-        raise HTTPException(status_code=503, detail="No checkpoint available. Place a checkpoint in experiments/*/checkpoints/best.pth")
+    lease = _acquire_compute_lease()
+    try:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model, model_type = _get_cached_model(device, dataset)
+        if model is None:
+            raise HTTPException(status_code=503, detail="No checkpoint available. Place a checkpoint in experiments/*/checkpoints/best.pth")
 
-    # 先加载模型再按其几何 resize（CIFAR 32 / IN64 64）
-    x, _ = _read_upload_to_tensor(file, size=_model_image_size(model, model_type))
-
-    from scripts.verify_lossless import _build_container_bytes, _encode_sequence_iter
+        # 编码协议不允许静默 resize：码流只承诺输入转为 RGB 后的模型尺寸像素。
+        x, _, preprocessing = _read_upload_to_tensor(
+            file, size=_model_image_size(model, model_type), allow_resize=False
+        )
+        from scripts.verify_lossless import (
+            _build_container_bytes,
+            _encode_sequence_iter,
+            _parse_container_meta,
+        )
+        from mdlic.codec.container import sha256_rgb_bytes
+    except Exception:
+        lease.release()
+        raise
 
     def _gen():
-        model.eval()
         try:
-            with torch.no_grad(), torch.amp.autocast(device_type=device.type, enabled=False):
-                x_dev = x.to(device).clamp(0, 1).float()
-                dual = (model_type == "ccigpt")
-                if dual:
-                    H = model.fine.image_size
-                    C = model.fine.in_channels
-                    N_c = model.coarse.seq_len
-                    N_f = model.fine.seq_len
-                    total_steps = N_c + N_f
-                    yield json.dumps({"type": "start", "total": total_steps,
-                                      "stages": ["coarse", "fine"]}) + "\n"
+            try:
+                model.eval()
+                with torch.no_grad(), torch.amp.autocast(device_type=device.type, enabled=False):
+                    x_dev = x.to(device).clamp(0, 1).float()
+                    source_rgb = (
+                        (x_dev * 255).round().to(torch.uint8)[0]
+                        .permute(1, 2, 0).contiguous().cpu().numpy().tobytes()
+                    )
+                    source_rgb_sha256 = sha256_rgb_bytes(source_rgb)
+                    identity = model._codec_identity
+                    dual = (model_type == "ccigpt")
+                    if dual:
+                        H = model.fine.image_size
+                        C = model.fine.in_channels
+                        N_c = model.coarse.seq_len
+                        N_f = model.fine.seq_len
+                        total_steps = num_model_predictions(N_c, N_f)
+                        yield json.dumps({"type": "start", "total": total_steps,
+                                          "unit": "model_predictions",
+                                          "stages": ["coarse", "fine"]}) + "\n"
 
-                    # ---- coarse 段（gold 逐 token，独立 bitstream）----
-                    x_c = model._coarse_input(x_dev)                       # bit-exact coarse 源头（单点推导）
-                    coarse_tokens = model.coarse._tokenize(x_c)            # 真 token
-                    gen_c = _encode_sequence_iter(model.coarse, coarse_tokens, None, device)
-                    c_bits, base = yield from _drive_coder(gen_c, "coarse", 0, total_steps)
+                        x_c = model._coarse_input(x_dev)
+                        coarse_tokens = model.coarse._tokenize(x_c)
+                        gen_c = _encode_sequence_iter(model.coarse, coarse_tokens, None, device)
+                        c_bits, base = yield from _drive_coder(gen_c, "coarse", 0, total_steps)
+                        coarse_ctx = model.ctx_alpha * model._compute_coarse_ctx(coarse_tokens)
+                        fine_tokens = model.fine._tokenize(x_dev)
+                        gen_f = _encode_sequence_iter(model.fine, fine_tokens, coarse_ctx, device)
+                        f_bits, _ = yield from _drive_coder(gen_f, "fine", base, total_steps)
+                        enc_tokens = coarse_tokens[0].tolist() + fine_tokens[0].tolist()
+                    else:
+                        H = model.image_size
+                        C = model.in_channels
+                        N_f = model.seq_len
+                        total_steps = num_model_predictions(N_f)
+                        yield json.dumps({"type": "start", "total": total_steps,
+                                          "unit": "model_predictions",
+                                          "stages": ["single"]}) + "\n"
+                        tokens = model._tokenize(x_dev)
+                        gen = _encode_sequence_iter(model, tokens, None, device)
+                        f_bits, _ = yield from _drive_coder(gen, "single", 0, total_steps)
+                        c_bits = []
+                        enc_tokens = tokens[0].tolist()
 
-                    # ---- 从**真** coarse token 建 fine ctx（与 decode 端逐位相同：
-                    # gold coarse encode↔decode bit-exact，故 decoded coarse==true coarse）----
-                    coarse_ctx = model.ctx_alpha * model._compute_coarse_ctx(coarse_tokens)
-
-                    # ---- fine 段（gold 逐 token，条件于 coarse_ctx）----
-                    fine_tokens = model.fine._tokenize(x_dev)
-                    gen_f = _encode_sequence_iter(model.fine, fine_tokens, coarse_ctx, device)
-                    f_bits, _ = yield from _drive_coder(gen_f, "fine", base, total_steps)
-                    # 指纹覆盖 coarse+fine 全序列（非仅 fine），交叉校验涵盖整张重建
-                    enc_tokens = coarse_tokens[0].tolist() + fine_tokens[0].tolist()
-                else:
-                    H = model.image_size
-                    C = model.in_channels
-                    N_f = model.seq_len
-                    total_steps = N_f
-                    yield json.dumps({"type": "start", "total": total_steps,
-                                      "stages": ["single"]}) + "\n"
-                    tokens = model._tokenize(x_dev)
-                    gen = _encode_sequence_iter(model, tokens, None, device)
-                    f_bits, _ = yield from _drive_coder(gen, "single", 0, total_steps)
-                    c_bits = []
-                    enc_tokens = tokens[0].tolist()
-
-                blob = _build_container_bytes(dual, H, C, c_bits, f_bits)
-                total_bits = len(c_bits) + len(f_bits)
-                achieved_bpd = total_bits / N_f
-                parts = {"coarse_bits": len(c_bits), "fine_bits": len(f_bits)} if dual else {}
-                yield json.dumps({
-                    "type": "done",
-                    "model_type": model_type,
-                    "filename": "image.mdlc.bin",
-                    "bin_b64": base64.b64encode(blob).decode("ascii"),
-                    "bin_bytes": len(blob),
-                    "dual": dual,
-                    "H": H, "C": C,
-                    "neural_bits": total_bits,
-                    "achieved_bpd": round(achieved_bpd, 4),
-                    "fingerprint": _tokens_fingerprint(enc_tokens),
-                    **parts,
-                }) + "\n"
-        except Exception:   # noqa: BLE001 — 完整堆栈进日志，客户端只收通用提示
-            logger.exception("/api/encode 流式编码失败")
-            yield json.dumps({"type": "error",
-                              "detail": "编码失败（服务端错误，详见后端日志）"}) + "\n"
+                    blob = _build_container_bytes(
+                        dual,
+                        H,
+                        C,
+                        c_bits,
+                        f_bits,
+                        identity=identity,
+                        source_rgb_sha256=source_rgb_sha256,
+                    )
+                    total_bits = len(c_bits) + len(f_bits)
+                    container_meta = _parse_container_meta(blob)
+                    parts = {"coarse_bits": len(c_bits), "fine_bits": len(f_bits)} if dual else {}
+                    yield json.dumps({
+                        "type": "done",
+                        "model_type": model_type,
+                        "filename": "image.mdlc.bin",
+                        "bin_b64": base64.b64encode(blob).decode("ascii"),
+                        "bin_bytes": len(blob),
+                        "container_version": container_meta["version"],
+                        "integrity_verified": container_meta["integrity_verified"],
+                        "dual": dual,
+                        "H": H, "C": C,
+                        "neural_bits": total_bits,
+                        "achieved_bpd": round(container_meta["payload_bpd"], 4),
+                        "payload_bpd": round(container_meta["payload_bpd"], 4),
+                        "packed_payload_bpd": round(container_meta["packed_payload_bpd"], 4),
+                        "file_bpd": round(container_meta["file_bpd"], 4),
+                        "preprocessing": preprocessing,
+                        "fingerprint": _tokens_fingerprint(enc_tokens),
+                        **parts,
+                    }) + "\n"
+            except Exception:   # noqa: BLE001
+                logger.exception("/api/encode 流式编码失败")
+                yield json.dumps({"type": "error",
+                                  "detail": "编码失败（服务端错误，详见后端日志）"}) + "\n"
+        finally:
+            lease.release()
 
     return StreamingResponse(_gen(), media_type="application/x-ndjson")
 
@@ -394,7 +555,7 @@ def _read_bin_upload(file: UploadFile) -> bytes:
 def inspect(file: UploadFile = File(...)):
     """上传 .bin → 即时解析容器结构/码长/bpd（纯文件级，无需 GPU/ckpt/模型）。
 
-    证明 .bin 自包含：仅凭文件就能读出尺寸/双尺度/码长/bpd。与 CLI
+    容器结构自描述：仅凭文件就能读出尺寸/双尺度/码长/bpd/identity。与 CLI
     `verify_lossless.py --inspect` 同一套 _parse_container_meta，口径一致。
     """
     from scripts.verify_lossless import _parse_container_meta
@@ -403,7 +564,8 @@ def inspect(file: UploadFile = File(...)):
         meta = _parse_container_meta(blob)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    meta["bpd"] = round(meta["bpd"], 4)
+    for key in ("bpd", "payload_bpd", "packed_payload_bpd", "file_bpd"):
+        meta[key] = round(meta[key], 4)
     return JSONResponse(meta)
 
 
@@ -413,7 +575,7 @@ def decode(file: UploadFile = File(...), dataset: str = Form("cifar10")):
 
     真实 decoder 视角：只给文件，无原图。逐 token 重跑完整 forward（无 KV-cache,
     causal mask 保证 0 后缀不泄漏），与 scripts/verify_lossless 的 gold 路径同源
-    （共用 _decode_sequence_iter）。CIFAR coarse 64 + fine 3072 ≈ 3100 步、~60–120s,
+    （共用 _decode_sequence_iter）。CIFAR 共 (64-1)+(3072-1)=3134 次预测、~60–120s,
     故用 StreamingResponse 每 ~128 步推一行进度，绕开 AutoDL 反代 idle 超时。
 
     解码步数由模型几何固定（model.coarse.seq_len / model.fine.seq_len），不受文件
@@ -425,86 +587,100 @@ def decode(file: UploadFile = File(...), dataset: str = Form("cifar10")):
         raise HTTPException(status_code=500, detail="torch/torchvision not installed")
 
     blob = _read_bin_upload(file)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model, model_type = _get_cached_model(device, dataset)
-    if model is None:
-        raise HTTPException(status_code=503, detail="No checkpoint available. Place a checkpoint in experiments/*/checkpoints/best.pth")
-
-    from scripts.verify_lossless import _read_container_bytes, _decode_sequence_iter
+    lease = _acquire_compute_lease()
     try:
-        dual, H, C, c_bits, f_bits = _read_container_bytes(blob)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model, model_type = _get_cached_model(device, dataset)
+        if model is None:
+            raise HTTPException(status_code=503, detail="No checkpoint available. Place a checkpoint in experiments/*/checkpoints/best.pth")
 
-    # 几何一致性校验：文件声明的图像尺寸/通道必须与当前模型匹配
-    m_H = model.fine.image_size if model_type == "ccigpt" else model.image_size
-    m_C = model.fine.in_channels if model_type == "ccigpt" else model.in_channels
-    if (H, C) != (m_H, m_C):
-        raise HTTPException(
-            status_code=400,
-            detail=f".bin 图像几何 {H}×{H}×{C} 与当前模型 {m_H}×{m_H}×{m_C} 不符（需用编码时同款模型解）")
-    # 尺度一致性：.bin 的 dual 标志必须与模型尺度数匹配（双尺度 .bin ⇔ CC-iGPT）
-    if dual != (model_type == "ccigpt"):
-        want = "CC-iGPT 双尺度" if dual else "单尺度 iGPT"
-        raise HTTPException(status_code=400,
-                            detail=f"{'双尺度' if dual else '单尺度'} .bin 需 {want} 模型解码，当前模型为 {model_type}")
+        from scripts.verify_lossless import (
+            _decode_sequence_iter,
+            _parse_container_meta,
+            _read_container_bytes,
+        )
+        from mdlic.codec.container import validate_decoded_rgb
+
+        container_meta = _parse_container_meta(blob)
+        dual, H, C, c_bits, f_bits = _read_container_bytes(
+            blob,
+            expected_identity=model._codec_identity,
+        )
+        W = container_meta["W"]
+
+        m_H = model.fine.image_size if model_type == "ccigpt" else model.image_size
+        m_C = model.fine.in_channels if model_type == "ccigpt" else model.in_channels
+        if (H, W, C) != (m_H, m_H, m_C):
+            raise HTTPException(
+                status_code=400,
+                detail=f".bin 图像几何 {H}×{W}×{C} 与当前模型 {m_H}×{m_H}×{m_C} 不符（需用编码时同款模型解）")
+        if dual != (model_type == "ccigpt"):
+            want = "CC-iGPT 双尺度" if dual else "单尺度 iGPT"
+            raise HTTPException(status_code=400,
+                                detail=f"{'双尺度' if dual else '单尺度'} .bin 需 {want} 模型解码，当前模型为 {model_type}")
+    except ValueError as exc:
+        lease.release()
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception:
+        lease.release()
+        raise
 
     def _gen():
-        import torch
-        model.eval()
-        with torch.no_grad(), torch.amp.autocast(device_type=device.type, enabled=False):
+        try:
             try:
-                if model_type == "ccigpt" and dual:
-                    N_c = model.coarse.seq_len
-                    N_f = model.fine.seq_len
-                    total_steps = N_c + N_f
-                    yield json.dumps({"type": "start", "total": total_steps,
-                                      "stages": ["coarse", "fine"]}) + "\n"
+                model.eval()
+                with torch.no_grad(), torch.amp.autocast(device_type=device.type, enabled=False):
+                    if model_type == "ccigpt" and dual:
+                        N_c = model.coarse.seq_len
+                        N_f = model.fine.seq_len
+                        total_steps = num_model_predictions(N_c, N_f)
+                        yield json.dumps({"type": "start", "total": total_steps,
+                                          "unit": "model_predictions",
+                                          "stages": ["coarse", "fine"]}) + "\n"
+                        gen_c = _decode_sequence_iter(model.coarse, c_bits, N_c, None, device)
+                        coarse_dec, base = yield from _drive_coder(gen_c, "coarse", 0, total_steps)
+                        coarse_ctx = model.ctx_alpha * model._compute_coarse_ctx(coarse_dec)
+                        gen_f = _decode_sequence_iter(model.fine, f_bits, N_f, coarse_ctx, device)
+                        fine_dec, _ = yield from _drive_coder(gen_f, "fine", base, total_steps)
+                        recon_t = fine_dec
+                        total_bits = len(c_bits) + len(f_bits)
+                        n_subpix = H * W * C
+                        fp_tokens = coarse_dec[0].tolist() + fine_dec[0].tolist()
+                    else:
+                        N = model.seq_len
+                        total_steps = num_model_predictions(N)
+                        yield json.dumps({"type": "start", "total": total_steps,
+                                          "unit": "model_predictions",
+                                          "stages": ["single"]}) + "\n"
+                        gen = _decode_sequence_iter(model, f_bits, N, None, device)
+                        dec, _ = yield from _drive_coder(gen, "single", 0, total_steps)
+                        recon_t = dec
+                        total_bits = len(f_bits)
+                        n_subpix = H * W * C
+                        fp_tokens = dec[0].tolist()
 
-                    # ---- coarse 段 ----
-                    gen_c = _decode_sequence_iter(model.coarse, c_bits, N_c, None, device)
-                    coarse_dec, base = yield from _drive_coder(gen_c, "coarse", 0, total_steps)
-
-                    # ---- 从解出的 coarse token 重建 fine ctx ----
-                    coarse_ctx = model.ctx_alpha * model._compute_coarse_ctx(coarse_dec)
-
-                    # ---- fine 段 ----
-                    gen_f = _decode_sequence_iter(model.fine, f_bits, N_f, coarse_ctx, device)
-                    fine_dec, _ = yield from _drive_coder(gen_f, "fine", base, total_steps)
-
-                    recon_t = fine_dec
-                    total_bits = len(c_bits) + len(f_bits)
-                    n_subpix = H * H * C
-                    # 指纹覆盖 coarse+fine 全序列，与 /api/encode 端同口径
-                    fp_tokens = coarse_dec[0].tolist() + fine_dec[0].tolist()
-                else:
-                    N = model.seq_len
-                    total_steps = N
-                    yield json.dumps({"type": "start", "total": total_steps,
-                                      "stages": ["single"]}) + "\n"
-                    gen = _decode_sequence_iter(model, f_bits, N, None, device)
-                    dec, _ = yield from _drive_coder(gen, "single", 0, total_steps)
-                    recon_t = dec
-                    total_bits = len(f_bits)
-                    n_subpix = H * H * C
-                    fp_tokens = dec[0].tolist()
-
-                # ---- 逆 tokenize → 还原图 → base64 PNG ----
-                recon_tokens = recon_t[0].tolist()
-                recon = np.array(recon_tokens, dtype=np.uint8).reshape(H, H, C)
-                achieved_bpd = total_bits / n_subpix
-                yield json.dumps({
-                    "type": "done",
-                    "recon_png": _b64_png(recon),
-                    "achieved_bpd": round(achieved_bpd, 4),
-                    "neural_bits": total_bits,
-                    "H": H, "C": C,
-                    "fingerprint": _tokens_fingerprint(fp_tokens),
-                }) + "\n"
-            except Exception:   # noqa: BLE001 — 完整堆栈进日志，客户端只收通用提示
+                    recon_tokens = recon_t[0].tolist()
+                    recon = np.array(recon_tokens, dtype=np.uint8).reshape(H, W, C)
+                    validate_decoded_rgb(recon.tobytes(), container_meta)
+                    achieved_bpd = total_bits / n_subpix
+                    file_bpd = len(blob) * 8 / n_subpix
+                    yield json.dumps({
+                        "type": "done",
+                        "recon_png": _b64_png(recon),
+                        "achieved_bpd": round(achieved_bpd, 4),
+                        "payload_bpd": round(achieved_bpd, 4),
+                        "file_bpd": round(file_bpd, 4),
+                        "rgb_checksum_verified": True,
+                        "neural_bits": total_bits,
+                        "H": H, "C": C,
+                        "fingerprint": _tokens_fingerprint(fp_tokens),
+                    }) + "\n"
+            except Exception:   # noqa: BLE001
                 logger.exception("/api/decode 流式解码失败")
                 yield json.dumps({"type": "error",
                                   "detail": "解码失败（服务端错误，详见后端日志）"}) + "\n"
+        finally:
+            lease.release()
 
     # media_type 用 ndjson；sync 生成器由 Starlette 放进 threadpool，GPU 不阻塞 event loop
     return StreamingResponse(_gen(), media_type="application/x-ndjson")
@@ -557,21 +733,24 @@ def complete(
         raise HTTPException(status_code=400, detail="temperature 需 ∈ [0, 2]")
     top_k = max(0, min(top_k, 256))
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model, model_type = _get_cached_model(device, dataset)
-    if model is None:
-        raise HTTPException(status_code=503, detail="No checkpoint available. Place a checkpoint in experiments/*/checkpoints/best.pth")
+    lease = _acquire_compute_lease()
+    try:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model, model_type = _get_cached_model(device, dataset)
+        if model is None:
+            raise HTTPException(status_code=503, detail="No checkpoint available. Place a checkpoint in experiments/*/checkpoints/best.pth")
 
-    # 先加载模型再按其几何 resize（CIFAR 32 / IN64 64）
-    x, _ = _read_upload_to_tensor(file, size=_model_image_size(model, model_type))
+        x, _, preprocessing = _read_upload_to_tensor(
+            file, size=_model_image_size(model, model_type), allow_resize=True
+        )
 
-    # 复用 scripts/complete_image.py 的逐步采样实现（与 runbook 完全同源），
-    # 避免在 demo 侧重写一份采样逻辑导致两条路径漂移。
-    from scripts.complete_image import _complete_one
+        from scripts.complete_image import _complete_one
 
-    model.eval()
-    with torch.no_grad():
-        o, m, c = _complete_one(model, model_type, x, keep_frac, temperature, top_k, device)
+        model.eval()
+        with torch.no_grad():
+            o, m, c = _complete_one(model, model_type, x, keep_frac, temperature, top_k, device)
+    finally:
+        lease.release()
 
     # (C,H,W) uint8 → (H,W,C) numpy → base64 PNG
     def _chw_to_png(t):
@@ -587,30 +766,48 @@ def complete(
         "keep_pct": keep_pct,
         "temperature": temperature,
         "top_k": top_k,
+        "preprocessing": preprocessing,
     })
 
 
-# 每个数据集一个 cache slot；交互端点首次带该 dataset 请求时才 lazy-load
-# （IN64 模型显存约 2× CIFAR，不预加载，避免常驻双份）。每 dataset 一把锁，
-# double-checked locking 防并发首请求重复 torch.load。
-_MODEL_CACHE = {d: {"model": None, "type": None} for d in _DATASETS}
-_MODEL_CACHE_LOCKS = {d: threading.Lock() for d in _DATASETS}
+# 全局只保留一个活跃模型。模型任务由 _COMPUTE_SLOTS 串行化，因此数据集切换时
+# 可以确定旧模型没有在途使用者；释放引用并清空 CUDA allocator 后再加载新权重。
+_MODEL_CACHE = {
+    "dataset": None,
+    "device": None,
+    "model": None,
+    "type": None,
+}
+_MODEL_CACHE_LOCK = threading.Lock()
+
+
+def _evict_cached_model(torch):
+    old_model = _MODEL_CACHE["model"]
+    old_device = _MODEL_CACHE["device"]
+    _MODEL_CACHE.update(dataset=None, device=None, model=None, type=None)
+    if old_model is None:
+        return
+    del old_model
+    gc.collect()
+    if str(old_device).startswith("cuda") and torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 def _get_cached_model(device, dataset: str = "cifar10"):
-    """线程安全的延迟加载：double-checked locking 防止并发首请求重复 torch.load
-    同一份 ckpt 造成显存峰值翻倍。按 dataset 分槽（cifar10 / imagenet64）。
+    """线程安全地延迟加载单个活跃模型。
+
+    命中相同 dataset/device 时直接复用；切换时先释放旧模型，再加载目标 checkpoint，
+    避免 CIFAR 与 ImageNet64 权重同时常驻 GPU。
 
     返回 (model, model_type)：model_type ∈ {"ccigpt", "igpt"}。
     """
     dataset = _norm_dataset(dataset)
-    slot = _MODEL_CACHE[dataset]
-    if slot["model"] is not None:
-        return slot["model"], slot["type"]
-
-    with _MODEL_CACHE_LOCKS[dataset]:
-        if slot["model"] is not None:
-            return slot["model"], slot["type"]
+    device_key = str(device)
+    with _MODEL_CACHE_LOCK:
+        if (_MODEL_CACHE["model"] is not None
+                and _MODEL_CACHE["dataset"] == dataset
+                and _MODEL_CACHE["device"] == device_key):
+            return _MODEL_CACHE["model"], _MODEL_CACHE["type"]
 
         import yaml
         import torch
@@ -620,6 +817,7 @@ def _get_cached_model(device, dataset: str = "cifar10"):
         configs_dir = ROOT / "configs"
         experiments_dir = ROOT / "experiments"
 
+        candidate = None
         for cfg_name in _DATASETS[dataset]["configs"]:
             cfg_path = configs_dir / cfg_name
             if not cfg_path.exists():
@@ -636,35 +834,62 @@ def _get_cached_model(device, dataset: str = "cifar10"):
             assert model_type == "ccigpt", (
                 f"demo 主线只支持 CC-iGPT，{cfg_name} 的 model.type={model_type!r} 不匹配"
             )
+            candidate = (mcfg, model_type, ckpt_path)
+            break
 
-            from scripts.train import _build_ccigpt_from_config
-            model = _build_ccigpt_from_config(mcfg, device)
+        if candidate is None:
+            return None, None
 
-            # best.pth 是裸 state_dict（torch.save(model.state_dict())），不含
-            # optimizer/epoch 等 Python 对象，可安全使用 weights_only=True
-            # 杜绝 pickle RCE。若未来需加载 epoch_*.pth 这类含训练状态的 ckpt，
-            # 改回 False 并保证 ckpt 来源受信。
-            ckpt = torch.load(str(ckpt_path), map_location=device, weights_only=True)
-            from src.mdlic.utils import clean_state_dict
-            if "model_state_dict" in ckpt:
-                model.load_state_dict(clean_state_dict(ckpt["model_state_dict"]))
-            else:
-                model.load_state_dict(clean_state_dict(ckpt))
-            model.eval()
+        mcfg, model_type, ckpt_path = candidate
+        _evict_cached_model(torch)
 
-            slot["model"] = model
-            slot["type"] = model_type
-            return model, model_type
+        from scripts.train import _build_ccigpt_from_config
+        model = _build_ccigpt_from_config(mcfg, device)
 
-        return None, None
+        # best.pth 是裸 state_dict（torch.save(model.state_dict())），不含
+        # optimizer/epoch 等 Python 对象，可安全使用 weights_only=True
+        # 杜绝 pickle RCE。若未来需加载 epoch_*.pth 这类含训练状态的 ckpt，
+        # 改回 False 并保证 ckpt 来源受信。
+        # 权重先落在 CPU，逐参数复制到目标设备；避免 load_state_dict 期间 GPU 上同时
+        # 保留“模型参数 + 一整份 checkpoint tensor”。
+        ckpt = torch.load(str(ckpt_path), map_location="cpu", weights_only=True)
+        from mdlic.utils import clean_state_dict
+        if "model_state_dict" in ckpt:
+            state_dict = clean_state_dict(ckpt["model_state_dict"])
+        else:
+            state_dict = clean_state_dict(ckpt)
+        model.load_state_dict(state_dict)
+        del state_dict, ckpt
+        gc.collect()
+        model.eval()
+
+        from mdlic.codec.container import (
+            make_codec_identity,
+            runtime_fingerprint,
+            sha256_file,
+        )
+        model._codec_identity = make_codec_identity(
+            model_type=model_type,
+            model_config=mcfg,
+            checkpoint_sha256=sha256_file(ckpt_path),
+            runtime=runtime_fingerprint(device),
+        )
+
+        _MODEL_CACHE.update(
+            dataset=dataset,
+            device=device_key,
+            model=model,
+            type=model_type,
+        )
+        return model, model_type
 
 
 def _make_heatmap_b64(model, x, logits):
     """根据已计算的 fine logits 生成 32×32 BPP 热力图 (bits/pixel)，返回 base64 PNG。
 
     支持 iGPT 与 CC-iGPT 两种模型：iGPT 直接用自身 _tokenize；CC-iGPT 用
-    fine 子分支的 _tokenize（coarse 分支的 8×8 不贡献热力图，其 ~2% 比特
-    overhead 作为常数底色已隐含在 bpd_total 主指标中）。
+    fine 子分支的 _tokenize（coarse 分支的 8×8 不贡献热力图；历史分解中它约占
+    4.6% bpd，仍包含在 bpd_total 主指标中）。
 
     单位 bits/pixel（沿 C 通道求和），与 /api/predict 主返回字段 bpd
     (bits/dim) 差 C 倍。

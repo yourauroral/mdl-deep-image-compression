@@ -2,12 +2,40 @@
 
 const API = "";
 
+async function apiFetch(url, options = {}) {
+  const request = { ...options };
+  const headers = new Headers(options.headers || {});
+  const storedKey = sessionStorage.getItem("mdlic_api_key");
+  if (storedKey) headers.set("X-API-Key", storedKey);
+  request.headers = headers;
+
+  let res = await fetch(API + url, request);
+  if (res.status === 401 && res.headers.get("X-MDLIC-API-Key-Required") === "1") {
+    const suppliedKey = window.prompt("API key");
+    if (suppliedKey) {
+      sessionStorage.setItem("mdlic_api_key", suppliedKey);
+      headers.set("X-API-Key", suppliedKey);
+      res = await fetch(API + url, request);
+    }
+  }
+  return res;
+}
+
 async function fetchJSON(url) {
-  const res = await fetch(API + url);
+  const res = await apiFetch(url);
   return res.ok ? res.json() : null;
 }
 
 const $ = (id) => document.getElementById(id);
+
+function appendCell(row, value, className = "") {
+  const cell = document.createElement("td");
+  if (className) cell.className = className;
+  if (value instanceof Node) cell.appendChild(value);
+  else cell.textContent = String(value);
+  row.appendChild(cell);
+  return cell;
+}
 
 // Chart.js 全局配色
 Chart.defaults.color = "#8b8fa3";
@@ -30,6 +58,15 @@ function updateDatasetWarnings(dataset) {
   document.querySelectorAll(".dataset-warning").forEach(el => {
     el.hidden = (dataset !== "imagenet64");
   });
+  const size = dataset === "imagenet64" ? 64 : 32;
+  $("predict-size-hint").textContent = `支持 PNG / JPG；分析前转为 ${size}x${size} RGB`;
+  $("complete-size-hint").textContent = `转为 ${size}x${size} RGB 后 AR 补全`;
+  $("encode-size-hint").textContent = `须恰好为 ${size}x${size}；不做静默缩放`;
+  $("cmp-orig-label").textContent = `原图 ${size}×${size}`;
+  const coarseSize = size / 4;
+  $("scales-desc").textContent =
+    `coarse R-only ${coarseSize}×${coarseSize}×1 独立编码，量化后作为条件注入 ` +
+    `fine ${size}×${size}×3。`;
 }
 
 function onDatasetChange(dataset) {
@@ -63,6 +100,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const ceCoarseEl = $("result-ce-coarse");
   const ceFineEl = $("result-ce-fine");
   const alphaEl = $("result-alpha");
+  const preprocessingEl = $("result-preprocessing");
   const hmImg = $("heatmap-img");
   const hmPlaceholder = $("heatmap-placeholder");
 
@@ -87,12 +125,13 @@ document.addEventListener("DOMContentLoaded", () => {
 
     bpdEl.textContent = ceEl.textContent = modelEl.textContent = "...";
     extrasEl.hidden = true;
+    preprocessingEl.hidden = true;
 
     const form = new FormData();
     form.append("file", file);
     form.append("dataset", currentDataset);
     try {
-      const res = await fetch(API + "/api/predict", { method: "POST", body: form });
+      const res = await apiFetch("/api/predict", { method: "POST", body: form });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         bpdEl.textContent = "N/A";
@@ -103,6 +142,15 @@ document.addEventListener("DOMContentLoaded", () => {
       bpdEl.textContent = data.bpd;
       ceEl.textContent = data.ce_loss;
       modelEl.textContent = data.model_type.toUpperCase();
+
+      if (data.preprocessing) {
+        const p = data.preprocessing;
+        const operation = p.resized ? `bilinear resize -> ${p.model_width}x${p.model_height}`
+                                    : "尺寸保持不变";
+        const color = p.converted_to_rgb ? `${p.source_mode} -> RGB` : "RGB";
+        preprocessingEl.textContent = `预处理：${p.source_width}x${p.source_height} ${color}；${operation}`;
+        preprocessingEl.hidden = false;
+      }
 
       // CC-iGPT: 显示双尺度 CE 分解 + α
       if (data.ce_coarse !== undefined) {
@@ -140,8 +188,9 @@ async function renderMetrics(dataset) {
   // 过滤掉 bpd=null 的占位行，lollipop 图只画已落地结果
   const neural = data.methods.filter(m => m.bpd !== null)
                              .sort((a, b) => a.bpd - b.bpd);
-  // 主表 = Ours 行里 bpd 最低者（dataset-agnostic，取代写死 "v2 (Ours)"）
-  const ourBest = neural.filter(m => isOurs(m.name)).sort((a, b) => a.bpd - b.bpd)[0] || null;
+  // 只有显式 primary=true 且符合单 checkpoint/no-TTA 协议的结果才高亮为主结果。
+  const ourBest = neural.filter(m => isOurs(m.name) && m.primary === true)
+                        .sort((a, b) => a.bpd - b.bpd)[0] || null;
   const isOursMain = (n) => ourBest && n === ourBest.name;
 
   const labels = neural.map(m => m.name);
@@ -154,7 +203,7 @@ async function renderMetrics(dataset) {
   };
   const colors = neural.map(colorFor);
 
-  // 副标题：仅展示主结果（取 Ours 中 bpd 最低的一行）
+  // 副标题明确区分正式主结果与仍待新 evaluator 重跑的历史诊断数字。
   const panel = document.getElementById("panel-metrics");
   const chartCt = panel.querySelector(".chart-container");
   let desc = panel.querySelector(".panel-desc");
@@ -163,11 +212,18 @@ async function renderMetrics(dataset) {
     desc.className = "panel-desc";
     panel.insertBefore(desc, chartCt);
   }
-  desc.innerHTML =
-    `${data.dataset} — 聚焦神经自回归方法。` +
-    (ourBest
-      ? `<span style="color:#6c8cff">${ourBest.name} <b>${ourBest.bpd.toFixed(4)}</b> bits/dim</span>`
-      : "");
+  desc.replaceChildren(document.createTextNode(`${data.dataset} - 聚焦神经自回归方法。`));
+  if (ourBest) {
+    const primary = document.createElement("span");
+    primary.style.color = "#6c8cff";
+    primary.append(document.createTextNode(` ${ourBest.name} `));
+    const value = document.createElement("b");
+    value.textContent = ourBest.bpd.toFixed(4);
+    primary.append(value, document.createTextNode(" bits/dim"));
+    desc.appendChild(primary);
+  } else {
+    desc.append(document.createTextNode(" 当前 Ours 数字均为历史 ensemble+TTA 诊断结果，正式单模型结果待重评。"));
+  }
 
   // Lollipop: 细线 + 末端粗点。横轴范围按数据自适应（留 ±0.1 余量并对齐 0.05）
   const dataMin = Math.min(...values), dataMax = Math.max(...values);
@@ -270,15 +326,19 @@ async function renderMetrics(dataset) {
 
   // 表格保留 TBD 占位行作为完整数据展示（重渲染前清空避免累积）
   const tbody = document.querySelector("#table-metrics tbody");
-  tbody.innerHTML = "";
+  tbody.replaceChildren();
   data.methods.forEach(m => {
     const tr = document.createElement("tr");
     const main = isOursMain(m.name);
-    const bpdCell = m.bpd !== null ? m.bpd.toFixed(4) : "<i>TBD</i>";
-    tr.innerHTML = `
-      <td class="${main ? "highlight" : ""}">${m.name}</td>
-      <td class="${main ? "highlight" : ""}">${bpdCell}</td>
-      <td>${m.note}</td>`;
+    appendCell(tr, m.name, main ? "highlight" : "");
+    if (m.bpd !== null) {
+      appendCell(tr, m.bpd.toFixed(4), main ? "highlight" : "");
+    } else {
+      const pending = document.createElement("i");
+      pending.textContent = "TBD";
+      appendCell(tr, pending, main ? "highlight" : "");
+    }
+    appendCell(tr, m.note);
     tbody.appendChild(tr);
   });
 }
@@ -288,6 +348,14 @@ let _probeChart = null;
 async function renderProbe(dataset) {
   const data = await fetchJSON("/api/probe?dataset=" + dataset);
   if (!data) return;
+
+  const historical = data.protocol_status !== "formal_validation_selected";
+  const status = $("probe-status");
+  status.textContent = data.note || `Protocol: ${data.protocol_status || "unknown"}`;
+  status.className = `data-status ${historical ? "data-status-warning" : "data-status-valid"}`;
+  status.hidden = false;
+  $("probe-desc").textContent =
+    `${data.model}；层曲线仅按其记录的选择协议解释，不从末层下降推断因果机制。`;
 
   if (_probeChart) _probeChart.destroy();
   _probeChart = new Chart(document.getElementById("chart-probe"), {
@@ -314,7 +382,8 @@ async function renderProbe(dataset) {
         legend: { display: false },
         title: { display: true,
                  text: `${data.model} — ${data.dataset} (${data.num_classes} classes)`
-                       + (data.sparse ? "　[稀疏锚点，完整 32 层待回填]" : ""),
+                       + (historical ? " [历史 test-selected]" : "")
+                       + (data.sparse ? " [稀疏锚点]" : ""),
                  color: "#e1e4ed" }
       },
       scales: {
@@ -327,10 +396,24 @@ async function renderProbe(dataset) {
 
 // ── Panel 5: Kernel 性能 ──
 // kernels.json schema：嵌套 `{forward_only: {kernels:[...]}, forward_backward: {kernels:[...]}}`。
-// Panel 4 默认渲染 forward_only；avg/max speedup 来自同一段。
+// Kernel 面板只在 valid=true 时渲染 forward_only；无效历史数据仅显示警告。
 (async function initKernels() {
   const data = await fetchJSON("/api/kernels");
   if (!data) return;
+
+  const desc = $("kernels-desc");
+  const chartWrap = $("kernels-chart-wrap");
+  if (data.valid === false) {
+    desc.textContent = data.note ||
+      "历史 benchmark 已失效；修正后的 harness 尚未在 GPU 上重跑。";
+    desc.className = "data-status data-status-warning";
+    chartWrap.hidden = true;
+    return;
+  } else if (data.note) {
+    desc.textContent = data.note;
+  }
+  desc.className = "panel-desc";
+  chartWrap.hidden = false;
 
   const section = data.forward_only || data.forward_backward;
   if (!section || !Array.isArray(section.kernels)) return;
@@ -390,6 +473,14 @@ async function renderScales(dataset) {
   const labels = data.scales.map(s => `${s.scale} (${s.resolution})`);
   const tokens = data.scales.map(s => s.tokens);
   const total = data.total_tokens;
+  const status = $("scales-status");
+  if (data.derived_from_rounded_ce) {
+    status.textContent = data.note;
+    status.className = "data-status data-status-warning";
+    status.hidden = false;
+  } else {
+    status.hidden = true;
+  }
 
   if (_scalesChart) _scalesChart.destroy();
   _scalesChart = new Chart(document.getElementById("chart-scales"), {
@@ -408,7 +499,11 @@ async function renderScales(dataset) {
       maintainAspectRatio: false,
       plugins: {
         legend: { position: "right" },
-        title: { display: true, text: `${data.bpd_total} bpd · 总计 ${total} tokens (coarse + fine)`, color: "#e1e4ed" },
+        title: {
+          display: true,
+          text: `${data.derived_from_rounded_ce ? "历史近似 " : ""}${data.bpd_total} bpd · ${total} tokens`,
+          color: "#e1e4ed"
+        },
         tooltip: {
           callbacks: {
             label: (item) => {
@@ -424,12 +519,13 @@ async function renderScales(dataset) {
   });
 
   const tbody = document.querySelector("#table-scales tbody");
-  tbody.innerHTML = "";
+  tbody.replaceChildren();
   data.scales.forEach(s => {
     const tokenPct = (s.tokens / total * 100).toFixed(1);
     const bpdPct = s.share_pct !== undefined ? `${s.share_pct}%` : "—";
     const tr = document.createElement("tr");
-    tr.innerHTML = `<td>${s.scale}</td><td>${s.resolution}</td><td>${s.tokens}</td><td>${tokenPct}%</td><td>${bpdPct}</td>`;
+    [s.scale, s.resolution, s.tokens, `${tokenPct}%`, bpdPct]
+      .forEach(value => appendCell(tr, value));
     tbody.appendChild(tr);
   });
 }
@@ -489,7 +585,7 @@ async function renderScales(dataset) {
     form.append("top_k", "100");
     form.append("dataset", currentDataset);
     try {
-      const res = await fetch(API + "/api/complete", { method: "POST", body: form });
+      const res = await apiFetch("/api/complete", { method: "POST", body: form });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         resultPh.textContent = err.detail || "错误";
@@ -503,7 +599,7 @@ async function renderScales(dataset) {
       origImg.hidden = maskedImg.hidden = compImg.hidden = false;
       origPh.hidden = maskedPh.hidden = compPh.hidden = true;
       resultPh.hidden = false;
-      resultPh.innerHTML = `补全完成 — 保留上半 <b>${d.keep_pct}%</b>，温度 <b>${d.temperature}</b>，top-k <b>${d.top_k}</b>。`;
+      resultPh.textContent = `补全完成 - 保留上半 ${d.keep_pct}%，温度 ${d.temperature}，top-k ${d.top_k}。`;
       runBtn.disabled = false; runBtn.textContent = "重新采样";
     } catch (e) {
       resultPh.textContent = "无法连接后端";
@@ -568,7 +664,7 @@ async function renderScales(dataset) {
     form.append("file", encFile);
     form.append("dataset", currentDataset);
     try {
-      const res = await fetch(API + "/api/encode", { method: "POST", body: form });
+      const res = await apiFetch("/api/encode", { method: "POST", body: form });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         encNote.textContent = err.detail || "编码失败";
@@ -594,14 +690,14 @@ async function renderScales(dataset) {
           let msg;
           try { msg = JSON.parse(line); } catch { continue; }
           if (msg.type === "start") {
-            encProgLabel.textContent = `逐 token 编码中… 0 / ${msg.total}`;
+            encProgLabel.textContent = `模型预测中… 0 / ${msg.total}`;
           } else if (msg.type === "progress") {
             const pct = (msg.done / msg.total * 100).toFixed(1);
             encProgFill.style.width = pct + "%";
             encProgLabel.textContent = `[${msg.stage}] ${msg.done} / ${msg.total}（${pct}%）`;
           } else if (msg.type === "done") {
             encProgFill.style.width = "100%";
-            encProgLabel.textContent = `编码完成 — achieved ${msg.achieved_bpd} bpd`;
+            encProgLabel.textContent = `编码完成 - payload ${msg.payload_bpd} bpd；文件 ${msg.file_bpd} bpd`;
             // base64 .bin → Blob → object URL 供下载
             const bytes = Uint8Array.from(atob(msg.bin_b64), c => c.charCodeAt(0));
             const blob = new Blob([bytes], { type: "application/octet-stream" });
@@ -614,14 +710,32 @@ async function renderScales(dataset) {
             const partsStr = msg.dual
               ? `coarse ${msg.coarse_bits} + fine ${msg.fine_bits} bit`
               : `${msg.neural_bits} bit`;
-            encStats.innerHTML =
-              `<div class="codec-stat"><span>文件大小</span><b>${msg.bin_bytes} B</b></div>` +
-              `<div class="codec-stat"><span>码长</span><b>${msg.neural_bits} bit</b></div>` +
-              `<div class="codec-stat"><span>achieved bpd</span><b>${msg.achieved_bpd}</b></div>` +
-              `<div class="codec-stat codec-stat-wide"><span>分段</span><b>${partsStr}</b></div>` +
-              `<div class="codec-stat codec-stat-wide"><span>指纹</span><b><code>${msg.fingerprint}</code></b></div>`;
+            encStats.replaceChildren();
+            const addStat = (label, value, wide = false, code = false) => {
+              const stat = document.createElement("div");
+              stat.className = "codec-stat" + (wide ? " codec-stat-wide" : "");
+              const name = document.createElement("span");
+              name.textContent = label;
+              const strong = document.createElement("b");
+              if (code) {
+                const codeEl = document.createElement("code");
+                codeEl.textContent = String(value);
+                strong.appendChild(codeEl);
+              } else {
+                strong.textContent = String(value);
+              }
+              stat.append(name, strong);
+              encStats.appendChild(stat);
+            };
+            addStat("文件大小", `${msg.bin_bytes} B`);
+            addStat("容器", `MDLC v${msg.container_version}`);
+            addStat("算术码长", `${msg.neural_bits} bit`);
+            addStat("payload bpd", msg.payload_bpd);
+            addStat("完整文件 bpd", msg.file_bpd);
+            addStat("分段", partsStr, true);
+            addStat("指纹", msg.fingerprint, true, true);
             encResult.hidden = false;
-            encNote.innerHTML = `下载后可直接拖到右侧 ② 解码块还原。<b>指纹 ${msg.fingerprint}</b> 用于同会话交叉校验。`;
+            encNote.textContent = `可在右侧解码；指纹 ${msg.fingerprint} 用于同会话 RGB token 校验。`;
             done = true;
           } else if (msg.type === "error") {
             encProgLabel.textContent = "编码出错：" + msg.detail;
@@ -665,7 +779,9 @@ async function renderScales(dataset) {
   bindUpload(decArea, decInput, (file) => {
     decFile = file;
     decFileInfo.hidden = false;
-    decFileInfo.innerHTML = `<code>${file.name}</code> · ${file.size} B`;
+    const filename = document.createElement("code");
+    filename.textContent = file.name;
+    decFileInfo.replaceChildren(filename, document.createTextNode(` - ${file.size} B`));
     decPh.hidden = true;
     inspectRun.disabled = false; decRun.disabled = false;
     structTable.hidden = true; decResult.hidden = true; progWrap.hidden = true;
@@ -677,37 +793,55 @@ async function renderScales(dataset) {
     const form = new FormData();
     form.append("file", decFile);
     try {
-      const res = await fetch(API + "/api/inspect", { method: "POST", body: form });
+      const res = await apiFetch("/api/inspect", { method: "POST", body: form });
       const d = await res.json().catch(() => ({}));
+      const tbody = structTable.querySelector("tbody");
+      tbody.replaceChildren();
+      const row = (key, value, className = "") => {
+        const tr = document.createElement("tr");
+        appendCell(tr, key);
+        appendCell(tr, value, className);
+        tbody.appendChild(tr);
+      };
       if (!res.ok) {
         structTable.hidden = false;
-        structTable.querySelector("tbody").innerHTML =
-          `<tr><td>错误</td><td class="co-fail">${d.detail || "解析失败"}</td></tr>`;
+        row("错误", d.detail || "解析失败", "co-fail");
         return;
       }
-      const row = (k, v) => `<tr><td>${k}</td><td>${v}</td></tr>`;
-      const okStr = d.self_consistent
-        ? `<span class="co-ok">✅ payload 与 header 一致</span>`
-        : `<span class="co-fail">❌ 不一致（文件可能损坏）</span>`;
       const scaleStr = d.dual ? "双尺度 (coarse+fine)" : "单尺度 (igpt)";
-      const partsRow = d.dual
-        ? row("coarse / fine", `${d.coarse_nbits} bit / ${d.fine_nbits} bit`)
-        : "";
-      structTable.querySelector("tbody").innerHTML =
-        row("magic / 版本", `${d.magic} / v${d.version}`) +
-        row("header (16B)", `<code class="co-hex">${d.header_hex}</code>`) +
-        row("尺度", scaleStr) +
-        row("图像", `${d.H}×${d.H}×${d.C}（${d.n_subpix} 子像素）`) +
-        partsRow +
-        row("文件大小", `${d.total_bytes} B（payload ${d.payload_bytes} + header ${d.header_size}）`) +
-        row("码长", `${d.total_bits} bit`) +
-        row("achieved bpd", `<b>${d.bpd}</b>`) +
-        row("自洽校验", okStr);
+      row("magic / 版本", `${d.magic} / v${d.version}`);
+      const header = document.createElement("code");
+      header.className = "co-hex";
+      header.textContent = d.header_hex;
+      row(`fixed header (${d.fixed_header_size}B)`, header);
+      row("尺度", scaleStr);
+      row("图像", `${d.H}x${d.W}x${d.C}（${d.n_subpix} 子像素）`);
+      if (d.dual) row("coarse / fine", `${d.coarse_nbits} bit / ${d.fine_nbits} bit`);
+      row("文件大小", `${d.total_bytes} B（payload ${d.payload_bytes} + 非 payload ${d.header_size}）`);
+      row("算术码长", `${d.total_bits} bit`);
+      row("payload bpd", d.payload_bpd);
+      row("packed payload bpd", d.packed_payload_bpd);
+      row("完整文件 bpd", d.file_bpd);
+      row("完整性", d.integrity_verified ? "SHA-256 已验证" : "仅结构校验（legacy v1）",
+          d.integrity_verified ? "co-ok" : "");
+      row("模型绑定", d.model_bound ? "是" : "否（legacy v1）",
+          d.model_bound ? "co-ok" : "");
+      if (d.codec_identity) {
+        row("模型类型", d.codec_identity.model_type);
+        row("checkpoint SHA-256", d.codec_identity.checkpoint_sha256, "co-hex");
+        row("RGB SHA-256", d.source_rgb_sha256, "co-hex");
+      }
+      row("自洽校验", d.self_consistent ? "payload 与 header 一致" : "不一致（文件可能损坏）",
+          d.self_consistent ? "co-ok" : "co-fail");
       structTable.hidden = false;
     } catch (e) {
       structTable.hidden = false;
-      structTable.querySelector("tbody").innerHTML =
-        `<tr><td>错误</td><td class="co-fail">无法连接后端</td></tr>`;
+      const tbody = structTable.querySelector("tbody");
+      tbody.replaceChildren();
+      const tr = document.createElement("tr");
+      appendCell(tr, "错误");
+      appendCell(tr, "无法连接后端", "co-fail");
+      tbody.appendChild(tr);
     } finally {
       inspectRun.disabled = false; inspectRun.textContent = "解析结构（即时）";
     }
@@ -726,7 +860,7 @@ async function renderScales(dataset) {
     form.append("file", decFile);
     form.append("dataset", currentDataset);
     try {
-      const res = await fetch(API + "/api/decode", { method: "POST", body: form });
+      const res = await apiFetch("/api/decode", { method: "POST", body: form });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         progLabel.textContent = err.detail || "解码失败";
@@ -751,30 +885,28 @@ async function renderScales(dataset) {
           let msg;
           try { msg = JSON.parse(line); } catch { continue; }
           if (msg.type === "start") {
-            progLabel.textContent = `逐 token 解码中… 0 / ${msg.total}`;
+            progLabel.textContent = `模型预测中… 0 / ${msg.total}`;
           } else if (msg.type === "progress") {
             const pct = (msg.done / msg.total * 100).toFixed(1);
             progFill.style.width = pct + "%";
             progLabel.textContent = `[${msg.stage}] ${msg.done} / ${msg.total}（${pct}%）`;
           } else if (msg.type === "done") {
             progFill.style.width = "100%";
-            progLabel.textContent = `解码完成 — achieved ${msg.achieved_bpd} bpd`;
+            progLabel.textContent = `解码完成 - payload ${msg.payload_bpd} bpd；文件 ${msg.file_bpd} bpd`;
             decImg.src = "data:image/png;base64," + msg.recon_png;
             decImg.hidden = false;
             decResult.hidden = false;
             // 真实交叉校验：只有指纹与本会话刚编码的 .bin 逐 token 一致才算成功。
             // 无 lastEncFingerprint（换会话/刷新后传入的 .bin）→ 无法校验，不下成功结论。
-            if (lastEncFingerprint && msg.fingerprint === lastEncFingerprint) {
+            if (msg.rgb_checksum_verified && lastEncFingerprint && msg.fingerprint === lastEncFingerprint) {
               decBadge.className = "ll-badge ll-badge-ok";
-              decBadge.innerHTML = `✅ 盲解码还原 — 指纹 <code>${msg.fingerprint}</code> 与刚编码的 .bin 逐 token 一致`;
+              decBadge.textContent = `盲解码还原 - RGB SHA-256 已验证，指纹 ${msg.fingerprint} 与本次编码一致`;
             } else if (lastEncFingerprint) {
               decBadge.className = "ll-badge ll-badge-fail";
-              decBadge.innerHTML = `❌ 解码失步 — 指纹 <code>${msg.fingerprint}</code> 与编码端 <code>${lastEncFingerprint}</code> 不一致`
-                + `<br><small>解码模型/权重与编码时不是同一个（server 重启或 ckpt 切换？），bitstream 无法正确还原</small>`;
+              decBadge.textContent = `解码失步 - 指纹 ${msg.fingerprint} 与编码端 ${lastEncFingerprint} 不一致；请检查模型和权重`;
             } else {
               decBadge.className = "ll-badge";
-              decBadge.innerHTML = `ℹ️ 盲解码完成 — 指纹 <code>${msg.fingerprint}</code>，achieved <b>${msg.achieved_bpd}</b> bpd`
-                + `<br><small>本会话未编码该 .bin，无法做逐 token 交叉校验；若图像异常请在同一会话内「编码→下载→解码」复核</small>`;
+              decBadge.textContent = `盲解码完成 - RGB SHA-256 已验证；指纹 ${msg.fingerprint}，payload ${msg.payload_bpd} bpd`;
             }
             done = true;
           } else if (msg.type === "error") {

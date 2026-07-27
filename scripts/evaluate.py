@@ -11,14 +11,15 @@ PixelCNN++ / Sparse Transformer 等基线原文口径一致；
   1. 单模型评测: --checkpoint best.pth
   2. SWA checkpoint 对比: --swa (同时评测 best.pth 和 swa.pth)
   3. 传统方法对比: --traditional (PNG/WebP lossless bpd)
-  4. TTA hflip: --tta_hflip (评测时对每张图取 x 与 hflip(x) 的 bpd 均值)
+  4. TTA hflip: --tta_hflip（诊断分数；当前 codec 未实现该协议）
 
 输出 Markdown 格式的对比表格，可直接粘贴到论文中。
 
 Usage:
-    # 单模型评测 (主表数字)
+    # 单模型评测（主表协议：单 checkpoint、无 TTA）
     python scripts/evaluate.py --config configs/ccigpt_cifar10_s_rgb_ronly_v2.yaml \
-        --checkpoint experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/best.pth --tta_hflip
+        --checkpoint experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/best.pth \
+        --per_image_stats
 
     # SWA vs best 对比 (v2 配置启用了 SWA last 31 ckpts, start ep170)
     python scripts/evaluate.py --config configs/ccigpt_cifar10_s_rgb_ronly_v2.yaml \
@@ -34,7 +35,6 @@ Usage:
 
 import os
 import sys
-import io
 import json
 import argparse
 import yaml
@@ -46,10 +46,29 @@ import numpy as np
 from contextlib import nullcontext
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 from torch.amp import autocast
 from torch.utils.data import DataLoader, Subset
-from src.mdlic.utils import compute_bpd, clean_state_dict
+from mdlic.eval_metrics import (
+    ce_per_image as _ce_per_image_from_logits,
+    per_image_bpd as _per_image_bpd,
+    per_image_rate_components as _per_image_rate_components,
+    tokenize_targets as _tokenize_targets,
+)
+from mdlic.codec.probability import (
+    codec_aligned_score_metadata,
+    diagnostic_score_metadata,
+)
+from mdlic.provenance import (
+    dataset_record,
+    git_metadata as _git_metadata,
+    runtime_metadata as _runtime_metadata,
+    sha256_file as _sha256_file,
+)
+from mdlic.rate import dual_stream_bpd, ideal_stream_bits, single_stream_bpd
+from mdlic.traditional_codecs import codec_metadata, encode_rgb_array, get_codec_spec
+from mdlic.utils import clean_state_dict
 from scripts.train import _build_model_from_config, _build_ccigpt_from_config
 
 
@@ -59,13 +78,9 @@ from scripts.train import _build_model_from_config, _build_ccigpt_from_config
 #   2. _shard_dataset() 用 stride 切片把 val 集分成 N 份不相交子集（并集 = 全集，无 padding）
 #   3. 每 rank 独立 build+load ckpt 到自己的卡、只跑自己那份
 #   4. evaluate_* 末尾 all-reduce(SUM) 加权累加量 → 全局 bpd_mean
-# ⚠ 精度说明（bpd_mean vs bpd_std）：
-#   - bpd_mean **与单卡一致**（到打印精度）：wsum = Σ batch_mean·B 在分批/分片下 telescoping 到
-#     Σ_所有图 bpd_i，再除以全局 N，与切分方式无关（仅浮点求和顺序的末位抖动）。
-#   - bpd_std **不保证与单卡 bit-exact**：sqsum 累加的是 (batch_mean)²·B，是"batch 均值的二阶矩"，
-#     不是 per-image 二阶矩。stride 分片把图重新分组到不同 batch → sqsum 随 GPU 数/batch 边界变化，
-#     故 ± std 在单卡 vs 多卡会有差异。主表 ± 数字若要与历史单卡可比，请用单卡评测；
-#     或用 --per_image_stats（gather 真 per-image 列表，顺序无关、可复现的 CI）。
+# 精度说明：mean/std 都从逐图 bpd 的一阶、二阶矩聚合，batch size 与 DDP 分片
+# 不改变统计定义；不同浮点求和顺序只可能造成末位舍入差异。--per_image_stats
+# 进一步 gather 逐图记录，并可计算固定 seed 的 bootstrap CI。
 # 单卡运行（不经 torchrun）时所有 helper 退化为 no-op，行为与改造前完全相同。
 
 def _init_distributed():
@@ -99,7 +114,7 @@ def _shard_dataset(dataset):
 
     indices = range(rank, N, world_size)：各 rank 子集不相交、并集 = 全集、无重复 padding，
     因此 all-reduce(SUM) 后 n_total == 原始 N，bpd_mean 与单卡一致（到打印精度）。
-    ⚠ bpd_std 不保证与单卡 bit-exact（见模块顶部 DDP 注释：std 是 batch 均值二阶矩，随分片变化）。
+    bpd_std 由逐图一阶/二阶矩聚合；不同分片只可能因浮点求和顺序产生末位差异。
     单卡时原样返回。
     """
     if not _is_dist():
@@ -110,6 +125,14 @@ def _shard_dataset(dataset):
     return Subset(dataset, indices)
 
 
+def _ordered_sample_ids(loader) -> list[int]:
+    """Return dataset indices in the deterministic order consumed by loader."""
+    dataset = loader.dataset
+    if isinstance(dataset, Subset):
+        return [int(i) for i in dataset.indices]
+    return list(range(len(dataset)))
+
+
 def _progress(loader, desc):
     """tqdm 进度条，只在 rank0（或单卡）显示；其余 rank 原样返回 loader 不打印。
 
@@ -118,7 +141,10 @@ def _progress(loader, desc):
     """
     if _is_dist() and dist.get_rank() != 0:
         return loader
-    from tqdm import tqdm
+    try:
+        from tqdm import tqdm
+    except ImportError:
+        return loader
     return tqdm(loader, desc=desc, total=len(loader), dynamic_ncols=True)
 
 
@@ -136,6 +162,16 @@ def _dist_reduce_sum(values: dict) -> dict:
     t = torch.tensor([values[k] for k in keys], dtype=torch.float64)  # CPU tensor for gloo
     dist.all_reduce(t, op=dist.ReduceOp.SUM)
     return {k: t[i].item() for i, k in enumerate(keys)}
+
+
+def _mean_and_sample_std(total: float, square_total: float, count: int):
+    if count <= 0:
+        raise ValueError("cannot summarize an empty evaluation set")
+    mean = total / count
+    if count == 1:
+        return mean, 0.0
+    centered_sum = max(square_total - count * mean * mean, 0.0)
+    return mean, math.sqrt(centered_sum / (count - 1))
 
 
 def _build_from_config(mcfg: dict, device):
@@ -165,13 +201,14 @@ ACADEMIC_BASELINES = {
 
 @torch.no_grad()
 def evaluate_model(model, loader, device, amp_dtype=None, tta_hflip: bool = False,
-                   collect_per_image: bool = False):
+                   collect_per_image: bool = False,
+                   codec_numerics: bool = False):
     """
     评估模型在数据集上的 bits/dim (bpd)。
 
     返回:
       bpd_mean: float — 平均 bpd
-      bpd_std:  float — bpd 标准差（batch-level 加权，与 train.py:validate() 同口径）
+      bpd_std:  float — 真正的 per-image bpd 标准差
       bpd_list: list[float] — 每个 batch 的 bpd（保留供 caller 自定义聚合）
       extras:   dict — 可选的额外字段（CC-iGPT 时含 ce_coarse / ce_fine / ctx_alpha；
                 collect_per_image=True 时含 per_image_bpd）
@@ -181,11 +218,16 @@ def evaluate_model(model, loader, device, amp_dtype=None, tta_hflip: bool = Fals
       hflip(x) 的 -log p 仍是 H(X) 的合法上界（hflip 在 RGB-bit-exact 域是确定函数），
       平均能降低估计方差。Ref: Sparse Transformer (Child 2019, §4.2) 采用类似 ensemble.
     """
+    if codec_numerics and amp_dtype is not None:
+        raise ValueError("codec_numerics requires autocast to be disabled")
     model.eval()
     bpd_per_batch = []
     bpd_weighted_sum = 0.0
     bpd_sq_weighted_sum = 0.0
     per_image_bpd = []
+    per_image_records = []
+    sample_ids = _ordered_sample_ids(loader)
+    sample_cursor = 0
     n_total = 0
     use_amp = amp_dtype is not None and device.type == 'cuda'
 
@@ -206,47 +248,45 @@ def evaluate_model(model, loader, device, amp_dtype=None, tta_hflip: bool = Fals
             out = model(x)
             if tta_hflip:
                 out_flip = model(torch.flip(x, dims=[-1]))
-            if collect_per_image:
-                bpd_img = _per_image_bpd(model, x, out)
-                if tta_hflip:
-                    bpd_img_flip = _per_image_bpd(
-                        model, torch.flip(x, dims=[-1]), out_flip
-                    )
-                    bpd_img = (bpd_img + bpd_img_flip) * 0.5
+            components = _per_image_rate_components(
+                model, x, out, codec_numerics=codec_numerics,
+            )
+            bpd_img = components["bpd"]
+            if tta_hflip:
+                components_flip = _per_image_rate_components(
+                    model, torch.flip(x, dims=[-1]), out_flip,
+                    codec_numerics=codec_numerics,
+                )
+                bpd_img = (bpd_img + components_flip["bpd"]) * 0.5
 
-        if "bpd" in out and out["bpd"] is not None:
-            bpd = out["bpd"]
-            if tta_hflip:
-                bpd = (bpd + out_flip["bpd"]) * 0.5
-        else:
-            ce = out["ce_loss"]
-            if tta_hflip:
-                ce = (ce + out_flip["ce_loss"]) * 0.5
-            bpd = compute_bpd(ce)
-        bpd_val = bpd.item()
+        bpd_val = bpd_img.mean().item()
         bpd_per_batch.append(bpd_val)
-        bpd_weighted_sum += bpd_val * B
-        bpd_sq_weighted_sum += (bpd_val ** 2) * B
+        bpd_weighted_sum += bpd_img.double().sum().item()
+        bpd_sq_weighted_sum += bpd_img.double().square().sum().item()
         n_total += B
         if collect_per_image:
-            per_image_bpd.extend(bpd_img.detach().cpu().tolist())
+            values = bpd_img.detach().cpu().tolist()
+            ids = sample_ids[sample_cursor:sample_cursor + B]
+            per_image_bpd.extend(values)
+            per_image_records.extend(
+                {"sample_id": int(sample_id), "ideal_model_bpd": float(value)}
+                for sample_id, value in zip(ids, values)
+            )
+        sample_cursor += B
 
-        if "ce_loss_coarse" in out and out["ce_loss_coarse"] is not None:
+        if "ce_coarse" in components:
             is_ccigpt = True
-            ce_c = out["ce_loss_coarse"]
-            ce_f = out["ce_loss_fine"]
+            ce_c_img = components["ce_coarse"]
+            ce_f_img = components["ce_fine"]
             if tta_hflip:
-                ce_c = (ce_c + out_flip["ce_loss_coarse"]) * 0.5
-                ce_f = (ce_f + out_flip["ce_loss_fine"]) * 0.5
-            ce_c_sum += ce_c.item() * B
-            ce_f_sum += ce_f.item() * B
+                ce_c_img = (ce_c_img + components_flip["ce_coarse"]) * 0.5
+                ce_f_img = (ce_f_img + components_flip["ce_fine"]) * 0.5
+            ce_c_sum += ce_c_img.double().sum().item()
+            ce_f_sum += ce_f_img.double().sum().item()
             if "ctx_alpha" in out and out["ctx_alpha"] is not None:
                 alpha_sum += out["ctx_alpha"].item() * B
 
-    # batch-level 加权 std，与 train.py:validate() 同公式：avoid np.std(batch_means)
-    # 在末尾不足 batch 时给小 batch 过高权重。
-    # 分布式：all-reduce(SUM) 各 rank 加权累加量，再除以全局 n_total。bpd_mean 与单卡一致（到打印
-    # 精度）；bpd_std 不保证 bit-exact（sqsum 是 batch 均值二阶矩，随分片/batch 边界变化，见模块注释）。
+    # 逐图一阶/二阶矩：batch size 和 DDP 分片只改变浮点求和顺序，不改变统计口径。
     agg = _dist_reduce_sum({
         "wsum": bpd_weighted_sum,
         "sqsum": bpd_sq_weighted_sum,
@@ -256,11 +296,17 @@ def evaluate_model(model, loader, device, amp_dtype=None, tta_hflip: bool = Fals
         "alpha": alpha_sum,
     })
     n_global = agg["n"]
-    bpd_mean = agg["wsum"] / n_global
-    bpd_var = max(agg["sqsum"] / n_global - bpd_mean ** 2, 0.0)
-    bpd_std = float(math.sqrt(bpd_var))
+    bpd_mean, bpd_std = _mean_and_sample_std(
+        agg["wsum"], agg["sqsum"], int(n_global),
+    )
 
-    extras = {}
+    extras = {
+        "score_numerics": (
+            codec_aligned_score_metadata()
+            if codec_numerics
+            else diagnostic_score_metadata(amp_dtype)
+        ),
+    }
     if is_ccigpt:
         extras["ce_coarse"] = agg["ce_c"] / n_global
         extras["ce_fine"] = agg["ce_f"] / n_global
@@ -270,23 +316,13 @@ def evaluate_model(model, loader, device, amp_dtype=None, tta_hflip: bool = Fals
         # per-image 统计是顺序无关的 mean/std/CI，无影响）。单卡时直接用本地列表。
         if _is_dist():
             gathered = [None] * dist.get_world_size()
-            dist.all_gather_object(gathered, per_image_bpd)
-            per_image_bpd = [v for part in gathered for v in part]
+            dist.all_gather_object(gathered, per_image_records)
+            per_image_records = [v for part in gathered for v in part]
+            per_image_records.sort(key=lambda row: row["sample_id"])
+            per_image_bpd = [row["ideal_model_bpd"] for row in per_image_records]
         extras["per_image_bpd"] = per_image_bpd
+        extras["per_image_records"] = per_image_records
     return bpd_mean, bpd_std, bpd_per_batch, extras
-
-
-def _tokenize_targets(x: torch.Tensor) -> torch.Tensor:
-    """与 IGPT._tokenize 同口径：RGB float [0,1] → pixel-first long token (B, T-1)。
-
-    用于 ensemble 路径在外部独立 tokenize 一次（每个 model 拿到的 x 一样，token
-    序列必然相同），避免对 K 个 model 重复 .tokenize。返回的 target 已做 NTP 切片
-    `tokens[:, 1:]`，与 IGPT.forward 内部一致。
-    """
-    xt = x.clamp(0, 1)
-    xt = (xt * 255).round().long()
-    tokens = xt.permute(0, 2, 3, 1).reshape(x.size(0), -1)
-    return tokens[:, 1:]
 
 
 def _ensemble_log_probs(log_probs_stack: list[torch.Tensor]) -> torch.Tensor:
@@ -295,52 +331,6 @@ def _ensemble_log_probs(log_probs_stack: list[torch.Tensor]) -> torch.Tensor:
         raise ValueError("log_probs_stack must contain at least one tensor")
     stacked = torch.stack(log_probs_stack, dim=0)
     return torch.logsumexp(stacked, dim=0) - math.log(stacked.size(0))
-
-
-def _ce_per_image_from_logits(logits: torch.Tensor,
-                              targets: torch.Tensor) -> torch.Tensor:
-    """Return mean NTP cross-entropy per image, matching IGPT.forward."""
-    B = targets.size(0)
-    V = logits.size(-1)
-    ce_tok = F.cross_entropy(
-        logits.float().reshape(-1, V),
-        targets.reshape(-1),
-        reduction="none",
-    )
-    return ce_tok.view(B, -1).mean(dim=1)
-
-
-def _ccigpt_coarse_forward(model, x: torch.Tensor):
-    """Recompute CC-iGPT coarse branch for per-image bpd diagnostics."""
-    raw_model = model.module if hasattr(model, "module") else model
-    x_fp32 = x.clamp(0, 1).to(torch.float32)
-    x_c_full = F.adaptive_avg_pool2d(x_fp32, raw_model.coarse_size)
-    if raw_model.coarse.in_channels < raw_model.in_channels:
-        x_c = x_c_full[:, :raw_model.coarse.in_channels]
-    else:
-        x_c = x_c_full
-    return raw_model.coarse(x_c, z_loss_weight=0.0), x_c
-
-
-def _per_image_bpd(model, x: torch.Tensor, out: dict) -> torch.Tensor:
-    """Compute per-image bpd from logits without changing default metrics.
-
-    For vanilla iGPT this is CE_i / ln2. For CC-iGPT this mirrors the existing
-    scalar formula `(CE_c*N_c + CE_f*N_f) / ln2 / N_f`, but with CE_c/CE_f
-    measured per image.
-    """
-    raw_model = model.module if hasattr(model, "module") else model
-    target_f = _tokenize_targets(x).to(out["logits"].device)
-    ce_f = _ce_per_image_from_logits(out["logits"], target_f)
-
-    if "ce_loss_coarse" not in out or out["ce_loss_coarse"] is None:
-        return ce_f / math.log(2.0)
-
-    out_c, x_c = _ccigpt_coarse_forward(raw_model, x)
-    target_c = _tokenize_targets(x_c).to(out_c["logits"].device)
-    ce_c = _ce_per_image_from_logits(out_c["logits"], target_c)
-    N_c, N_f = raw_model.coarse.seq_len, raw_model.fine.seq_len
-    return (ce_c * N_c + ce_f * N_f) / math.log(2.0) / N_f
 
 
 def _summarize_per_image_bpd(values, bootstrap_samples: int = 1000,
@@ -369,31 +359,156 @@ def _summarize_per_image_bpd(values, bootstrap_samples: int = 1000,
     return summary
 
 
-def _write_per_image_json(path: str, values, summary: dict) -> None:
+def _write_per_image_json(path: str, values, summary: dict, records=None) -> None:
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     payload = {
+        "schema_version": 2,
         "summary": summary,
         "per_image_bpd": [round(float(v), 6) for v in values],
     }
+    if records is not None:
+        payload["records"] = records
     with open(path, "w") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
     print(f"[per_image_json] wrote {len(values)} rows → {path}")
 
 
+def _write_result_manifest(
+    path: str,
+    *,
+    args,
+    config: dict,
+    dataset_name: str,
+    dataset_size: int,
+    dataset_metadata: dict,
+    models,
+    checkpoint_paths,
+    bpd_mean: float,
+    bpd_std: float,
+    summary: dict,
+    extras: dict,
+    device,
+    traditional_codecs: dict | None = None,
+) -> None:
+    """Write a reproducible evaluation record for a single or ensemble run."""
+    if dataset_metadata.get("name") != dataset_name:
+        raise ValueError("dataset metadata name does not match the evaluated dataset")
+    if dataset_metadata.get("size") != dataset_size:
+        raise ValueError("dataset metadata size does not match the evaluated dataset")
+    model_list = list(models)
+    checkpoint_paths = list(checkpoint_paths)
+    members = len(model_list)
+    params_per_member = sum(p.numel() for p in model_list[0].parameters())
+    protocol = "single_model_nll" if members == 1 else "ensemble_probability_mixture"
+    if args.tta_hflip:
+        protocol += "_with_hflip_diagnostic"
+
+    config_abs = os.path.abspath(args.config)
+    checkpoints = [
+        {
+            "path": os.path.abspath(checkpoint_path),
+            "sha256": _sha256_file(checkpoint_path),
+        }
+        for checkpoint_path in checkpoint_paths
+    ]
+    metric_components = {
+        key: extras[key]
+        for key in ("ce_coarse", "ce_fine", "ctx_alpha")
+        if key in extras
+    }
+    score_numerics = extras.get("score_numerics", {"name": "unspecified"})
+    probability_numerics_aligned = (
+        score_numerics.get("name")
+        == codec_aligned_score_metadata()["name"]
+    )
+    codec_supported, codec_reason = _current_codec_compatibility(
+        members=members,
+        tta_hflip=args.tta_hflip,
+        probability_numerics_aligned=probability_numerics_aligned,
+    )
+    payload = {
+        "schema_version": 4,
+        "protocol": protocol,
+        "decodable_by_current_codec": codec_supported,
+        "codec_compatibility": {
+            "supported": codec_supported,
+            "reason": codec_reason,
+            "probability_numerics_aligned": probability_numerics_aligned,
+            "actual_arithmetic_coding_run": bool(
+                score_numerics.get("actual_arithmetic_coding", False)
+            ),
+        },
+        "command": [sys.executable, *sys.argv],
+        "git": _git_metadata(),
+        "config": {
+            "path": config_abs,
+            "sha256": _sha256_file(config_abs),
+            "model_type": config["model"].get("type", "igpt"),
+        },
+        "checkpoints": checkpoints,
+        "model": {
+            "parameters_per_member": params_per_member,
+            "members": members,
+            "stored_parameters": params_per_member * members,
+            "forward_passes_per_image": members * (2 if args.tta_hflip else 1),
+        },
+        "dataset": dataset_metadata,
+        "rate_accounting": {
+            "metric": "ideal_model_bpd",
+            "ce_predictions_per_stream": "num_tokens_minus_one",
+            "first_token_prior": "uniform_256",
+            "first_token_bits_per_stream": 8,
+            "includes_container_header": False,
+        },
+        "score_numerics": score_numerics,
+        "result": {
+            "mean": bpd_mean,
+            "std_per_image": bpd_std,
+            "per_image_summary": summary,
+            **metric_components,
+        },
+        "runtime": _runtime_metadata(device),
+        "per_image": extras.get("per_image_records", []),
+    }
+    if traditional_codecs:
+        payload["traditional_codecs"] = traditional_codecs
+
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp_path = f"{path}.tmp.{os.getpid()}"
+    with open(tmp_path, "w") as fh:
+        json.dump(payload, fh, ensure_ascii=False, indent=2)
+    os.replace(tmp_path, path)
+    print(f"[result_json] wrote manifest → {path}")
+
+
+def _current_codec_compatibility(
+    *,
+    members: int,
+    tta_hflip: bool,
+    probability_numerics_aligned: bool = True,
+) -> tuple[bool, str]:
+    """Describe whether the current single-checkpoint codec can realize a score."""
+    if members < 1:
+        raise ValueError("members must be >= 1")
+    if tta_hflip:
+        return False, "hflip TTA has no corresponding current bitstream protocol"
+    if members != 1:
+        return False, "the current codec accepts exactly one checkpoint"
+    if not probability_numerics_aligned:
+        return False, "score does not use the codec's fp32-logits/fp64-softmax numerics"
+    return True, "single checkpoint without TTA uses codec-aligned probability numerics"
+
+
 @torch.no_grad()
-def evaluate_ensemble(models, loader, device, amp_dtype=None, tta_hflip: bool = False):
-    """多 ckpt probability-mixture ensemble 评测（log-prob 域稳定实现）。
+def evaluate_ensemble(models, loader, device, amp_dtype=None,
+                      tta_hflip: bool = False,
+                      collect_per_image: bool = False):
+    """Evaluate a per-token probability-mixture ensemble.
 
-    每 batch：K 个 model 各 forward 拿 fine logits → log-softmax → K 档逐元素
-    logsumexp - log(K) → gather target → fine NLL。这对应
-    p_ens(y|x)=mean_k p_k(y|x)，不是 logit averaging，也不是各模型 NLL 均值。
-    coarse 走每档 ce_coarse 数值平均（每档 coarse 架构相同、训自同一轨迹的
-    不同平滑，数值平均近似 coarse-ensemble bpd）。
-    bpd_total = (CE_c_avg·N_c + CE_f_ens·N_f) / ln2 / N_f，与 cc_igpt.forward 同口径。
-
-    与 --tta_hflip 正交：TTA 路径在 evaluate_model 上是"x 与 hflip(x) 各跑一次取
-    batch-mean CE 均值"；ensemble 路径同口径——hflip(x) 也跑 K 档 ensemble 取
-    fine NLL，再与原序 NLL 取均值。
+    Fine and coarse streams both use ``mean_k p_k(token | prefix)``.  This is
+    a normalized autoregressive distribution when TTA is disabled.  Horizontal
+    flip averaging remains a diagnostic score because the current codec does
+    not define a corresponding decodable protocol.
     """
     for m in models:
         m.eval()
@@ -401,6 +516,10 @@ def evaluate_ensemble(models, loader, device, amp_dtype=None, tta_hflip: bool = 
     bpd_per_batch = []
     bpd_weighted_sum = 0.0
     bpd_sq_weighted_sum = 0.0
+    per_image_bpd = []
+    per_image_records = []
+    sample_ids = _ordered_sample_ids(loader)
+    sample_cursor = 0
     n_total = 0
     use_amp = amp_dtype is not None and device.type == 'cuda'
     K = len(models)
@@ -408,74 +527,91 @@ def evaluate_ensemble(models, loader, device, amp_dtype=None, tta_hflip: bool = 
     is_ccigpt = False
     ce_c_sum = ce_f_sum = alpha_sum = 0.0
 
-    def _ensemble_fine_nll(x_in, target):
-        """K 档 forward → probability mixture → gather target → mean NLL。
-
-        副作用：把每档 ce_coarse / ctx_alpha 通过 closure 写进 ce_c_local / alpha_local
-        以便外层做 batch-mean 累加。
-        """
-        log_probs_stack = []
-        ce_c_local = []
+    def _ensemble_forward(x_in):
+        """Return per-image coarse/fine NLL under the probability mixture."""
+        fine_log_probs = []
+        coarse_log_probs = []
         alpha_local = []
-        amp_ctx = autocast(device_type="cuda", dtype=amp_dtype) if use_amp else nullcontext()
         for m in models:
+            amp_ctx = autocast(device_type="cuda", dtype=amp_dtype) if use_amp else nullcontext()
             with amp_ctx:
                 out = m(x_in)
             assert out.get("logits") is not None, (
                 "ensemble 评测要求 forward 返回 logits（softmax 路径）"
             )
-            log_probs_stack.append(F.log_softmax(out["logits"].float(), dim=-1))
+            fine_log_probs.append(F.log_softmax(out["logits"].float(), dim=-1))
             if "ce_loss_coarse" in out and out["ce_loss_coarse"] is not None:
-                ce_c_local.append(out["ce_loss_coarse"].item())
+                assert out.get("logits_coarse") is not None, (
+                    "CC-iGPT ensemble 需要 logits_coarse 才能对 coarse 概率做 mixture"
+                )
+                coarse_log_probs.append(
+                    F.log_softmax(out["logits_coarse"].float(), dim=-1)
+                )
                 if "ctx_alpha" in out and out["ctx_alpha"] is not None:
                     alpha_local.append(out["ctx_alpha"].item())
-        log_probs_ens = _ensemble_log_probs(log_probs_stack)   # (B, T-1, V)
-        nll_per_tok = -log_probs_ens.gather(-1, target.unsqueeze(-1)).squeeze(-1)
-        return nll_per_tok.mean(), ce_c_local, alpha_local
+
+        target_f = _tokenize_targets(x_in)
+        log_probs_f = _ensemble_log_probs(fine_log_probs)
+        ce_f_img = -log_probs_f.gather(
+            -1, target_f.unsqueeze(-1)
+        ).squeeze(-1).mean(dim=1)
+
+        ce_c_img = None
+        if coarse_log_probs:
+            x_c = models[0]._coarse_input(x_in.clamp(0, 1).to(torch.float32))
+            target_c = _tokenize_targets(x_c)
+            log_probs_c = _ensemble_log_probs(coarse_log_probs)
+            ce_c_img = -log_probs_c.gather(
+                -1, target_c.unsqueeze(-1)
+            ).squeeze(-1).mean(dim=1)
+        return ce_c_img, ce_f_img, alpha_local
 
     for batch in _progress(loader, "ensemble"):
         x = batch[0] if isinstance(batch, (list, tuple)) else batch
         x = x.to(device)
         B = x.size(0)
 
-        target = _tokenize_targets(x)
-        ce_fine, ce_c_x, alpha_x = _ensemble_fine_nll(x, target)
+        ce_c_img, ce_f_img, alpha_x = _ensemble_forward(x)
 
         if tta_hflip:
             x_flip = torch.flip(x, dims=[-1])
-            target_flip = _tokenize_targets(x_flip)
-            ce_fine_flip, ce_c_flip, _ = _ensemble_fine_nll(x_flip, target_flip)
-            ce_fine = (ce_fine + ce_fine_flip) * 0.5
-            if ce_c_x and ce_c_flip:
-                assert len(ce_c_x) == len(ce_c_flip), (
-                    f"TTA ensemble: coarse CE 列表长度不一致 "
-                    f"(原序 K={len(ce_c_x)} vs hflip K={len(ce_c_flip)})"
-                )
-                ce_c_x = [(a + b) * 0.5 for a, b in zip(ce_c_x, ce_c_flip)]
+            ce_c_flip, ce_f_flip, _ = _ensemble_forward(x_flip)
+            ce_f_img = (ce_f_img + ce_f_flip) * 0.5
+            if ce_c_img is not None:
+                assert ce_c_flip is not None
+                ce_c_img = (ce_c_img + ce_c_flip) * 0.5
 
-        ce_fine_val = ce_fine.item()
+        ce_fine_val = ce_f_img.mean().item()
 
-        if ce_c_x:
+        if ce_c_img is not None:
             is_ccigpt = True
-            ce_coarse_val = sum(ce_c_x) / len(ce_c_x)
+            ce_coarse_val = ce_c_img.mean().item()
             N_c = models[0].coarse.seq_len
             N_f = models[0].fine.seq_len
-            bpd_val = (ce_coarse_val * N_c + ce_fine_val * N_f) / math.log(2.0) / N_f
-            ce_c_sum += ce_coarse_val * B
-            ce_f_sum += ce_fine_val * B
+            bpd_img = dual_stream_bpd(ce_c_img, N_c, ce_f_img, N_f)
+            ce_c_sum += ce_c_img.double().sum().item()
+            ce_f_sum += ce_f_img.double().sum().item()
             if alpha_x:
                 alpha_sum += (sum(alpha_x) / len(alpha_x)) * B
         else:
-            bpd_val = ce_fine_val / math.log(2.0)
+            bpd_img = single_stream_bpd(ce_f_img, models[0].seq_len)
 
+        bpd_val = bpd_img.mean().item()
         bpd_per_batch.append(bpd_val)
-        bpd_weighted_sum += bpd_val * B
-        bpd_sq_weighted_sum += (bpd_val ** 2) * B
+        bpd_weighted_sum += bpd_img.double().sum().item()
+        bpd_sq_weighted_sum += bpd_img.double().square().sum().item()
         n_total += B
+        if collect_per_image:
+            values = bpd_img.detach().cpu().tolist()
+            ids = sample_ids[sample_cursor:sample_cursor + B]
+            per_image_bpd.extend(values)
+            per_image_records.extend(
+                {"sample_id": int(sample_id), "ideal_model_bpd": float(value)}
+                for sample_id, value in zip(ids, values)
+            )
+        sample_cursor += B
 
-    # 分布式：与 evaluate_model 同口径，all-reduce(SUM) 后用全局 n 归一。
-    # bpd_mean 与单卡一致（到打印精度）；bpd_std 不保证 bit-exact（sqsum 是 batch 均值二阶矩，
-    # 随分片/batch 边界变化，见模块顶部 DDP 注释）。
+    # 逐图一阶/二阶矩在 batch size 与 DDP 分片变化时保持同一统计口径。
     agg = _dist_reduce_sum({
         "wsum": bpd_weighted_sum,
         "sqsum": bpd_sq_weighted_sum,
@@ -485,30 +621,42 @@ def evaluate_ensemble(models, loader, device, amp_dtype=None, tta_hflip: bool = 
         "alpha": alpha_sum,
     })
     n_global = agg["n"]
-    bpd_mean = agg["wsum"] / n_global
-    bpd_var = max(agg["sqsum"] / n_global - bpd_mean ** 2, 0.0)
-    bpd_std = float(math.sqrt(bpd_var))
+    bpd_mean, bpd_std = _mean_and_sample_std(
+        agg["wsum"], agg["sqsum"], int(n_global),
+    )
 
-    extras = {"K": K}
+    extras = {
+        "K": K,
+        "score_numerics": diagnostic_score_metadata(amp_dtype),
+    }
     if is_ccigpt:
         extras["ce_coarse"] = agg["ce_c"] / n_global
         extras["ce_fine"] = agg["ce_f"] / n_global
         extras["ctx_alpha"] = agg["alpha"] / n_global
+    if collect_per_image:
+        if _is_dist():
+            gathered = [None] * dist.get_world_size()
+            dist.all_gather_object(gathered, per_image_records)
+            per_image_records = [v for part in gathered for v in part]
+            per_image_records.sort(key=lambda row: row["sample_id"])
+            per_image_bpd = [row["ideal_model_bpd"] for row in per_image_records]
+        extras["per_image_bpd"] = per_image_bpd
+        extras["per_image_records"] = per_image_records
     return bpd_mean, bpd_std, bpd_per_batch, extras
 
 
 
 
-def compute_traditional_bpd(dataset, method="png"):
+def compute_traditional_bpd(dataset, method="png", *, return_details=False):
     """
     计算传统无损压缩方法在数据集上的 bits/dim (bpd)。
 
     将每张图片编码为内存中的 PNG/WebP 字节流，
     bpd = 压缩后字节 × 8 / 子像素总数 (= H × W × C)。
 
-    口径说明: 文献 (Hoogeboom et al., NeurIPS 2019, Integer Discrete Flows)
-    报告 CIFAR-10 PNG≈5.87、WebP (lossless)≈4.61 bits/dim（除以 H·W·C），
-    与本仓库主指标一致。本脚本是用 PIL 实测；若除以 H·W 则得到的是真 bits-per-pixel（bpd × 3），数值会高 3 倍。
+    PNG 显式使用 ``optimize=True``，WebP 显式使用 ``lossless=True``。
+    Pillow 和底层 zlib/libwebp 版本会进入 details/manifest。若除以 H·W，
+    得到的是真 bits-per-pixel（bpd × 3），不是本项目使用的 bits/dim。
 
     参数:
       dataset: torchvision dataset（返回 (tensor, label)）
@@ -518,27 +666,18 @@ def compute_traditional_bpd(dataset, method="png"):
       bpd_mean: float
       bpd_std:  float
     """
-    from PIL import Image
-
-    format_map = {"png": "PNG", "webp": "WEBP"}
-    fmt = format_map.get(method, "PNG")
-    save_kwargs = {"lossless": True} if method == "webp" else {}
-
+    spec = get_codec_spec(method)
+    if len(dataset) == 0:
+        raise ValueError("cannot evaluate a traditional codec on an empty dataset")
     bpd_list = []
-    _rng = range(len(dataset))
-    if not (_is_dist() and dist.get_rank() != 0):
-        from tqdm import tqdm
-        _rng = tqdm(_rng, desc=f"traditional/{method}", dynamic_ncols=True)
-    for i in _rng:
+    compressed_bytes_total = 0
+    for i in _progress(range(len(dataset)), f"traditional/{spec.method}"):
         img_tensor, _ = dataset[i]
         # tensor (C, H, W) [0,1] → PIL Image
-        img_np = (img_tensor.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
-        img = Image.fromarray(img_np)
-
-        # 编码到内存
-        buf = io.BytesIO()
-        img.save(buf, format=fmt, **save_kwargs)
-        compressed_bytes = buf.tell()
+        img_np = (img_tensor.permute(1, 2, 0).numpy() * 255).round() \
+            .clip(0, 255).astype(np.uint8)
+        compressed_bytes = len(encode_rgb_array(img_np, spec.method))
+        compressed_bytes_total += compressed_bytes
 
         # bpd = 压缩字节 × 8 / 总子像素数 (H·W·C)
         C, H, W = img_tensor.shape
@@ -546,7 +685,18 @@ def compute_traditional_bpd(dataset, method="png"):
         bpd = (compressed_bytes * 8) / total_dims
         bpd_list.append(bpd)
 
-    return float(np.mean(bpd_list)), float(np.std(bpd_list))
+    values = np.asarray(bpd_list, dtype=np.float64)
+    details = {
+        **codec_metadata(spec.method),
+        "dataset_size": len(dataset),
+        "mean_bpd": float(values.mean()),
+        "std_per_image": float(values.std(ddof=1)) if len(values) > 1 else 0.0,
+        "compressed_bytes_total": compressed_bytes_total,
+        "denominator": "H*W*C per image",
+    }
+    if return_details:
+        return details
+    return details["mean_bpd"], details["std_per_image"]
 
 
 def print_results_table(dataset_name, model_bpd, model_std,
@@ -591,7 +741,7 @@ def _load_dataset(config):
     dataset_name = config["data"].get("dataset", "cifar100")
 
     if dataset_name == "imagenet64_npy":
-        from src.mdlic.data.imagenet64_npy import ImageNet64Npy
+        from mdlic.data.imagenet64_npy import ImageNet64Npy
         test_dataset = ImageNet64Npy(root=config["data"]["valid"], split="val")
         return test_dataset, dataset_name
     if dataset_name not in ("cifar10", "cifar100"):
@@ -603,6 +753,35 @@ def _load_dataset(config):
     test_dataset = DatasetClass(root=config["data"]["valid"], train=False,
                                 download=False, transform=transform)
     return test_dataset, dataset_name
+
+
+def _evaluation_dataset_record(dataset, dataset_name: str, config: dict) -> dict:
+    split = "test" if dataset_name in ("cifar10", "cifar100") else "val"
+    if dataset_name == "imagenet64_npy":
+        preprocessing = {
+            "schema": "mdlic-rgb-preprocess-v1",
+            "steps": [
+                "read uint8 HWC sample from val.npy",
+                "transpose HWC to CHW",
+                "convert to float32 and divide by 255",
+            ],
+            "augmentation": None,
+        }
+    else:
+        preprocessing = {
+            "schema": "mdlic-rgb-preprocess-v1",
+            "steps": [
+                "torchvision.transforms.ToTensor: uint8 HWC to float32 CHW in [0,1]",
+            ],
+            "augmentation": None,
+        }
+    return dataset_record(
+        dataset,
+        name=dataset_name,
+        split=split,
+        configured_path=config["data"].get("valid"),
+        preprocessing=preprocessing,
+    )
 
 
 def _load_checkpoint(model, ckpt_path, device):
@@ -655,16 +834,25 @@ def cmd_single(args, config, device):
     epoch = _load_checkpoint(model, args.checkpoint, device)
     print(f"Loaded checkpoint: epoch {epoch} (model_type={model_type})")
 
-    amp_dtype, amp_dtype_str = _get_amp_dtype(config)
+    # 正式单模型、无 TTA 评测与 arithmetic codec 共用 fp32 logits / fp64
+    # softmax 口径。TTA 仍是沿用训练 AMP 的诊断模式。
+    codec_numerics = not args.tta_hflip
+    if codec_numerics:
+        amp_dtype, amp_dtype_str = None, "fp32 logits + fp64 softmax (codec-aligned)"
+    else:
+        amp_dtype, amp_dtype_str = _get_amp_dtype(config)
 
     # 基本 bits/dim 评测
     print(f"\n评测中... (AMP: {amp_dtype_str}, TTA hflip: {args.tta_hflip})")
-    collect_per_image = bool(args.per_image_stats or args.per_image_json)
+    collect_per_image = bool(
+        args.per_image_stats or args.per_image_json or args.result_json
+    )
     bpd_mean, bpd_std, _, extras = evaluate_model(
         model, test_loader, device,
         amp_dtype=amp_dtype,
         tta_hflip=args.tta_hflip,
         collect_per_image=collect_per_image,
+        codec_numerics=codec_numerics,
     )
     print(f"{model_type.upper()} bits/dim: {bpd_mean:.4f} ± {bpd_std:.4f}")
     if collect_per_image:
@@ -684,7 +872,10 @@ def cmd_single(args, config, device):
         if args.per_image_json and (not _is_dist() or dist.get_rank() == 0):
             # 只 rank0 落盘：DDP 下各 rank 经 all_gather_object 持有相同全集列表，
             # 若不 gate，N 个进程并发 open('w') 同一路径会交错/损坏 JSON。
-            _write_per_image_json(args.per_image_json, per_image, summary)
+            _write_per_image_json(
+                args.per_image_json, per_image, summary,
+                records=extras.get("per_image_records"),
+            )
     if extras:
         # CC-iGPT 多输出 CE_c / CE_f / α，便于诊断 fine 弱 vs coarse overhead 过大
         if "ce_coarse" in extras:
@@ -692,32 +883,65 @@ def cmd_single(args, config, device):
             ce_f = extras["ce_fine"]
             N_c = model.coarse.seq_len
             N_f = model.fine.seq_len
-            bpd_c_share = ce_c * N_c / math.log(2.0) / N_f
-            bpd_f_share = ce_f * N_f / math.log(2.0) / N_f
+            bpd_c_share = ideal_stream_bits(ce_c, N_c) / N_f
+            bpd_f_share = ideal_stream_bits(ce_f, N_f) / N_f
             print(f"  CE_coarse = {ce_c:.4f}  → bpd_share = {bpd_c_share:.4f} ({100*bpd_c_share/bpd_mean:.1f}%)")
             print(f"  CE_fine   = {ce_f:.4f}  → bpd_share = {bpd_f_share:.4f} ({100*bpd_f_share/bpd_mean:.1f}%)")
             print(f"  ctx_alpha = {extras['ctx_alpha']:.4f}")
 
     # 传统方法（可选）
     traditional_results = None
-    if args.traditional:
+    traditional_manifest = None
+    is_primary_rank = not _is_dist() or dist.get_rank() == 0
+    if args.traditional and is_primary_rank:
         print("\n计算传统方法 bits/dim...")
         traditional_results = {}
+        traditional_manifest = {}
 
-        png_bpd, png_std = compute_traditional_bpd(test_dataset, method="png")
-        traditional_results["PNG (lossless)"] = (png_bpd, png_std)
-        print(f"  PNG:  {png_bpd:.2f} ± {png_std:.2f}")
+        png = compute_traditional_bpd(
+            test_dataset, method="png", return_details=True,
+        )
+        traditional_results[png["display_name"]] = (
+            png["mean_bpd"], png["std_per_image"],
+        )
+        traditional_manifest["png"] = png
+        print(f"  PNG:  {png['mean_bpd']:.4f} ± {png['std_per_image']:.4f}")
 
         try:
-            webp_bpd, webp_std = compute_traditional_bpd(test_dataset, method="webp")
-            traditional_results["WebP (lossless)"] = (webp_bpd, webp_std)
-            print(f"  WebP: {webp_bpd:.2f} ± {webp_std:.2f}")
+            webp = compute_traditional_bpd(
+                test_dataset, method="webp", return_details=True,
+            )
+            traditional_results[webp["display_name"]] = (
+                webp["mean_bpd"], webp["std_per_image"],
+            )
+            traditional_manifest["webp"] = webp
+            print(f"  WebP: {webp['mean_bpd']:.4f} ± {webp['std_per_image']:.4f}")
         except Exception as e:
             print(f"  WebP: 跳过 ({e})")
 
-    print_results_table(dataset_name, bpd_mean, bpd_std,
-                         traditional_results,
-                         model_label=f"{model_type.upper()} (Ours)")
+    if is_primary_rank:
+        print_results_table(dataset_name, bpd_mean, bpd_std,
+                            traditional_results,
+                            model_label=f"{model_type.upper()} (Ours)")
+    if args.result_json and is_primary_rank:
+        _write_result_manifest(
+            args.result_json,
+            args=args,
+            config=config,
+            dataset_name=dataset_name,
+            dataset_size=len(test_dataset),
+            dataset_metadata=_evaluation_dataset_record(
+                test_dataset, dataset_name, config,
+            ),
+            models=[model],
+            checkpoint_paths=[args.checkpoint],
+            bpd_mean=bpd_mean,
+            bpd_std=bpd_std,
+            summary=summary,
+            extras=extras,
+            device=device,
+            traditional_codecs=traditional_manifest,
+        )
 
 
 def cmd_swa(args, config, device):
@@ -795,23 +1019,66 @@ def cmd_ensemble(args, config, device):
         models.append(m)
 
     print(f"\n评测中... (AMP: {amp_dtype_str}, TTA hflip: {args.tta_hflip}, K={len(models)})")
+    collect_per_image = bool(
+        args.per_image_stats or args.per_image_json or args.result_json
+    )
     bpd_mean, bpd_std, _, extras = evaluate_ensemble(
         models, test_loader, device,
         amp_dtype=amp_dtype, tta_hflip=args.tta_hflip,
+        collect_per_image=collect_per_image,
     )
     print(f"{model_type.upper()} ensemble bits/dim: {bpd_mean:.4f} ± {bpd_std:.4f}")
+    if args.tta_hflip:
+        print("  注意：hflip 是诊断 NLL；当前 MDLC codec 未实现对应的可解码协议。")
+    if collect_per_image:
+        per_image = extras["per_image_bpd"]
+        summary = _summarize_per_image_bpd(
+            per_image,
+            bootstrap_samples=args.bootstrap_samples,
+            seed=args.bootstrap_seed,
+        )
+        ci = summary.get("ci95_bootstrap")
+        ci_str = f", 95% bootstrap CI [{ci[0]:.4f}, {ci[1]:.4f}]" if ci else ""
+        print(
+            "  per-image: "
+            f"mean={summary['mean']:.4f}, std={summary['std']:.4f}, "
+            f"stderr={summary['stderr']:.5f}{ci_str}"
+        )
+        if args.per_image_json and (not _is_dist() or dist.get_rank() == 0):
+            _write_per_image_json(
+                args.per_image_json, per_image, summary,
+                records=extras.get("per_image_records"),
+            )
     if "ce_coarse" in extras:
         ce_c, ce_f = extras["ce_coarse"], extras["ce_fine"]
         N_c = models[0].coarse.seq_len
         N_f = models[0].fine.seq_len
-        bpd_c_share = ce_c * N_c / math.log(2.0) / N_f
-        bpd_f_share = ce_f * N_f / math.log(2.0) / N_f
+        bpd_c_share = ideal_stream_bits(ce_c, N_c) / N_f
+        bpd_f_share = ideal_stream_bits(ce_f, N_f) / N_f
         print(f"  CE_coarse = {ce_c:.4f}  → bpd_share = {bpd_c_share:.4f} ({100*bpd_c_share/bpd_mean:.1f}%)")
         print(f"  CE_fine   = {ce_f:.4f}  → bpd_share = {bpd_f_share:.4f} ({100*bpd_f_share/bpd_mean:.1f}%)")
         print(f"  ctx_alpha = {extras['ctx_alpha']:.4f}  (K-档平均)")
 
     print_results_table(dataset_name, bpd_mean, bpd_std, None,
                         model_label=f"{model_type.upper()} ensemble (K={len(models)}, Ours)")
+    if args.result_json and (not _is_dist() or dist.get_rank() == 0):
+        _write_result_manifest(
+            args.result_json,
+            args=args,
+            config=config,
+            dataset_name=dataset_name,
+            dataset_size=len(test_dataset),
+            dataset_metadata=_evaluation_dataset_record(
+                test_dataset, dataset_name, config,
+            ),
+            models=models,
+            checkpoint_paths=ckpt_paths,
+            bpd_mean=bpd_mean,
+            bpd_std=bpd_std,
+            summary=summary,
+            extras=extras,
+            device=device,
+        )
 
 
 def main():
@@ -820,9 +1087,10 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
-  # 单模型 (主表数字 best + TTA hflip)
+  # 单模型主表（无 TTA）
   python scripts/evaluate.py --config configs/ccigpt_cifar10_s_rgb_ronly_v2.yaml \\
-      --checkpoint experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/best.pth --tta_hflip
+      --checkpoint experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/best.pth \
+      --per_image_stats
 
   # SWA 对比 (v2 配置启用了 SWA last 31 ckpts, start ep170)
   python scripts/evaluate.py --config configs/ccigpt_cifar10_s_rgb_ronly_v2.yaml \\
@@ -848,14 +1116,15 @@ experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/ema.pth \\
     parser.add_argument('--swa', action='store_true',
                         help='同时评测 SWA checkpoint（swa.pth vs best.pth）')
     parser.add_argument('--tta_hflip', action='store_true',
-                        help='Test-Time Augmentation：对每张图同时跑 x 与 hflip(x)，bpd 取均值')
+                        help='诊断性 Test-Time Augmentation；当前 codec 未实现对应协议')
     parser.add_argument('--batch_size', type=int, default=64,
                         help='评测 batch size')
     parser.add_argument('--per_image_stats', action='store_true',
-                        help='单 checkpoint 模式下额外计算 per-image bpd/std/stderr/CI；'
-                             '默认关闭以保持评测速度和旧输出口径。')
+                        help='额外打印 per-image bpd/std/stderr/CI')
     parser.add_argument('--per_image_json', type=str, default=None,
                         help='导出 per-image bpd JSON；会隐式启用 --per_image_stats。')
+    parser.add_argument('--result_json', type=str, default=None,
+                        help='导出可复现评测 manifest（隐式收集逐图结果）')
     parser.add_argument('--bootstrap_samples', type=int, default=1000,
                         help='per-image 均值 bootstrap CI 抽样次数；设 0 可关闭 CI。')
     parser.add_argument('--bootstrap_seed', type=int, default=0,
@@ -866,8 +1135,8 @@ experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/ema.pth \\
         parser.error("--ensemble 与 --checkpoint 互斥；ensemble 路径在 --ensemble 内逗号分隔")
     if args.ensemble and args.swa:
         parser.error("--ensemble 与 --swa 互斥；ensemble 已包含多档 ckpt 评测")
-    if (args.ensemble or args.swa) and (args.per_image_stats or args.per_image_json):
-        parser.error("--per_image_stats/--per_image_json 当前仅支持单 --checkpoint 模式")
+    if args.swa and (args.per_image_stats or args.per_image_json or args.result_json):
+        parser.error("--swa 对比模式暂不导出逐图结果；请分别评测具体 checkpoint")
 
     with open(args.config, 'r') as f:
         config = yaml.safe_load(f)

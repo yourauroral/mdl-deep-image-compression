@@ -10,8 +10,8 @@ import torch.nn.functional as F
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from src.mdlic.models.cc_igpt import CCIGPT
-from src.mdlic.models.igpt import IGPT
+from mdlic.models.cc_igpt import CCIGPT
+from mdlic.models.igpt import IGPT
 
 
 @pytest.fixture
@@ -75,14 +75,18 @@ def test_coarse_ctx_ar_shift_alignment(small_ccigpt, device):
 
 
 def test_bpd_formula_consistency(small_ccigpt, device):
-    """bpd_total = (CE_c · N_c + CE_f · N_f) / ln2 / N_f, 手算对照。"""
+    """两个流各含 8-bit 首 token，CE 只覆盖其余 N-1 个 token。"""
     x = torch.rand(2, 3, 32, 32, device=device)
     out = small_ccigpt(x)
     N_c = small_ccigpt.coarse.seq_len  # 8*8*3 = 192
     N_f = small_ccigpt.fine.seq_len    # 32*32*3 = 3072
     ce_c = out["ce_loss_coarse"].item()
     ce_f = out["ce_loss_fine"].item()
-    expected = (ce_c * N_c + ce_f * N_f) / math.log(2.0) / N_f
+    expected = (
+        16.0
+        + ce_c * (N_c - 1) / math.log(2.0)
+        + ce_f * (N_f - 1) / math.log(2.0)
+    ) / N_f
     assert abs(out["bpd"].item() - expected) < 1e-5
 
 
@@ -95,6 +99,33 @@ def test_per_image_bpd_matches_batch_ccigpt(small_ccigpt, device):
         out = small_ccigpt(x)
         per_image = _per_image_bpd(small_ccigpt, x, out)
     assert torch.allclose(per_image.mean(), out["bpd"], atol=1e-5, rtol=1e-5)
+
+
+def test_identical_ccigpt_ensemble_matches_single_model(device):
+    """Probability mixtures for both coarse and fine reduce to one member."""
+    from torch.utils.data import DataLoader, TensorDataset
+    from scripts.evaluate import evaluate_ensemble, evaluate_model
+
+    torch.manual_seed(11)
+    model = CCIGPT(
+        image_size=4, in_channels=3, vocab_size=256, pool_factor=2,
+        fine_d_model=16, fine_N=1, fine_h=1, fine_d_ff=32,
+        coarse_d_model=16, coarse_N=1, coarse_h=1, coarse_d_ff=32,
+        dropout=0.0,
+    ).to(device).eval()
+    images = torch.rand(2, 3, 4, 4)
+    labels = torch.zeros(2, dtype=torch.long)
+    loader = DataLoader(TensorDataset(images, labels), batch_size=2, shuffle=False)
+
+    single_mean, single_std, _, _ = evaluate_model(
+        model, loader, device, collect_per_image=True,
+    )
+    ensemble_mean, ensemble_std, _, extras = evaluate_ensemble(
+        [model, model], loader, device, collect_per_image=True,
+    )
+    assert ensemble_mean == pytest.approx(single_mean, abs=1e-6)
+    assert ensemble_std == pytest.approx(single_std, abs=1e-6)
+    assert extras["K"] == 2
 
 
 def test_disable_ctx_equivalent_to_vanilla_igpt(device):
@@ -358,9 +389,10 @@ def test_ccigpt_ronly_forward_finite(device):
     # bpd 公式手算对照
     N_c, N_f = m.coarse.seq_len, m.fine.seq_len
     expected = (
-        out["ce_loss_coarse"].item() * N_c +
-        out["ce_loss_fine"].item()   * N_f
-    ) / math.log(2.0) / N_f
+        16.0
+        + out["ce_loss_coarse"].item() * (N_c - 1) / math.log(2.0)
+        + out["ce_loss_fine"].item() * (N_f - 1) / math.log(2.0)
+    ) / N_f
     assert abs(out["bpd"].item() - expected) < 1e-5
 
     out["loss"].backward()

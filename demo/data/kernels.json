@@ -9,7 +9,7 @@
       {"name": "Fused RoPE",          "triton_ms": 4.850, "pytorch_ms": 6.020,  "speedup": 1.24,  "mem_save_pct": 33.3, "ai": 1.5,   "tflops": 0.218,  "bottleneck": "Memory"},
       {"name": "Fused Add+RMSNorm",   "triton_ms": 0.299, "pytorch_ms": 5.027,  "speedup": 16.82, "mem_save_pct": 62.5, "ai": 1.0,   "tflops": 1.769,  "bottleneck": "Memory"},
       {"name": "Flash Attention v2",  "triton_ms": 5.617, "pytorch_ms": 6.055,  "speedup": 1.08,  "mem_save_pct": 0.0,  "ai": 768.0, "tflops": 96.346, "bottleneck": "Compute"},
-      {"name": "Fused Attn+RoPE",     "triton_ms": 9.813, "pytorch_ms": 13.909, "speedup": 1.42,  "mem_save_pct": 13.8, "ai": 769.5, "tflops": 55.256, "bottleneck": "Compute"}
+      {"name": "RoPE -> FlashAttn pipeline", "triton_ms": 9.813, "pytorch_ms": 13.909, "speedup": 1.42, "mem_save_pct": 13.8, "ai": 769.5, "tflops": 55.256, "bottleneck": "Compute"}
     ],
     "avg_speedup": 16.64,
     "max_speedup": 63.75,
@@ -23,11 +23,12 @@
       {"name": "Fused RoPE",          "triton_ms": 4.843,  "pytorch_ms": 6.028,  "speedup": 1.24,  "mem_save_pct": 33.3, "ai": 1.5,   "tflops": 0.218,  "bottleneck": "Memory"},
       {"name": "Fused Add+RMSNorm",   "triton_ms": 1.959,  "pytorch_ms": 19.837, "speedup": 10.13, "mem_save_pct": 44.2, "ai": 1.0,   "tflops": 0.270,  "bottleneck": "Memory"},
       {"name": "Flash Attention v2",  "triton_ms": 20.353, "pytorch_ms": 24.372, "speedup": 1.20,  "mem_save_pct": 27.1, "ai": 768.0, "tflops": 26.588, "bottleneck": "Compute"},
-      {"name": "Fused Attn+RoPE",     "triton_ms": 28.705, "pytorch_ms": 38.482, "speedup": 1.34,  "mem_save_pct": 22.9, "ai": 769.5, "tflops": 18.889, "bottleneck": "Compute"}
+      {"name": "RoPE -> FlashAttn pipeline", "triton_ms": 28.705, "pytorch_ms": 38.482, "speedup": 1.34,  "mem_save_pct": 22.9, "ai": 769.5, "tflops": 18.889, "bottleneck": "Compute"}
     ],
     "avg_speedup": 5.35,
     "max_speedup": 13.26,
     "max_speedup_kernel": "Fused RMSNorm"
   },
-  "note": "H800 PCIe, v2 shape (d=448/h=7) 重测；avg/max 仅含 7 个进入训练栈的 kernel（排除反面案例 fused_linear_ce）。"
+  "valid": false,
+  "note": "Legacy H800 measurements produced before the benchmark harness excluded input allocation and reported peak deltas. The recorded PyTorch SwiGLU reference also differed from the model's actual fallback. Re-run scripts/profile_kernels.py on CUDA before publication; these values are retained only as historical diagnostics."
 }

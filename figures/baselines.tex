@@ -2,12 +2,13 @@
 % 编译: pdflatex baselines.tex   (或 latexmk -pdf)
 % 嵌入论文: \input{figures/baselines.tex}
 %
-% 数据来源: README.md L16-20 (RGB-bit-exact 同域可比)
-%   PixelCNN++          52M   2.92    Salimans et al., ICLR 2017
+% 数据来源: README.md L27-35 (RGB-bit-exact 同域可比)
+%   PixelCNN++         ~53.5M 2.92    Salimans et al., ICLR 2017  (公开 ~53.5M; 脚本核算锚 55.35M, 见 scripts/pixelsnail_paramcount.py)
 %   Image Transformer  ~40M   2.90    Parmar et al., ICML 2018  (原文未报告参数量; ~40M 据官方 tensor2tensor imagetransformer_cifar10_base = 12L/d512/ff2048 估算)
-%   PixelSNAIL         ~91M   2.85    Chen et al., ICML 2018  (原文未报告参数量; ~91M 据官方 neocxi/pixelsnail-public CIFAR 配置 h12_noup_smallkey/nr_filters=256/nr_resnet=4 核算, 见 experiments/pixelsnail_paramcount.py)
+%   PixelSNAIL         ~91M   2.85    Chen et al., ICML 2018  (原文未报告参数量; ~91M 据官方 neocxi/pixelsnail-public CIFAR 配置 h12_noup_smallkey/nr_filters=256/nr_resnet=4 核算, 见 scripts/pixelsnail_paramcount.py)
 %   Sparse Transformer  59M   2.80    Child et al., 2019 (128 层 strided)
-%   CC-iGPT v2 (Ours)  82.95M 2.8296  本工作，R-only ensemble (best+SWA+EMA) + TTA hflip (2026-05-27)
+%   CC-iGPT v2 (historical diagnostic) 3x82.95M 2.8296
+%     R-only ensemble (best+SWA+EMA) + TTA hflip, 6 forwards/image；非正式单模型主表
 \documentclass[tikz,border=8pt]{standalone}
 \usepackage{tikz}
 \usepackage{pgfplots}
@@ -28,7 +29,7 @@
     % 修复：明确指定所有5个x轴刻度，不再依赖xtick=data
     xtick={SparseTrans, PixelSNAIL, ImgTrans, PixelCNNpp, Ours},
     symbolic x coords={SparseTrans, PixelSNAIL, ImgTrans, PixelCNNpp, Ours},
-    xticklabels={Sparse Trans., PixelSNAIL, Img Trans., PixelCNN++, CC-iGPT(Ours)},
+    xticklabels={Sparse Trans., PixelSNAIL, Img Trans., PixelCNN++, CC-iGPT(hist.)},
     xticklabel style={font=\scriptsize, yshift=-1pt},
     yticklabel style={font=\scriptsize},
     axis line style={gray!55},
@@ -52,14 +53,14 @@
     (Ours, 2.8296)
 };
 
-% --- 关键参考线 1：PixelSNAIL 2.85（Ours 超越的 baseline）---
+% --- 参考线 1：PixelSNAIL 2.85；Ours 为不同成本的历史诊断，不作胜负结论 ---
 \draw[densely dashed, gray!50, line width=0.4pt]
     ({rel axis cs:0,0}|-{axis cs:SparseTrans,2.85})
     -- ({rel axis cs:1,0}|-{axis cs:SparseTrans,2.85});
 \node[font=\scriptsize, gray!55!black, anchor=west]
     at ({rel axis cs:1.005,0}|-{axis cs:SparseTrans,2.85}) {2.85};
 
-% --- 关键参考线 2：Sparse Transformer 2.80（Ours 逼近的目标）---
+% --- 参考线 2：Sparse Transformer 2.80 ---
 \draw[densely dashed, purple!40, line width=0.4pt]
     ({rel axis cs:0,0}|-{axis cs:SparseTrans,2.80})
     -- ({rel axis cs:1,0}|-{axis cs:SparseTrans,2.80});
@@ -70,14 +71,14 @@
 \node[font=\scriptsize, align=center, yshift=4pt] at (axis cs:SparseTrans, 2.80) {2.80 59M};
 \node[font=\scriptsize, align=center, yshift=4pt] at (axis cs:PixelSNAIL, 2.85) {2.85 $\approx$91M};
 \node[font=\scriptsize, align=center, yshift=4pt] at (axis cs:ImgTrans, 2.90) {2.90 $\approx$40M};
-\node[font=\scriptsize, align=center, yshift=4pt] at (axis cs:PixelCNNpp, 2.92) {2.92 52M};
-\node[font=\scriptsize, align=center, orange!70!black, yshift=4pt] at (axis cs:Ours, 2.8296) {\textbf{2.82} \textbf{82M}};
+\node[font=\scriptsize, align=center, yshift=4pt] at (axis cs:PixelCNNpp, 2.92) {2.92 $\approx$53.5M};
+\node[font=\scriptsize, align=center, orange!70!black, yshift=4pt] at (axis cs:Ours, 2.8296) {2.8296 $3{\times}$82.95M};
 
 \end{axis}
 
 % --- 标题 ---
 \node[font=\footnotesize\bfseries, anchor=south, yshift=3pt]
-    at (current bounding box.north) {CIFAR-10 RGB-bit-exact};
+    at (current bounding box.north) {CIFAR-10 RGB-bit-exact (historical ensemble+TTA diagnostic)};
 
 \end{tikzpicture}
 \end{document}

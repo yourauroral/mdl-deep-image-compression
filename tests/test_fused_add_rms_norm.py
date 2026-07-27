@@ -19,7 +19,7 @@ import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from src.mdlic.ops.fused_add_rms_norm import fused_add_rms_norm
+from mdlic.ops.fused_add_rms_norm import fused_add_rms_norm
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton kernel requires CUDA")
 

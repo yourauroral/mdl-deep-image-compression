@@ -44,10 +44,14 @@ except ImportError:
 #   [3] Milakov & Gimelshein, "Online normalizer calculation for softmax,"
 #       arXiv:1805.02867, 2018.
 try:
-    from ..ops.flash_attn import TritonAttention as _TritonAttention
+    from ..ops.flash_attn import (
+        BLOCK_MACRO as _TRITON_ATTN_ALIGNMENT,
+        TritonAttention as _TritonAttention,
+    )
     _USE_TRITON_ATTN = True
 except ImportError:
     _TritonAttention = None
+    _TRITON_ATTN_ALIGNMENT = 1
     _USE_TRITON_ATTN = False
 
 # Fused RoPE Triton kernel（可选）：
@@ -72,16 +76,17 @@ except ImportError:
     _fused_add_rms_norm = None
     _USE_FUSED_ADD_RMSNORM = False
 
-# Fused Attention + RoPE（可选）：
-# 将 RoPE 旋转与 Flash Attention 合并为单次操作，减少 Q/K 的 HBM 读写。
+# RoPE → Flash Attention pipeline（可选）：
+# 依次调用 out-of-place RoPE 与 Flash Attention 两个 kernel；这是便捷路径，
+# 不是单 kernel fusion，也不会消除旋转后 Q/K 的中间张量。
 # 若任一依赖不可用（fused_rope 或 flash_attn），自动回退到分步调用。
 # Ref: Su et al., arXiv:2104.09864; Dao, arXiv:2307.08691（手写实现）。
 try:
-    from ..ops.fused_attn_rope import fused_attn_rope as _fused_attn_rope
-    _USE_FUSED_ATTN_ROPE = True
+    from ..ops.fused_attn_rope import rope_then_flash_attn as _rope_then_flash_attn
+    _USE_ROPE_FLASH_PIPELINE = True
 except ImportError:
-    _fused_attn_rope = None
-    _USE_FUSED_ATTN_ROPE = False
+    _rope_then_flash_attn = None
+    _USE_ROPE_FLASH_PIPELINE = False
 
 # Fused CE + z-loss Triton kernel（可选，仅用于状态汇报）：
 # 实际调用点在 igpt.py 的 forward 末段，将 softmax + cross-entropy + z-loss
@@ -106,7 +111,7 @@ def get_fused_kernel_status() -> dict:
         "flash_attn": _USE_TRITON_ATTN,
         "fused_rope": _USE_FUSED_ROPE,
         "fused_add_rms_norm": _USE_FUSED_ADD_RMSNORM,
-        "fused_attn_rope": _USE_FUSED_ATTN_ROPE,
+        "rope_then_flash_attn": _USE_ROPE_FLASH_PIPELINE,
         "fused_ce_zloss": _USE_FUSED_CE_ZLOSS,
     }
 
@@ -168,11 +173,33 @@ def apply_rotary_emb(q, k, cos, sin):
   cos, sin: (seq_len, d_k)
   Ref: Su et al., arXiv:2104.09864 [1], Eq.(34).
   """
-  cos = cos.unsqueeze(0).unsqueeze(0)  # (1, 1, seq_len, d_k)
-  sin = sin.unsqueeze(0).unsqueeze(0)
-  q = (q * cos) + (rotate_half(q) * sin)
-  k = (k * cos) + (rotate_half(k) * sin)
-  return q, k
+  if q.shape != k.shape or q.dtype != k.dtype or q.device != k.device:
+    raise ValueError("q and k must have identical shape, dtype, and device")
+  if cos.shape != sin.shape or cos.shape != q.shape[-2:]:
+    raise ValueError(
+      f"cos/sin must have shape {tuple(q.shape[-2:])}, got "
+      f"{tuple(cos.shape)} and {tuple(sin.shape)}"
+    )
+
+  # Triton loads q/k and cos/sin into fp32 before the rotation. Mirror that
+  # numerical contract in the fallback, then restore the attention dtype so
+  # SDPA receives q/k/v with matching dtypes under bf16/fp16 execution.
+  output_dtype = q.dtype
+  compute_dtype = (
+    torch.float32 if q.dtype in (torch.float16, torch.bfloat16) else q.dtype
+  )
+  cos = cos.to(device=q.device, dtype=compute_dtype).unsqueeze(0).unsqueeze(0)
+  sin = sin.to(device=q.device, dtype=compute_dtype).unsqueeze(0).unsqueeze(0)
+  q_compute = q.to(compute_dtype)
+  k_compute = k.to(compute_dtype)
+  q_rotated = (q_compute * cos) + (rotate_half(q_compute) * sin)
+  k_rotated = (k_compute * cos) + (rotate_half(k_compute) * sin)
+  return q_rotated.to(output_dtype), k_rotated.to(output_dtype)
+
+
+def apply_swiglu(a, b):
+  """Canonical PyTorch fallback shared by the model and profiler."""
+  return F.silu(a) * b
 
 class RMSNorm(nn.Module):
   """
@@ -251,7 +278,7 @@ class FeedForwardBlock(nn.Module):
           gate = _fused_swiglu(a, b)
       else:
           # PyTorch fallback
-          gate = F.silu(a) * b
+          gate = apply_swiglu(a, b)
       return self.dropout(self.w2(gate))
 
 
@@ -292,7 +319,7 @@ class MultiHeadAttentionBlock(nn.Module):
       self.k_norm = RMSNorm(self.d_k)
       self.rope = RotaryEmbedding(self.d_k)
 
-  def forward(self, q, k, v, position_ids=None):
+  def forward(self, q, k, v, position_ids=None, is_causal: bool = True):
     """
     参数:
       q, k, v: (batch, seq_len, d_model)
@@ -301,9 +328,12 @@ class MultiHeadAttentionBlock(nn.Module):
                     使 RoPE 只编码像素间的空间关系。
                     None 时使用默认 0,1,2,...,seq_len-1。
                     Ref: PixelCNN++ [Salimans 2017] — 通道间条件依赖
-    Causal mask 由后端 (Triton flash_attn 或 F.scaled_dot_product_attention) 用
-    is_causal=True 处理，本类不再接受显式 attn_mask。
+      is_causal: True 为原 AR 路径；False 为 masked 模型的双向注意力。
+    mask 由后端 (Triton flash_attn 或 F.scaled_dot_product_attention) 处理，
+    本类不接受任意显式 attn_mask。
     """
+    if not isinstance(is_causal, bool):
+        raise TypeError(f"is_causal must be bool, got {type(is_causal).__name__}")
     batch_size, seq_len, _ = q.shape
 
     query = self.w_q(q).view(batch_size, seq_len, self.h, self.d_k).transpose(1, 2).contiguous()
@@ -322,13 +352,14 @@ class MultiHeadAttentionBlock(nn.Module):
     else:
         cos, sin = self.rope(seq_len, q.device)
 
-    # Fused Attn+RoPE: 将 RoPE 和 Flash Attention 合并为一次操作，
-    # 减少 Q/K 的 HBM 读写（RoPE 就地修改后直接被 Attn 读取）。
-    if _USE_FUSED_ATTN_ROPE and query.is_cuda:
+    # 两-kernel pipeline：out-of-place RoPE 后接手写 Flash Attention。
+    triton_shape_ok = is_causal or seq_len % _TRITON_ATTN_ALIGNMENT == 0
+    if _USE_ROPE_FLASH_PIPELINE and query.is_cuda and triton_shape_ok:
         softmax_scale = 1.0 / math.sqrt(self.d_k)
-        attn_output = _fused_attn_rope(query, key, value, cos, sin,
-                                        causal=True,
-                                        softmax_scale=softmax_scale)
+        attn_output = _rope_then_flash_attn(
+            query, key, value, cos, sin,
+            causal=is_causal, softmax_scale=softmax_scale,
+        )
         attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, self.d_model)
         attn_output = self.dropout(attn_output)
         return self.w_o(attn_output)
@@ -341,15 +372,17 @@ class MultiHeadAttentionBlock(nn.Module):
     # 选择注意力后端:
     # 1. Triton 手写 Flash Attention（CUDA + triton 可用时）
     # 2. F.scaled_dot_product_attention（PyTorch 内置后端）
-    if _USE_TRITON_ATTN and query.is_cuda:
+    if _USE_TRITON_ATTN and query.is_cuda and triton_shape_ok:
         softmax_scale = 1.0 / math.sqrt(self.d_k)
-        attn_output = _TritonAttention.apply(query, key, value, True, softmax_scale)
+        attn_output = _TritonAttention.apply(
+            query, key, value, is_causal, softmax_scale,
+        )
     else:
         attn_output = F.scaled_dot_product_attention(
             query, key, value,
             attn_mask=None,
             dropout_p=0.0,
-            is_causal=True
+            is_causal=is_causal
         )
 
     attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, self.d_model)
@@ -396,20 +429,22 @@ class GPTBlock(nn.Module):
     # drop_path > 0 时 fused add+rmsnorm 无法在 norm 后插 drop，回退到分步路径
     self._use_fused_add_rmsnorm = (drop_path == 0.0)
 
-  def _attn_forward(self, x, position_ids=None):
+  def _attn_forward(self, x, position_ids=None, is_causal: bool = True):
     """Attention sublayer，可被 activation checkpoint 包裹。"""
-    return self.attn(x, x, x, position_ids=position_ids)
+    return self.attn(
+        x, x, x, position_ids=position_ids, is_causal=is_causal,
+    )
 
-  def forward(self, x, position_ids=None):
+  def forward(self, x, position_ids=None, is_causal: bool = True):
     # OLMo 2 post-norm: x = x + DropPath(RMSNorm(sublayer(x)))
     if self.activation_checkpointing and self.training:
         # Selective activation checkpointing：只 checkpoint attention（显存瓶颈）
         # Ref: Chen et al., "Training Deep Nets with Sublinear Memory Cost,"
         #      arXiv:1604.06174, 2016.
-        attn_out = torch_checkpoint(self._attn_forward, x, position_ids,
+        attn_out = torch_checkpoint(self._attn_forward, x, position_ids, is_causal,
                                     use_reentrant=False)
     else:
-        attn_out = self._attn_forward(x, position_ids)
+        attn_out = self._attn_forward(x, position_ids, is_causal)
     if self._use_fused_add_rmsnorm and _USE_FUSED_ADD_RMSNORM and x.is_cuda:
         x = _fused_add_rms_norm(x, attn_out, self.norm1.weight, self.norm1.eps)
     else:

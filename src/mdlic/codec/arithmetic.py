@@ -22,6 +22,8 @@
 decoder 复刻完全相同的区间放缩逻辑，靠读入的 code 落在哪个子区间反查符号；
 只要 encoder/decoder 在每一步用**完全相同**的 cumfreq 表，就 bit-exact 可逆。
 """
+import math
+from collections.abc import Sequence
 from typing import List, Tuple
 
 PRECISION = 32
@@ -35,6 +37,45 @@ MASK = TOP - 1
 FREQ_TOTAL = 1 << 16
 
 
+def _validate_total(total: int) -> None:
+    if not isinstance(total, int) or isinstance(total, bool) or total <= 0:
+        raise ValueError(f"frequency total must be a positive integer, got {total!r}")
+    if 4 * total > TOP:
+        raise ValueError(
+            f"frequency total {total} exceeds arithmetic precision limit TOP/4={QUARTER}"
+        )
+
+
+def _validate_cumfreq(cum: Sequence[int]) -> tuple[int, int]:
+    if not isinstance(cum, Sequence) or isinstance(cum, (str, bytes, bytearray)):
+        raise TypeError("cumfreq must be a sequence of integers")
+    if len(cum) < 2:
+        raise ValueError("cumfreq must contain at least [0, total]")
+    if not isinstance(cum[0], int) or isinstance(cum[0], bool) or cum[0] != 0:
+        raise ValueError("cumfreq[0] must be integer zero")
+
+    previous = 0
+    for index, value in enumerate(cum[1:], start=1):
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise ValueError(f"cumfreq[{index}] must be an integer, got {value!r}")
+        if value <= previous:
+            raise ValueError("cumfreq must be strictly increasing")
+        previous = value
+    _validate_total(previous)
+    return len(cum) - 1, previous
+
+
+def _validate_bits(bits) -> List[int]:
+    try:
+        values = list(bits)
+    except TypeError as exc:
+        raise TypeError("bits must be an iterable of integer 0/1 values") from exc
+    for index, bit in enumerate(values):
+        if not isinstance(bit, int) or isinstance(bit, bool) or bit not in (0, 1):
+            raise ValueError(f"bits[{index}] must be integer 0 or 1, got {bit!r}")
+    return values
+
+
 def build_cumfreq(probs: List[float], total: int = FREQ_TOTAL) -> List[int]:
     """概率向量 → 长度 V+1 的累积频数表 cum，cum[0]=0, cum[V]=total。
 
@@ -44,21 +85,31 @@ def build_cumfreq(probs: List[float], total: int = FREQ_TOTAL) -> List[int]:
       3. 余数按 (小数部分, 索引) 降序补给，保证 Σfreq == total 且可复现。
     """
     V = len(probs)
-    assert V > 0, "概率向量不能为空"
-    assert total > V, f"FREQ_TOTAL ({total}) 必须 > 词表大小 ({V})"
-    s = 0.0
-    for p in probs:
-        if p > 0.0:
-            s += p
+    if V == 0:
+        raise ValueError("概率向量不能为空")
+    if not isinstance(total, int) or isinstance(total, bool) or total <= V:
+        raise ValueError(f"total ({total}) 必须是大于词表大小 ({V}) 的整数")
+    _validate_total(total)
+
+    clean_probs = []
+    for i, value in enumerate(probs):
+        p = float(value)
+        if not math.isfinite(p):
+            raise ValueError(f"probs[{i}] 不是有限数: {value!r}")
+        if p < 0.0:
+            raise ValueError(f"probs[{i}] 为负数: {p}")
+        clean_probs.append(p)
+
+    s = math.fsum(clean_probs)
     if s <= 0.0:
-        probs = [1.0] * V  # 全 0 / 全非正兜底为均匀分布
+        clean_probs = [1.0] * V  # 全 0 兜底为均匀分布
         s = float(V)
 
     budget = total - V                       # 先给每符号保底 1
     freqs = [1] * V
     rema: List[Tuple[float, int]] = []
     allocated = 0
-    for i, p in enumerate(probs):
+    for i, p in enumerate(clean_probs):
         share = (p / s) * budget if p > 0.0 else 0.0
         add = int(share)                      # 向下取整
         freqs[i] += add
@@ -98,7 +149,15 @@ class ArithmeticEncoder:
         self.pending = 0
 
     def encode(self, symbol: int, cum: List[int]):
-        total = cum[-1]
+        vocab_size, total = _validate_cumfreq(cum)
+        if (
+            not isinstance(symbol, int)
+            or isinstance(symbol, bool)
+            or not 0 <= symbol < vocab_size
+        ):
+            raise ValueError(
+                f"symbol must be an integer in [0,{vocab_size}), got {symbol!r}"
+            )
         span = self.high - self.low + 1
         self.high = self.low + (span * cum[symbol + 1]) // total - 1
         self.low = self.low + (span * cum[symbol]) // total
@@ -134,7 +193,7 @@ class ArithmeticDecoder:
     """从 bit 列表逐符号解码。需与 encoder 每步使用相同 cumfreq 表。"""
 
     def __init__(self, bits: List[int]):
-        self.bits = bits
+        self.bits = _validate_bits(bits)
         self.pos = 0
         self.low = 0
         self.high = MASK
@@ -151,7 +210,7 @@ class ArithmeticDecoder:
         return 0
 
     def decode(self, cum: List[int]) -> int:
-        total = cum[-1]
+        _, total = _validate_cumfreq(cum)
         span = self.high - self.low + 1
         # 当前 code 落在 [0,total) 的哪个累积区间
         value = ((self.code - self.low + 1) * total - 1) // span
@@ -190,6 +249,7 @@ class ArithmeticDecoder:
 
 def pack_bits(bits: List[int]) -> bytes:
     """bit 列表 → bytes（高位在前，末尾补 0 到字节对齐）。"""
+    bits = _validate_bits(bits)
     out = bytearray()
     acc = 0
     n = 0
@@ -211,6 +271,10 @@ def unpack_bits(data: bytes, n_bits: int) -> List[int]:
     pack_bits 末尾补 0 到字节对齐，故 unpack 必须知道真实 bit 数 n_bits 才能
     丢弃 padding。是落盘 .bin → 解码的必要逆操作（容器 header 存 n_bits）。
     """
+    if not isinstance(data, (bytes, bytearray, memoryview)):
+        raise TypeError("data must be bytes-like")
+    if not isinstance(n_bits, int) or isinstance(n_bits, bool) or n_bits < 0:
+        raise ValueError(f"n_bits must be a non-negative integer, got {n_bits!r}")
     if n_bits > len(data) * 8:
         raise ValueError(f"n_bits={n_bits} 超过 data 容量 {len(data)*8} bit")
     bits = []

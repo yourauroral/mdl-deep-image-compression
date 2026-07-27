@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "dataset": {
+    "name": "CIFAR-10",
+    "split": "test",
+    "size": 10000,
+    "shape_per_image": [32, 32, 3],
+    "source_file": "datasets/cifar-10-batches-py/test_batch",
+    "source_sha256": "f53d8d457504f7cff4ea9e021afcf0e0ad8e24a91f3fc42091b8adef61157831"
+  },
+  "rate_accounting": {
+    "metric": "complete_encoded_file_bpd",
+    "denominator": "H*W*C per image",
+    "includes_file_headers": true
+  },
+  "runtime": {
+    "pillow_version": "12.2.0",
+    "zlib_version": "1.3",
+    "libwebp_version": "1.6.0"
+  },
+  "results": {
+    "png": {
+      "settings": {"optimize": true},
+      "mean_bpd": 5.86639765625,
+      "std_per_image": 0.6995787886304454,
+      "compressed_bytes_total": 22526967,
+      "roundtrip_failures": 0
+    },
+    "webp": {
+      "settings": {"lossless": true},
+      "mean_bpd": 4.6064625,
+      "std_per_image": 0.7362944441637505,
+      "compressed_bytes_total": 17688816,
+      "roundtrip_failures": 0
+    }
+  },
+  "generated_at": "2026-07-26",
+  "note": "Full local recomputation over all 10,000 test images; values are project measurements, not literature quotations."
+}

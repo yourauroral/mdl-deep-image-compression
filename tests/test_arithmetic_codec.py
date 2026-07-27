@@ -8,8 +8,11 @@
 import math
 import random
 
-from src.mdlic.codec.arithmetic import (
-    ArithmeticEncoder, ArithmeticDecoder, build_cumfreq, pack_bits, unpack_bits, FREQ_TOTAL,
+import pytest
+
+from mdlic.codec.arithmetic import (
+    ArithmeticEncoder, ArithmeticDecoder, build_cumfreq, pack_bits, unpack_bits,
+    FREQ_TOTAL, TOP,
 )
 
 
@@ -70,7 +73,8 @@ def test_code_length_near_entropy():
     random.seed(2)
     tables = []
     symbols = []
-    ideal_bits = 0.0
+    model_ideal_bits = 0.0
+    cdf_ideal_bits = 0.0
     for _ in range(3000):
         logits = [random.gauss(0, 2) for _ in range(V)]
         m = max(logits)
@@ -80,12 +84,15 @@ def test_code_length_near_entropy():
         sym = random.randrange(V)
         tables.append(probs)
         symbols.append(sym)
-        ideal_bits += -math.log2(probs[sym])
+        model_ideal_bits += -math.log2(probs[sym])
+        cum = build_cumfreq(probs)
+        cdf_ideal_bits += -math.log2((cum[sym + 1] - cum[sym]) / cum[-1])
     out, nbits = _roundtrip(symbols, tables)
     assert out == symbols
-    overhead = (nbits - ideal_bits) / ideal_bits
-    # 量化到 2^16 + 每符号保底 1 的 overhead，整体应 < 3%
-    assert overhead < 0.03, f"overhead {overhead:.4f} 过大"
+    # 算术 coder 应跟它实际使用的量化 CDF 比，而不是量化前 softmax。
+    # 最小频数会抬高极小概率，因此 model_ideal_bits 与 cdf_ideal_bits 的差可正可负。
+    assert model_ideal_bits > 0
+    assert abs(nbits - cdf_ideal_bits) < 4.0
 
 
 def test_near_deterministic_distribution():
@@ -126,12 +133,15 @@ def test_build_cumfreq_all_zero_falls_back_to_uniform():
         assert cum[i + 1] > cum[i]
 
 
-def test_build_cumfreq_non_positive_falls_back_to_uniform():
-    cum = build_cumfreq([-1.0, 0.0, -0.5, 0.0])
-    assert cum[0] == 0
-    assert cum[-1] == FREQ_TOTAL
-    for i in range(4):
-        assert cum[i + 1] > cum[i]
+def test_build_cumfreq_rejects_negative_values():
+    with pytest.raises(ValueError, match="负数"):
+        build_cumfreq([-1.0, 0.0, 0.5, 0.5])
+
+
+def test_build_cumfreq_rejects_non_finite_values():
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(ValueError, match="有限"):
+            build_cumfreq([0.5, bad, 0.5])
 
 
 def test_pack_bits_roundtrip_len():
@@ -149,9 +159,50 @@ def test_unpack_bits_inverts_pack():
 
 def test_unpack_bits_overflow_raises():
     # 要求的 bit 数超过 data 容量应报错（容器 header n_bits 损坏的保护）
-    import pytest
     with pytest.raises(ValueError):
         unpack_bits(pack_bits([1, 0, 1]), 100)
+
+
+@pytest.mark.parametrize(
+    "cum",
+    [
+        [],
+        [1, 2],
+        [0, 1, 1],
+        [0, 1.5, 2],
+        [0, TOP // 4 + 1],
+    ],
+)
+def test_coder_rejects_invalid_cumfreq(cum):
+    with pytest.raises((TypeError, ValueError)):
+        ArithmeticEncoder().encode(0, cum)
+    with pytest.raises((TypeError, ValueError)):
+        ArithmeticDecoder([0]).decode(cum)
+
+
+@pytest.mark.parametrize("symbol", [-1, 2, True, 1.5])
+def test_encoder_rejects_invalid_symbol(symbol):
+    with pytest.raises(ValueError, match="symbol"):
+        ArithmeticEncoder().encode(symbol, [0, 1, 2])
+
+
+def test_build_cumfreq_rejects_total_above_precision_limit():
+    with pytest.raises(ValueError, match="precision limit"):
+        build_cumfreq([0.5, 0.5], total=TOP // 4 + 1)
+
+
+@pytest.mark.parametrize("bits", [[0, 2], [0, -1], [False], [0.0]])
+def test_bit_apis_reject_non_binary_integer_values(bits):
+    with pytest.raises(ValueError, match="integer 0 or 1"):
+        pack_bits(bits)
+    with pytest.raises(ValueError, match="integer 0 or 1"):
+        ArithmeticDecoder(bits)
+
+
+@pytest.mark.parametrize("n_bits", [-1, True, 1.5])
+def test_unpack_bits_rejects_invalid_length(n_bits):
+    with pytest.raises(ValueError, match="non-negative integer"):
+        unpack_bits(b"\x00", n_bits)
 
 
 def test_encode_pack_file_roundtrip(tmp_path):

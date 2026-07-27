@@ -39,7 +39,10 @@ dev = [
   "pytest>=8",
 ]
 
+[tool.setuptools]
+package-dir = {"" = "src"}
+
 [tool.setuptools.packages.find]
-where = ["."]
-include = ["src*"]
-namespaces = true
+where = ["src"]
+include = ["mdlic*"]
+namespaces = false

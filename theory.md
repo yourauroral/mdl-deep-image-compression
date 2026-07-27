@@ -5,33 +5,34 @@
 
 论证分三条支柱：
 
-1. **MDL（模型学到了什么）**：压缩目标迫使模型发现图像的生成结构。*压缩越好 → 学习越好。*
+1. **条件码长（模型学到了什么）**：在预共享模型时，压缩目标迫使模型发现图像的生成结构。这里度量的是 `L(data|model)`；严格 MDL 还需计入 `L(model)`。
 2. **LRH（为什么是线性可读的）**：架构（线性权重共享 head + 加性残差流）把这种结构压到**线性方向**上，因此线性分类器就够了。
-3. **MDL probing（如何诚实地度量）**：原始探针准确率是弱信号；**标签的编码长度（codelength）** 才是严格度量——且与主表使用的是*同一把* MDL 标尺（比特）。
+3. **MDL probing（如何诚实地度量）**：原始探针准确率是弱信号；标签的 prequential/variational codelength 能同时体现提取代价和剩余不确定性，但必须明确是否包含探针模型成本。
 
-一句话纲领：**"MDL all the way down"**：主任务压缩像素，探针评估压缩标签，两者均以比特度量。
+一句话纲领：主任务度量预共享压缩模型下的像素条件码长，探针可进一步用标签 MDL 度量；二者都以比特报告，但不是未经说明的同一个完整 MDL quantity。
 
 ---
 
 ## 0. 项目一段话概览
 
-**CC-iGPT** 是一个双尺度、条件式自回归（AR）无损图像压缩模型，直接在 RGB uint8 域上建模（无色彩前端、无有损 codec）。一个小型 **coarse** iGPT 将下采样后的图像压入独立 bitstream；其量化 token 经反量化、双线性上采样、重新 tokenize 后，以 `α · coarse_ctx` 的形式**加性注入** **fine** iGPT 的残差流。fine 模型用 256-way softmax 预测每个子像素 token `p(x_t | x_{<t})`。交叉熵*即*最优编码长度，因此：
+**CC-iGPT** 是一个双尺度、条件式自回归（AR）无损图像压缩模型，直接在 RGB uint8 域上建模（无色彩前端、无有损 codec）。一个小型 **coarse** iGPT 将下采样后的图像压入独立 bitstream；其量化 token 经反量化、双线性上采样、重新 tokenize 后，以 `α · coarse_ctx` 的形式**加性注入** **fine** iGPT 的残差流。fine 模型用 256-way softmax 预测每个子像素 token `p(x_t | x_{<t})`。在预共享模型和均匀首 token 先验下，理想条件码长为：
 
 ```
-bpd_total = (CE_coarse · N_coarse + CE_fine · N_fine) / ln2 / N_fine
+bpd_total = [8 + CE_coarse·(N_coarse-1)/ln2
+             + 8 + CE_fine·(N_fine-1)/ln2] / N_fine
 ```
 
 fine 架构：N=32 层，d=448，h=7，SwiGLU FFN，RoPE base=500000，QK-Norm，OLMo2 后归一化
 （`x = x + RMSNorm(sublayer(x))`），权重共享 256-way 输出头，子像素 AR（pixel-first `[R0,G0,B0,R1,...]`），z-loss。总参数约 82.95M（fine ≈ 78M + coarse ≈ 4.81M + α）。
 
-**主表结果：**
+**历史诊断结果（不是正式单模型主表）：**
 
 | 数据集     | 设置                                   | bpd        | 位次                                                          |
 |------------|----------------------------------------|------------|---------------------------------------------------------------|
-| CIFAR-10   | ensemble(best+SWA+EMA) + TTA hflip     | **2.8296** | 超越 PixelSNAIL ≈91M (2.85)；逼近 Sparse Transformer 59M (2.80) |
-| ImageNet64 | ensemble(best+SWA+EMA) + TTA hflip     | **3.4800** | 超 SPN (3.52)；逼近但未达 Sparse Transformer 152M (3.44)       |
+| CIFAR-10   | ensemble(best+SWA+EMA) + TTA hflip     | 2.8296 | 三成员、6 forwards/image；正式单 checkpoint/no-TTA 结果待重评 |
+| ImageNet64 | ensemble(best+SWA+EMA) + TTA hflip     | 3.4800 | 三成员、旧 batch-level std 作废；正式结果待单模型重评并记录数据 hash |
 
-**下游证据（MDL 主线，论文 §5）**：线性探针、图像补全（AR inpainting）、真实无损算术编解码 roundtrip（bit-identical）。本文是**第一项**的理论支撑。
+**下游研究项**：线性探针、图像补全（AR inpainting）、真实无损算术编解码 roundtrip（bit-identical）。旧 probe 曲线曾使用 test 选层，只作为探索性证据；正式结果需按 validation 选层协议重跑。
 
 ---
 
@@ -52,7 +53,7 @@ fine 架构：N=32 层，d=448，h=7，SwiGLU FFN，RoPE base=500000，QK-Norm�
 
 ## 2. 为什么语义会涌现——MDL 部分
 
-为最小化 `p(x_t | x_{<t})` 的描述长度，模型必须捕捉*使像素可预测的*结构：物体边界、表面、光照、纹理、全局布局。一个数据集的最短编码，由对其真实生成因子的建模实现——而这些因子恰好也决定了类别。由此得到项目的核心论断：**压缩越好 → 学习越好**，这正是最小描述长度原则（MDL，Rissanen）的具体实例：最好的压缩器就是最好的学习器。
+为减小 `L(data|model)`，模型需要捕捉使像素可预测的结构：物体边界、表面、光照、纹理和全局布局。这些因素可能也有利于类别预测，因此产生“条件码长与线性可提取性相关”的可检验假设。它不是“压缩越好必然学习越好”的定理，更不能省略模型成本后直接等同于完整 MDL。
 
 两个项目特有的放大因素：
 
@@ -73,14 +74,14 @@ fine 架构：N=32 层，d=448，h=7，SwiGLU FFN，RoPE base=500000，QK-Norm�
 
 **3. 叠加（Superposition）**：d=448，但有用"概念"的数量远超 448。在高维空间中随机向量近似正交，模型将许多特征以近正交线性方向打包（Toy Models of Superposition）。探针恢复其中之一。
 
-**4. `α · coarse_ctx` 是字面意义上的线性概念向量**：粗尺度通路的输出被*加入*第 0 层的 token embedding（`cc_igpt.py:164`，`igpt.py:134`）。它以**加性方式注入残差流**——即一个工程化的 steering vector，同时还改善了压缩性能。这是项目最强的 LRH 论点，也预测了 coarse_ctx 注入在中层探针准确率上**提升 +12.4 pp** 这一实验事实（CIFAR v2: L19 79.33% vs iGPT-S L22 66.93%）。
+**4. `α · coarse_ctx` 是加性上下文向量**：粗尺度通路的输出被加入第 0 层 token embedding（`cc_igpt.py:164`，`igpt.py:134`），因此可以研究其沿残差流传播的线性效应。但旧 `79.33%` 与 iGPT-S `66.93%` 来自不同深度、宽度和训练预算，不能把差值 `+12.4pp` 因果归因于 coarse context；匹配训练消融完成前只作为研究假设。
 
 ### 3.1 中层峰值（倒 U 形曲线）
 
-逐层准确率的实测：先升后降——
+旧逐层探索曲线呈先升后降，但层号由 test curve 选择，需按新协议重跑后确认：
 
-- **CIFAR v2 native**：峰值 **L19 = 79.33%**（共 32 层）。
-- **IN64→CIFAR transfer**：L0 41.69% → **L16 73.19%** → L31 64.79%（完整 32 层；L15–L17 平台区）。
+- **CIFAR v2 native（旧协议）**：L19 = 79.33%（共 32 层）。
+- **IN64→CIFAR transfer（旧协议）**：L0 41.69% → L16 73.19% → L31 64.79%。
 
 这个曲线形状是将本模型与 iGPT 及 LLM 联系起来的指纹：
 
@@ -113,7 +114,7 @@ L_total = L_model + L_data
 
 **为什么 MDL 优于准确率**：在对照任务（随机标签）下，准确率可以保持高位（探针在记忆），但**编码长度爆炸**，因为随机标签不可压缩而真实结构能被少量数据的小探针捕获。MDL 因此能干净地将*"表征中的信息"*与*"探针记忆的信息"*分离——正是 §1 所要求的区分。
 
-**为什么这契合项目**：主表报告 bits-per-dim（压缩像素）。把探针准确率替换成标签编码长度，意味着*下游评估与主表使用同一把 MDL 标尺*（压缩标签）。整个故事闭环：**主任务 = MDL，探针 = MDL，均以比特度量。**
+**为什么这契合项目**：主任务和 probing 都可以用比特报告，因此可在统一的信息论语言下讨论。但主任务当前是预共享压缩模型下的 `L(x|model)`，probe 若采用 prequential code 则包含不同的学习协议和模型代价；二者不能只因单位相同就视为同一个 MDL quantity。
 
 ---
 
@@ -183,17 +184,17 @@ SAE（*表征*空间中的稀疏性）和 Bayesian Compression（*参数*空间�
 
 所有实验复用 `scripts/linear_probe.py`，成本低廉，在 AutoDL 上运行（本文在 WSL 编写——绝不在 WSL 上运行训练/探针）。按叙事价值排序。
 
-- **E2 — 压缩与探针准确率的跨 checkpoint 相关性**（*最高价值*）：使用 `epoch_6..12.pth`，绘制各 checkpoint 的 val bpd vs 最优层探针准确率。紧密单调反相关 = **"压缩越好 → 学习越好"的直接实证**。一张图，收益大。
-- **E6 — MDL / 在线编码探针**（*最契合论文主线*）：用**标签编码长度**替代探针准确率（在线编码：对增长数据子集编码，累计 `-log p`）。对 v2 / iGPT-S / 随机初始化 + 随机标签对照各报告。手工可实现，无新依赖，且将探针置于**与主表相同的 MDL 标尺**上——"MDL all the way down"。
+- **E2 — 压缩与探针准确率的跨 checkpoint 相关性**：使用 `epoch_6..12.pth`，绘制各 checkpoint 的 val bpd 与 validation-selected probe accuracy。它能提供相关性证据，但 checkpoint 共享训练时间这一混杂因素，不能单独证明因果关系。
+- **E6 — MDL / 在线编码探针**：用标签 prequential codelength 补充准确率，对 v2 / iGPT-S / 随机初始化和随机标签对照分别报告，并完整记录数据顺序、首段标签先验与 probe 模型成本。
 - **E1 — 线性 vs MLP 探针差距**：加一层单隐层探针。差距小 ⇒ 信息确实*线性*编码（LRH 成立）；差距大 ⇒ 纠缠。核心 LRH 证据。
 - **E3 — 对照任务 / 选择性（selectivity）**（Hewitt & Liang）：对随机标签做探针；报告 selectivity = 真实准确率 - 对照准确率。反驳"探针只是学了任务"。
-- **E5 — coarse_ctx 消融**（*已可直接跑——`--no_coarse_ctx` 已存在*）：逐层量化加性方向的贡献。检验压力 #4。
+- **E5 — coarse_ctx 消融**：现有 `--no_coarse_ctx` 只能做推理时干预；若要得到训练因果结论，还需相同架构、数据、预算和 seed 的 matched retraining ablation。
 - **E4 — Steering**（*工作量最大，可解释性故事最好*）：用探针权重向量作为类别方向，在图像补全时将其加入残差流，检查输出是否向该类别偏移。若是，方向具有**因果性**——图像域的 LLM activation steering 类比。
 
 ---
 
 ## 8. 一句话总结
 
-模型仅以压缩像素为目标训练，但加性残差流上的线性权重共享头迫使它必须学习的生成因子（MDL）落在**线性方向**上（LRH），在中间层达到峰值——因此线性探针免费读出类别；而诚实评分该探针的方式是**标签编码长度**，下游评估因此落在与主表完全相同的 MDL 标尺上。
+模型仅以像素条件码长为目标训练；线性权重共享头和加性残差流提供了形成线性可读特征的结构性压力。中层峰值、coarse context 的贡献以及条件码长与 probe 质量的关系仍是需要按无泄漏协议验证的实验假设。标签 codelength 是比单一准确率更完整的补充指标，但必须单独说明其编码协议。
 
-*压缩越好 → 学习越好 → 线性读出 → 以比特度量。*
+*条件码长、线性可提取性与编码成本：分别定义、分别测量，再检验它们之间的关系。*

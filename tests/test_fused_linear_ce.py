@@ -21,7 +21,7 @@ import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from src.mdlic.ops.fused_linear_ce import fused_linear_cross_entropy
+from mdlic.ops.fused_linear_ce import fused_linear_cross_entropy
 
 # fused_linear_ce 在 V=256 下被 roofline 证伪（compute-bound + 三重循环失去
 # cuBLAS GEMM 利用率），保留作反面案例不进训练栈；测试整体 skip 避免误导

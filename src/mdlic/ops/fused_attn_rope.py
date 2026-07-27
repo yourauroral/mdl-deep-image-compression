@@ -1,5 +1,5 @@
 """
-Fused Attention + RoPE — RoPE 旋转 + Flash Attention 的便捷包装。
+RoPE-then-FlashAttention pipeline — 两个 Triton kernel 的便捷包装。
 
 实现方式:
   1. fused_apply_rotary_emb(q, k, cos, sin)  → out-of-place 旋转后的 q', k'
@@ -11,8 +11,8 @@ Fused Attention + RoPE — RoPE 旋转 + Flash Attention 的便捷包装。
   - Attention 直接走 flash_attn kernel，softmax + matmul 不物化 attention scores
 
 注:
-  - autograd 图上仍是两个 Function node（fused_rope + TritonAttention），
-    本函数只是把它们写在同一个 forward 里，不构成单个融合 op
+  - autograd 图上是两个 Function node（fused_rope + TritonAttention）
+  - 旋转后的 q/k 会被实际分配；这不是单 kernel fusion，也不消除两步之间的 HBM 流量
   - q/k 是 out-of-place 旋转，不就地修改输入
 
 参考:
@@ -26,17 +26,18 @@ from .fused_rope import fused_apply_rotary_emb
 from .flash_attn import TritonAttention
 
 
-def fused_attn_rope(q, k, v, cos, sin, causal=True, softmax_scale=None):
+def rope_then_flash_attn(q, k, v, cos, sin, causal=True, softmax_scale=None):
     """
-    Fused RoPE + Flash Attention 便捷接口。
+    先执行 out-of-place RoPE kernel，再执行 Flash Attention kernel。
 
-    将 RoPE 旋转和 Flash Attention 合并为一次操作:
+    数学操作:
       O = FlashAttn(RoPE(Q, cos, sin), RoPE(K, cos, sin), V, causal)
 
-    相比分开调用:
+    等价于:
       q, k = fused_apply_rotary_emb(q, k, cos, sin)
       o = TritonAttention.apply(q, k, v, causal, scale)
-    减少 1 次 autograd node + 合并内存分配。
+
+    此包装不改变 kernel launch 数、autograd node 数或中间张量分配。
 
     参数:
       q: (B, h, T, d_k) contiguous
@@ -58,3 +59,7 @@ def fused_attn_rope(q, k, v, cos, sin, causal=True, softmax_scale=None):
     # Flash Attention
     o = TritonAttention.apply(q, k, v, causal, softmax_scale)
     return o
+
+
+# 兼容旧调用；名称保留不代表这是单 kernel fusion。
+fused_attn_rope = rope_then_flash_attn

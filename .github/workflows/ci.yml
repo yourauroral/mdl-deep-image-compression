@@ -1,0 +1,30 @@
+name: CPU tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install project
+        run: python -m pip install ".[dev]" build
+      - name: Run CPU tests
+        run: python -m pytest -m cpu -q
+      - name: Check Python and frontend syntax
+        run: |
+          python -m compileall -q scripts demo src/mdlic
+          node --check demo/static/app.js
+      - name: Build wheel
+        run: python -m build --wheel
+      - name: Smoke-test installed wheel outside repository
+        run: |
+          python -m pip install --force-reinstall --no-deps dist/*.whl
+          cd /tmp
+          python -c "import mdlic; print(mdlic.__file__)"

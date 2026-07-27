@@ -1,42 +1,46 @@
 # MDL Deep Image Compression
 
-基于 **Minimum Description Length (MDL)** 原则的深度图像压缩系统设计与实现。核心命题：**压缩即预测** — CE loss 直接对应 Shannon 最优编码长度 (Shannon 1948, Delétang et al. 2024)。
+基于 **Minimum Description Length (MDL)** 原则的深度图像压缩系统设计与实现。核心命题：**压缩即预测** — 在双方预共享模型与概率协议时，next-token CE 对应条件数据码长 (Shannon 1948, Delétang et al. 2024)。当前 bpd 不包含模型权重描述长度；严格两部 MDL 还需计入 `L(model)`。
 
 > **无损口径**：本系统所有主结果都在 **RGB-bit-exact** 域报告 — 直接在 RGB uint8 上建模，与 PixelCNN++ / Sparse Transformer 等基线同域可比。
 
-- **Phase A (完成)**: iGPT token-level 自回归压缩 + 8 个手写 Triton Kernel（7 个进入训练栈，1 个 `fused_linear_ce` 在 V=256 下经 roofline 分析证伪、保留作反面案例）
-- **Phase B (v1 历史主表完成)**: CC-iGPT（Coarse-Conditioned iGPT）双尺度条件自回归 — 浅层 coarse iGPT (R-only 配置 8×8×1, 64 token, ~2% overhead) 独立编码进 bitstream，UP + 量化后通过 additive embedding（可学习标量 α）注入 fine iGPT (32×32×3, 3072 token)。CIFAR-10 RGB-bit-exact R-only v1 历史主表 **2.9035 bpd**（softmax head, 100ep + 全套正则 + TTA hflip，已被 v2 替代）
+- **Phase A (完成)**: iGPT token-level 自回归压缩 + 6 个进入训练栈的手写 Triton primitive；RoPE→FlashAttention 是两个 kernel 的 pipeline，`fused_linear_ce` 是 V=256 下的负收益反面案例
+- **Phase B (历史实验完成)**: CC-iGPT（Coarse-Conditioned iGPT）双尺度条件自回归 — 浅层 coarse iGPT (R-only 配置 8×8×1, 64 token) 独立编码进 bitstream，UP + 量化后通过 additive embedding（可学习标量 α）注入 fine iGPT (32×32×3, 3072 token)。v1 的 **2.9035 bpd** 是 TTA 历史诊断值，已被 v2 架构替代
 - **Phase C (完成)**: Demo 前端可视化系统 (FastAPI + Chart.js, 7 个展示面板，含交互式无损 codec 图像⇄.bin 真实可解性验证 + 图像补全 AR inpainting 实时面板)
-- **Phase D (完成, 2026-05-27)**: 深窄 + ensemble — fine N=24/d=512 → N=32/d=448 (82.95M)、epoch 100→200、`min_lr_ratio=0.05` + SWA last 31 ckpts (start ep170) + EMA 0.9998；`evaluate.py --ensemble` 多 ckpt probability-mixture ensemble (best+SWA+EMA)。**主表 ensemble + TTA hflip = 2.8296 ± 0.0854**（超越 PixelSNAIL ≈91M 2.85，逼近 Sparse Transformer 59M 2.80）。详见 [future.md §4](future.md)
-- **ImageNet64 benchmark (训练+评测完成, 2026-06-07)**: `configs/ccigpt_imagenet64_v1.yaml` 12ep 训练 + 4 卡 DDP 评测全部完成；**主表 ensemble (best+SWA+EMA) + TTA hflip = 3.4800 bpd**（单 ckpt best+TTA = 3.4810；CE_c 3.8960 share 3.4% / CE_f 2.3310 96.6% / α 0.1991）。**超 SPN 3.52、逼近但未达 Sparse Transformer 152M strided 3.44**（差 0.040）。注：4 卡评测的 ± 是 batch-level std（随 GPU 数变化），与 CIFAR 主表 per-image ± 口径不同。
+- **Phase D (历史实验完成, 2026-05-27)**: fine N=24/d=512 → N=32/d=448，单模型 `82,949,441` 参数，训练 200 epoch，并产出 best/SWA/EMA。`2.8296` 来自三成员 probability-mixture ensemble + hflip TTA：需同时保存约 248.85M 参数并对每张图执行 6 次 forward；旧 `±0.0854` 统计口径已作废
+- **ImageNet64 benchmark (历史实验完成, 2026-06-07)**: `3.4800 bpd` 同样来自三成员 ensemble + hflip TTA，旧 `±0.1161` 是 batch-level std。正式结论待使用单 checkpoint、no-TTA、逐图 evaluator 和 manifest 重评；当前 `.npy` 的实际样本数与 SHA-256 直接进入 manifest
 
 ## 当前进度
 
 | 模块 | 状态 | 备注 |
 |---|---|---|
-| CIFAR-10 v2 主表 | 完成 | ensemble(best+SWA+EMA) + TTA hflip = **2.8296 ± 0.0854 bpd** |
-| Linear probe | 完成 | CC-iGPT v2 native L19 best = **79.33%**；IN64→CIFAR-10 transfer probe best L16 = **73.19%**（32 层完整，32→64 resize，胜 iGPT-S native 66.93%，不与 native 横比） |
+| CIFAR-10 v2 正式主表 | 待重评 | 单 checkpoint、no-TTA、逐图统计与 manifest；历史 ensemble+TTA 诊断值为 **2.8296 bpd** |
+| Linear probe | 待重跑 | 旧 `79.33%/73.19%` 曲线曾用 test 选层；新脚本改为 validation 选层、多 classifier seeds、完整 train 重训、最终单层 test |
 | Demo 前端 | 完成 | 7 面板；保留 upload / metrics / probe / kernels / scales / completion / codec |
 | 下游任务 | 精简完成 | 保留 `linear_probe.py`、`complete_image.py`、`verify_lossless.py`；旧静态 JSON 下游面板已移除 |
-| ImageNet64 | 完成 (2026-06-07) | 12ep 训练 + 4 卡 DDP 评测；主表 ensemble + TTA = **3.4800 bpd**（超 SPN 3.52、逼近未达 Sparse Transformer 152M 3.44） |
+| ImageNet64 正式主表 | 待重评 | 历史 ensemble+TTA 诊断值为 **3.4800 bpd**；新评测记录当前数据文件 SHA-256 |
+| CC-MDLM 研究线 | 协议地基完成 | deterministic `MaskSchedule`、独立双向 `forward_masked`、group-frozen arithmetic codec 与 tiny CPU roundtrip；尚未训练、无 bpd 结论 |
 | 表征理论 | 文档完成 | [theory.md](theory.md)：linear probe 为何有效（MDL + LRH + MDL probing 三段论），含阅读清单与实验菜单 |
-| 本地验证 | 通过 | 最近一次清理后：`pytest -m cpu -q` 58 passed；`compileall` 与 `git diff --check` 通过 |
+| 本地验证 | 通过 | 当前工作树：`pytest -q` 161 passed, 8 CUDA tests skipped；`compileall`、coder self-test 与 `git diff --check` 通过；CUDA/Triton 待 GPU 环境验证 |
 
 ## Baseline 对比
 
 | 方法 | 类别 | Params | CIFAR-10 bits/dim ↓ | 域 | 来源 |
 |------|------|--------|---------------------|----|------|
-| PixelCNN++ | Autoregressive | 52M | 2.92 | RGB-bit-exact | Salimans et al., ICLR 2017 |
+| PixelCNN++ | Autoregressive | ≈53.5M | 2.92 | RGB-bit-exact | Salimans et al., ICLR 2017 |
 | Image Transformer | Autoregressive | ≈40M | 2.90 | RGB-bit-exact | Parmar et al., ICML 2018 |
 | PixelSNAIL | Autoregressive | ≈91M | 2.85 | RGB-bit-exact | Chen et al., ICML 2018 |
 | Sparse Transformer | Autoregressive | 59M | 2.80 | RGB-bit-exact | Child et al., 2019 (128 层 strided sparse attention) |
-| **CC-iGPT v2 (Ours, R-only)** | Autoregressive | 82.95M | **2.8296** ± 0.0854 | RGB-bit-exact | `coarse_in_channels=1`，coarse 仅压 R 8×8（64 token），fine 通过 sub-pixel AR 自学 G/B，**主表**（200ep + RandomCrop + DropPath 0.1 + EMA 0.9998 + SWA last 31 ckpts + ensemble best/SWA/EMA + TTA hflip）|
-| PNG | Classical codec | — | 5.87 | RGB-bit-exact | Hoogeboom et al., NeurIPS 2019 报告 |
-| WebP (lossless) | Classical codec | — | 4.61 | RGB-bit-exact | Hoogeboom et al., NeurIPS 2019 报告 |
+| CC-iGPT v2 (Ours, historical diagnostic) | Autoregressive ensemble | 3×82.95M | 2.8296 | RGB-bit-exact | best/SWA/EMA probability mixture + hflip TTA；6 forwards/image；非正式单模型主表 |
+| **CC-iGPT v2 (Ours, formal protocol)** | Autoregressive | 82.95M | **待重评** | RGB-bit-exact | 单 checkpoint、no-TTA、逐图统计与 manifest |
+| PNG | Classical codec | — | 5.87 | RGB-bit-exact | 本项目全量 CIFAR-10 test 实测；Pillow PNG `optimize=True` |
+| WebP (lossless) | Classical codec | — | 4.61 | RGB-bit-exact | 本项目全量 CIFAR-10 test 实测；Pillow WebP `lossless=True` |
 
-> **注**：Image Transformer 原论文未报告总参数量；表中 ≈40M 系据官方实现 tensor2tensor `imagetransformer_cifar10_base`（12 层 / d=512 / ff=2048）估算。PixelSNAIL 原论文亦未报告参数量；表中 ≈91M 系据官方实现 `neocxi/pixelsnail-public` 的 CIFAR-10 配置（`h12_noup_smallkey`, `nr_filters=256`, `nr_resnet=4` 默认值 — 官方 README 的 CIFAR 训练命令未覆盖 `--nr_resnet`）逐层核算，脚本见 `experiments/pixelsnail_paramcount.py`（PixelCNN++ 校验锚 55.35M 对齐公开 ~53.5M，torch numel 交叉校验一致）；原所列 380M 无出处、已撤下。Sparse Transformer 的 59M（CIFAR-10, 128L/d256）与 152M（ImageNet64, 48L/d512）均为原论文自报。
+> **注**：Image Transformer 原论文未报告总参数量；表中 ≈40M 系据官方实现 tensor2tensor `imagetransformer_cifar10_base`（12 层 / d=512 / ff=2048）估算。PixelSNAIL 原论文亦未报告参数量；表中 ≈91M 系据官方实现 `neocxi/pixelsnail-public` 的 CIFAR-10 配置（`h12_noup_smallkey`, `nr_filters=256`, `nr_resnet=4` 默认值 — 官方 README 的 CIFAR 训练命令未覆盖 `--nr_resnet`）逐层核算，脚本见 [`scripts/pixelsnail_paramcount.py`](scripts/pixelsnail_paramcount.py)（PixelCNN++ 校验锚 55.35M 对齐公开 ~53.5M）；原所列 380M 无出处、已撤下。Sparse Transformer 的 59M（CIFAR-10, 128L/d256）与 152M（ImageNet64, 48L/d512）均为原论文自报。
 
-CC-iGPT v2 R-only **超越 PixelSNAIL ≈91M (2.85)、逼近 Sparse Transformer 59M (2.80)**，参数预算 82.95M。主表 ensemble (best+SWA+EMA) + TTA hflip = **2.8296 ± 0.0854**（vs PixelSNAIL gap -0.020 / vs Sparse Trans gap +0.030）。
+> **传统 codec 复核（2026-07-26）**：CIFAR-10 test 10,000 张、分母 `32×32×3`。Pillow 12.2.0 / zlib 1.3 下 PNG `optimize=True` 为 `5.866397656 bpd`；Pillow 12.2.0 / libwebp 1.6.0 下 WebP `lossless=True` 为 `4.606462500 bpd`。两者解码后均为 0 张像素不一致；完整协议与数据哈希见 [`demo/data/traditional_codecs.json`](demo/data/traditional_codecs.json)。
+
+历史 ensemble+TTA 数字低于 PixelSNAIL 报告值，但模型集合、参数存储和推理次数不同，不能据此宣称单模型超越。正式比较等待单 checkpoint/no-TTA 重评结果。
 
 ### ImageNet 64×64 对比
 
@@ -45,15 +49,16 @@ CC-iGPT v2 R-only **超越 PixelSNAIL ≈91M (2.85)、逼近 Sparse Transformer 
 | PixelCNN | Autoregressive | — | 3.57 | RGB-bit-exact | van den Oord et al., 2016 |
 | SPN (Subscale Pixel Network) | Autoregressive | — | 3.52 | RGB-bit-exact | Menick & Kalchbrenner, ICLR 2019 |
 | Sparse Transformer | Autoregressive | 152M | 3.44 | RGB-bit-exact | Child et al., 2019 (strided sparse attention) |
-| **CC-iGPT (Ours, R-only)** | Autoregressive | 82.95M | **3.4800** ± 0.1161 | RGB-bit-exact | `configs/ccigpt_imagenet64_v1.yaml`，coarse 16×16=256 token / fine 12288 token，4 卡 DDP 12ep，**主表**（ensemble best/SWA/EMA + TTA hflip）|
+| CC-iGPT (Ours, historical diagnostic) | Autoregressive ensemble | 3×82.95M | 3.4800 | RGB-bit-exact | best/SWA/EMA + hflip TTA；旧 batch-level std 作废 |
+| **CC-iGPT (Ours, formal protocol)** | Autoregressive | 82.95M | **待重评** | RGB-bit-exact | 单 checkpoint、no-TTA、逐图统计与数据文件 manifest |
 
-ImageNet64 R-only **超越 SPN 3.52（-0.040）、逼近但未达 Sparse Transformer 152M 3.44（+0.040）**。主表 ensemble (best+SWA+EMA) + TTA hflip = **3.4800**（单 ckpt best+TTA = 3.4810；CE_c 3.8960 share 3.4% / CE_f 2.3310 96.6% / α 0.1991）。注：4 卡评测的 ± 0.1161 是 batch-level std（随 GPU 数变化），与 CIFAR 主表 per-image ± 口径不同；mean 与单卡 bit-exact 一致。
+历史 `3.4800` 只能说明该 ensemble+TTA 配置的诊断 NLL；正式比较等待单模型重评，并随结果保存实际 ImageNet64 文件 hash。
 
 ### 创新点定位
 
-1. **方法 — 零新参数的双尺度条件注入**：coarse iGPT 量化 token 经 bit-exact 反量化/上采样/重 tokenize 后，复用 `fine.token_embed` 得到 `coarse_ctx`，再以可学习标量 α 做 additive 注入。整个 ctx 通路只引入 1 个标量参数；encoder/decoder 共用同一函数，bitstream 真实可解码。回避了多尺度联合 AR 的 loss 平衡难题。
-2. **工程 — 8 个手写 Triton kernel + 1 个 roofline 证伪的反面案例**：7 个进入训练栈，1 个 `fused_linear_ce` 在 V=256 下经 `scripts/profile_kernels.py --kernel fused_linear_ce --roofline` 分析判定为负收益（compute-bound + 三重循环失去 cuBLAS GEMM 利用率），保留作工程严谨性的反向证据。
-3. **分析 — RGB-bit-exact 主表 + 多 benchmark SOTA 对比**：CIFAR-10 R-only v2 主表 **2.8296 bpd**（超越 PixelSNAIL ≈91M 2.85）；ImageNet 64×64 主表 **3.4800 bpd**（超 SPN 3.52、逼近未达 Sparse Transformer 152M 3.44）；Linear Probe 逐层表征曲线；roofline forward 与 fwd+bwd 双视角。
+1. **方法 — 单标量参数的双尺度条件注入**：coarse iGPT 量化 token 经 bit-exact 反量化/上采样/重 tokenize 后，复用 `fine.token_embed` 得到 `coarse_ctx`，再以可学习标量 α 做 additive 注入。整个 ctx 通路只引入 1 个标量参数；encoder/decoder 共用同一函数，bitstream 真实可解码。历史 checkpoint 使用双流等权目标 `loss_coarse + loss_fine`；它不是严格码长加权，本轮不改变该目标。
+2. **工程 — 6 个训练用手写 Triton primitive + pipeline + 反面案例**：RoPE→FlashAttention 是两个 kernel 的组合 pipeline，不另计融合 primitive；`fused_linear_ce` 在 V=256 下保留作负收益案例。性能结论待用修正后的 benchmark harness 重跑。
+3. **分析 — RGB-bit-exact 评估与真实 codec 对账**：历史 ensemble/TTA 和 probe 曲线作为探索结果保留；正式产物要求单模型 manifest、逐图统计、真实 payload/file bpd 与无损 roundtrip。
 
 ## 快速开始
 
@@ -89,22 +94,22 @@ python3 scripts/profile_kernels.py --roofline
 ### CIFAR-10 v2 评测
 
 ```bash
-# 主表：probability-mixture ensemble + TTA hflip
+# 历史诊断：probability-mixture ensemble + TTA hflip（非正式主表）
 python3 scripts/evaluate.py --config configs/ccigpt_cifar10_s_rgb_ronly_v2.yaml \
     --ensemble experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/best.pth,\
 experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/swa.pth,\
 experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/ema.pth \
     --tta_hflip
 
-# 单 checkpoint 评测
+# 正式主表协议：单 checkpoint、no-TTA、fp32 logits + fp64 softmax
 python3 scripts/evaluate.py --config configs/ccigpt_cifar10_s_rgb_ronly_v2.yaml \
     --checkpoint experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/best.pth \
-    --tta_hflip
+    --result_json experiments/cifar10_formal_result.json
 
 # per-image bpd 统计与导出
 python3 scripts/evaluate.py --config configs/ccigpt_cifar10_s_rgb_ronly_v2.yaml \
     --checkpoint experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/best.pth \
-    --tta_hflip --per_image_stats --per_image_json experiments/per_image_bpd.json
+    --per_image_stats --per_image_json experiments/per_image_bpd.json
 ```
 
 ### Linear Probe
@@ -116,7 +121,7 @@ python3 scripts/linear_probe.py \
     --checkpoint experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/best.pth \
     --layers all
 
-# IN64 -> CIFAR-10 transfer probe（IN64 ep12 best.pth；32->64 resize，勿与 native 32x32 横比；32 层完整实测 best L16 = 73.19%）
+# IN64 -> CIFAR-10 transfer probe（32->64 resize；旧 73.19% 需按新协议重跑）
 python3 scripts/linear_probe.py \
     --config configs/ccigpt_imagenet64_v1.yaml \
     --checkpoint experiments/ccigpt_imagenet64_v1/checkpoints/best.pth \
@@ -149,16 +154,32 @@ python3 scripts/verify_lossless.py --config configs/ccigpt_cifar10_s_rgb_ronly_v
     --checkpoint experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/best.pth \
     --num_images 2
 
-# 落盘自包含 MDLC .bin，再只读解析
+# 落盘模型绑定的 MDLC v2，再只读检查结构/identity/完整性
 python3 scripts/verify_lossless.py --config configs/ccigpt_cifar10_s_rgb_ronly_v2.yaml \
     --checkpoint experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/best.pth \
     --num_images 2 --dump_dir experiments/bitstreams
 python3 scripts/verify_lossless.py --inspect experiments/bitstreams/img0.bin
 ```
 
+MDLC v2 使用 32B fixed header、canonical JSON metadata、coarse/fine payload
+和覆盖整个容器内容的 SHA-256。metadata 绑定 checkpoint、model config、CDF、
+AR schedule 与数值 runtime，并保存预处理后 RGB 的 SHA-256。`--inspect` 不需要
+模型；真正解码必须提供 identity 完全匹配的外部模型。旧 MDLC v1 仅保留只读结构兼容，
+不具备模型身份、payload 完整性或 RGB 校验保证。
+
 ### ImageNet64
 
 ```bash
+# PNG 或 parquet 预处理完成后会生成 dataset_manifest.json（实际 shape/hash/tool versions）
+python3 scripts/prepare_imagenet64_png.py \
+    --train_dir experiments/train_64x64 --val_dir experiments/valid_64x64 \
+    --out_dir /root/autodl-tmp/imagenet64_png --workers 16
+
+# 磁盘受限的 shard 流程；只有 durable state 提交后才删除 parquet
+python3 scripts/prepare_imagenet64_streaming.py \
+    --raw_dir datasets/imagenet64_hf/raw --out_dir datasets/imagenet64_hf \
+    --train_count 1281149 --val_count 49999 --delete_processed
+
 # 传统 codec baseline（PNG/WebP lossless bpd，默认抽样 2000 张）
 python3 scripts/traditional_codec_bpd.py /root/autodl-tmp/imagenet64_png/val.npy --limit 2000
 
@@ -171,16 +192,28 @@ nohup torchrun --nproc_per_node=<num_gpus> scripts/train.py \
 # 查看进度
 tail -f experiments/ccigpt_imagenet64_v1_train.log
 
-# 从完整训练状态恢复
+# 精确续训：只接受当前代码生成的完整 training-state；config/seed/world_size 必须一致
 NCCL_P2P_DISABLE=1 NCCL_IB_DISABLE=1 \
 torchrun --nproc_per_node=<num_gpus> scripts/train.py \
     --config configs/ccigpt_imagenet64_v1.yaml --export_csv \
     --resume experiments/ccigpt_imagenet64_v1/checkpoints/epoch_<N>.pth
+
+# 权重初始化/迁移：裸 best.pth、旧 checkpoint 或修改过配置时使用；从 epoch 1 新开优化状态
+torchrun --nproc_per_node=<num_gpus> scripts/train.py \
+    --config configs/<new_experiment>.yaml \
+    --init_from experiments/<source>/checkpoints/best.pth
 ```
+
+`--resume` 与 `--init_from` 互斥。新 v3 `--resume` 会严格恢复模型、optimizer、scheduler、
+scaler、SWA/EMA、每个 rank 的 RNG、epoch 和 best metric，并验证执行源码、runtime 与
+train/validation 数据指纹。缺少这些 provenance 的 v2 完整训练状态只有在显式传入
+`--allow_legacy_resume` 后才能续训；裸 state dict 和跨结构初始化继续使用 `--init_from`。
+DDP 验证使用无 padding 分片，因此每个验证样本恰好统计一次。
 
 ### Demo 前端
 
 7 个面板：上传 bpd 热力图、baseline 对比、Linear Probe、Kernel 性能、coarse/fine 双尺度、图像补全、交互式无损 codec。补全面板调用 `/api/complete`；codec 面板调用 `/api/{encode,inspect,decode}`。
+模型请求固定串行，后端只缓存当前数据集的一份模型；CIFAR/ImageNet64 切换时先释放旧模型再加载新模型，避免两份权重同时常驻 GPU。
 
 ```bash
 pip install -e ".[demo]"
@@ -188,9 +221,15 @@ pip install -e ".[demo]"
 # 本地 / WSL
 uvicorn demo.server:app --reload --port 8000
 
-# AutoDL: 仅 6006 / 6008 端口可公网映射
-uvicorn demo.server:app --host 0.0.0.0 --port 6006 --reload
+# AutoDL / 公网映射：不要启用 --reload；API key 从服务环境注入
+MDLIC_DEMO_API_KEY="<random-secret>" \
+MDLIC_DEMO_RATE_LIMIT=6 \
+uvicorn demo.server:app --host 0.0.0.0 --port 6006
 ```
+
+公网部署还应在 TLS 反向代理层配置认证、请求体上限和共享限流。应用内限流仅在
+单进程内生效；只有确认反向代理会覆盖而不是追加客户端提供的
+`X-Forwarded-For` 时，才设置 `MDLIC_DEMO_TRUST_PROXY=1`。CORS 白名单不是访问控制。
 
 ## AutoDL 同步与训练
 
@@ -209,10 +248,10 @@ git fetch origin
 git pull --ff-only origin dev
 ```
 
-如果需要把 ignored 的 `future.md` / `CLAUDE.md` 也纳入提交：
+`future.md` 是项目路线文档，应正常纳入提交；`CLAUDE.md` 与本地 `plan.md` 保持 ignored。需要强制提交 `CLAUDE.md` 时：
 
 ```bash
-git add -f future.md CLAUDE.md
+git add -f CLAUDE.md
 ```
 
 回收 checkpoint：
@@ -256,7 +295,7 @@ scp -P <port> root@<autodl-host>:/root/autodl-tmp/mdl-deep-image-compression/exp
           +-------------------+-------------------+
                               |
                     +---------v-----------+
-                    | 序列布局: R-only 主表 |
+                    | 序列布局: R-only 配置 |
                     | coarse: R 8×8 (64)  |
                     | fine: sub-pixel AR  |
                     | [R₀,G₀,B₀, R₁,...] |
@@ -309,9 +348,10 @@ scp -P <port> root@<autodl-host>:/root/autodl-tmp/mdl-deep-image-compression/exp
                     |  (Fused CE Triton)  |
                     +---------+-----------+
                               |
-              iGPT:    bpd = CE × T / ln(2) / (H·W·C)
-              CC-iGPT: bpd_total = (CE_c · N_c + CE_f · N_f) / ln(2) / N_f
-                       (coarse + fine 联合压缩率，N_f = H·W·C)
+              iGPT:    bpd = [8 + CE × (T-1) / ln(2)] / T
+              CC-iGPT: bpd_total = [8 + CE_c·(N_c-1)/ln(2)
+                                   + 8 + CE_f·(N_f-1)/ln(2)] / N_f
+                       (每个独立 AR stream 的首 token 使用均匀 256-way 先验)
 ```
 
 ### iGPT (`models/igpt.py`)
@@ -343,27 +383,33 @@ scp -P <port> root@<autodl-host>:/root/autodl-tmp/mdl-deep-image-compression/exp
 
 ### CC-iGPT (`models/cc_igpt.py`)
 
-Coarse-Conditioned iGPT —— 双尺度条件式自回归。回避了多尺度 loss 平衡难题，复用全部 iGPT 训练栈与 Triton kernels。
+Coarse-Conditioned iGPT —— 双尺度条件式自回归，复用 iGPT 训练栈与 Triton kernels。历史训练采用 coarse/fine 两流平均 CE 等权；正式 bpd 则按实际 token 数和首 token 先验计算，两者不要混为同一口径。
 
 | 组件 | 说明 |
 |------|------|
 | DOWN | `F.adaptive_avg_pool2d(x, 8)` 在 float 域下采样到 8×8 |
-| Coarse iGPT | 浅层（d_model=256, N=6），独立 NTP 训练，CE 进 bitstream。R-only 主表配置仅压 R 通道 8×8（64 token, ~2% overhead） |
+| Coarse iGPT | 浅层（d_model=256, N=6），独立 NTP 训练，CE 进 bitstream。R-only 配置仅压 R 通道 8×8（64 token） |
 | **Bit-exact ctx 路径** | encoder/decoder 必须看到**同一个** `coarse_ctx`，否则 fine 端算术编码不可解。统一管线：coarse 量化 token → `/255` 反量化为 RGB float → bilinear UP 到 32×32 → 与 fine encoder 同规则 re-tokenize → `fine.token_embed` |
 | Ctx 注入 | AR shift `coarse_ctx[:, 1:]`（ctx[i] 对应 fine 被预测位置 i，PixelCNN++ conditional 标准语义）→ `α · coarse_ctx`（additive，仅引入 1 个标量参数 α） |
 | 可学习 α | `nn.Parameter(torch.ones(1))`，初始 1.0；模型自适应注入强度 |
-| 联合 bits/dim | `bpd_total = (CE_c · N_c + CE_f · N_f) / ln(2) / N_f` |
-| 训练 | 端到端联合 `loss = loss_coarse + loss_fine`，无尺度间加权 |
+| 联合 bits/dim | `[8 + CE_c·(N_c-1)/ln(2) + 8 + CE_f·(N_f-1)/ln(2)] / N_f`；两个 stream 的首 token 均按 8 bit 计入 |
+| 训练 | 历史 checkpoint 使用 `loss = loss_coarse + loss_fine`（两流平均 CE 等权）；不是严格 rate weighting，本轮保持不变 |
 
 设计参考: Burt & Adelson "Laplacian Pyramid" (1983)、van den Oord "Conditional PixelCNN" (NeurIPS 2016, additive 条件)、Tian "VAR" (NeurIPS 2024)。
+
+### CC-MDLM 协议地基 (`models/masked_igpt.py`, `models/cc_mdlm.py`)
+
+masked 研究线与原 AR forward 分离：fine 输入是完整未移位序列，显式 input-only `[MASK]` embedding，输出仍为 256-way tied categorical head，attention 使用 `is_causal=False`。`MaskSchedule` 把精确 group 顺序序列化并哈希；grouped codec 每组只 forward 一次，先冻结整组 CDF，再编码/解码该组全部 token。测试覆盖 `K=T` 的 100 个合成 roundtrip，以及 tiny 模型的 schedule NLL、量化 CDF NLL、payload、packed payload 和 MDLC file bpd 对账。
+
+这只是 E1/E2 的 CPU 协议地基，不是训练结果。尚未接入 CIFAR 训练配置，也不报告 masked CE/NELBO 为 bpd；旧 AR checkpoint 与新类参数结构不同，未来只能用 `--init_from` 做 shape-compatible 初始化，不能 `--resume`。
 
 ### 共享层 (`models/layers.py`)
 
 GPTBlock, MultiHeadAttentionBlock (RoPE + QK-Norm + Flash Attention + attn_mask), RMSNorm, SwiGLU FFN。RoPE 的 `cos/sin` 按 `(seq_len, device)` 缓存。
 
-### 手写 Triton Kernels (`ops/`, ~2,400 行, 8 个 kernel)
+### 手写 Triton Kernels (`ops/`, ~2,400 行)
 
-7 个进入训练栈，1 个 (`fused_linear_ce`) 经 `scripts/profile_kernels.py --kernel fused_linear_ce --roofline` 分析在 V=256 下负收益、保留作反面案例。
+训练栈包含 6 类手写 primitive。`fused_attn_rope` 是组合 RoPE 与 FlashAttention 的 Python pipeline，不作为额外融合 kernel 计数；`fused_linear_ce` 是独立负收益案例。
 
 | Kernel | 行数 | 说明 |
 |--------|------|------|
@@ -373,28 +419,31 @@ GPTBlock, MultiHeadAttentionBlock (RoPE + QK-Norm + Flash Attention + attn_mask)
 | Fused Add+RMSNorm | ~217 | post-norm 残差+归一化合并 |
 | Fused SwiGLU | ~204 | activation recomputation |
 | Fused RoPE | ~123 | 就地旋转 Q/K |
-| Fused Attn+RoPE | ~62 | 薄包装层：组合 fused_rope + flash_attn |
+| RoPE→FlashAttention pipeline | ~62 | 薄包装层：依次组合 `fused_rope` 与 `flash_attn`，不是单一融合 op |
 | ~~Fused Linear+CE~~ | ~393 | **反面案例** — V=256 下三重循环失去 cuBLAS GEMM 利用率 |
 
 ### Linear Probe (`scripts/linear_probe.py`)
 
-冻结预训练模型，通过 `IGPT.encode(x, max_layer)` 直接取各层 hidden state，全局平均池化 → 线性分类器 → 报告**训练结束时**的测试准确率。对比预训练表征质量 (Chen et al. 2020)。
+冻结预训练模型，通过 `IGPT.encode(x, max_layer)` 取各层 hidden state，全局平均池化后训练线性分类器。层选择只使用训练集划出的 validation；选定层在完整训练集重训后仅评估一次 test。脚本把 classifier-seed 标准差作为优化波动的描述性统计，并另对最终 test 样本做 percentile bootstrap；两者都不替代多预训练 seed。
 
 ## 项目结构
 
 ```
 src/mdlic/
-├── models/    igpt.py, cc_igpt.py, layers.py
-├── ops/       7 个 Triton kernels + 1 反面案例 (fused_linear_ce)
+├── models/    igpt.py, cc_igpt.py, masked_igpt.py, cc_mdlm.py, layers.py
+├── codec/     arithmetic.py, container.py, grouped.py
+├── masking_scheduler.py, rate.py
+├── provenance.py, request_limits.py
+├── ops/       6 类训练 primitive + 1 组合 pipeline + 1 反面案例
 ├── data/      imagenet64_npy.py (mmap-backed Dataset)
 └── utils/     seed, bpd, clean_state_dict
 scripts/       train.py (checkpoint sidecar *.meta.json), evaluate.py (含 --ensemble / --per_image_stats), linear_probe.py (含 --probe_dataset transfer),
                complete_image.py (--scale), verify_lossless.py (--dump_dir 落盘 .bin / --inspect 只读解析), dryrun_forward.py, profile_kernels.py,
-               traditional_codec_bpd.py, prepare_imagenet64_png.py
+               traditional_codec_bpd.py, pixelsnail_paramcount.py, render_report_figures.py, prepare_imagenet64_png.py
 configs/       igpt_cifar10_s_rgb,
-               ccigpt_cifar10_s_rgb_ronly      (R-only v1 历史主表 2.9035 bpd, 100ep, 已被 v2 替代),
-               ccigpt_cifar10_s_rgb_ronly_v2   (深窄 N=32/d=448 + 200ep, 当前主表 ensemble+TTA 2.8296 bpd),
-               ccigpt_imagenet64_v1            (ImageNet64 12ep benchmark, 完成 2026-06-07, ensemble+TTA 3.4800 bpd)
+               ccigpt_cifar10_s_rgb_ronly      (R-only v1 历史诊断, 100ep, 已被 v2 替代),
+               ccigpt_cifar10_s_rgb_ronly_v2   (深窄 N=32/d=448 + 200ep；正式单模型结果待重评),
+               ccigpt_imagenet64_v1            (ImageNet64 12ep；正式单模型结果待重评并记录数据 hash)
 downstream/    runbook.md (下游任务执行手册) + run_downstream.sh (AutoDL 批量执行)
 tests/         单元测试（含 test_ccigpt_smoke / test_arithmetic_codec）
 demo/
@@ -420,4 +469,4 @@ demo/
 
 **表征 / 可解释性**: 详见 [theory.md](theory.md)（MDL + LRH + MDL probing 三段论 + 阅读清单）
 
-> 完整阅读路径（7 阶，从信息论地基到「超越压缩」）见本地 `future.md §10`（git-ignored）。
+> 完整阅读路径（7 阶，从信息论地基到「超越压缩」）见版本化路线文档 [future.md](future.md)。本地执行清单记录在 ignored 的 `plan.md`。

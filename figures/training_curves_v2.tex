@@ -1,4 +1,4 @@
-% CIFAR-10 R-only 训练曲线 — CC-iGPT v2 (深窄 200ep, 主表)
+% CIFAR-10 R-only 训练曲线 — CC-iGPT v2 (深窄 200ep, 历史实验)
 % 编译: pdflatex training_curves_v2.tex   (或 latexmk -pdf)
 % 嵌入论文: \input{figures/training_curves_v2.tex}
 %
@@ -7,7 +7,7 @@
 %                                      198 epoch train_bpd (ep135-136 缺, pgfplots 自动跳过) + 99 val 点
 %   landmark v2: ep1 train=12.07, ep10 val=3.34, ep90 val=2.879, ep170 SWA start, ep200 val=2.8322,
 %                ep196 best val=2.8312 (in-training, 无 TTA/SWA/EMA/ensemble)
-%   主表数字 v2：ensemble (best+SWA+EMA) + TTA hflip = 2.8296 ± 0.0854 (2026-05-27 实测)
+%   历史诊断 v2：ensemble (best+SWA+EMA) + TTA hflip = 2.8296；旧 ±0.0854 口径已作废
 
 \documentclass[tikz,border=8pt]{standalone}
 \usepackage{tikz}
@@ -88,7 +88,7 @@
 % --- 副标题（实验配置） ---
 \node[font=\scriptsize, gray!50!black, anchor=north, yshift=-2pt]
     at (current bounding box.south)
-    {\textit{N=32/d=448 (82.95M) $\cdot$ warmup 5ep $\cdot$ EMA 0.9998 $\cdot$ SWA last 31 ckpts (start ep 170) $\cdot$ ensemble (best+SWA+EMA) $+$ TTA hflip $=$ 2.8296 $\pm$ 0.0854}};
+    {\textit{N=32/d=448 (82.95M) $\cdot$ warmup 5ep $\cdot$ EMA 0.9998 $\cdot$ SWA last 31 ckpts (start ep 170) $\cdot$ historical ensemble+TTA $=$ 2.8296; formal single-model result pending}};
 
 \end{tikzpicture}
 \end{document}
