@@ -168,7 +168,7 @@ p_\theta(x) \;=\; \prod_t p_\theta(x_t \mid x_{<t}),
 \centering
 \small
 \textbf{CC-iGPT v2 R-only}: \alert{\textbf{2.8296}} bpd \;
-(3$\times$82.95\,M stored params, 200 ep, ensemble + TTA hflip, 6 forwards/image)
+(82.95\,M/member, $K=3$ checkpoints, 200 ep, ensemble + TTA hflip, 6 forwards/image)
 
 \smallskip
 {\scriptsize 该协议下的历史实验结果，不作为单模型正式主表；正式结果待 single checkpoint / no-TTA / per-image manifest 重评。}
@@ -185,7 +185,7 @@ Sparse Transformer & 152M & 3.44 \\
 SPN & -- & 3.52 \\
 Gated PixelCNN & -- & 3.57 \\
 PixelRNN & -- & 3.63 \\
-\textcolor{ours}{CC-iGPT 历史 ensemble+TTA} & $3\times82.95$M & \textcolor{ours}{3.4800} \\
+\textcolor{ours}{CC-iGPT 历史 ensemble+TTA} & 82.95M/member ($K=3$) & \textcolor{ours}{3.4800} \\
 \textbf{CC-iGPT 正式单模型} & 82.95M & \textbf{待重评} \\
 \bottomrule
 \end{tabular}

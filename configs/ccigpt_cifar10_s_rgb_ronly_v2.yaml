@@ -26,7 +26,7 @@ exp_name: "ccigpt_cifar10_s_rgb_ronly_v2"
 #   in-training (无 TTA / ensemble)：best val ep196 = 2.8312；
 #                                    SWA last 31 = 2.8276；EMA = 2.8301。
 #   历史实验结果（diagnostic protocol，ensemble best+SWA+EMA + TTA hflip）: 2.8296 bpd；旧 ±0.0854 统计口径已作废。
-#   三成员需保存 248,848,323 参数，hflip 后每图 6 次 forward；正式单模型结果待重评。
+#   三成员评测加载 3 份各 82,949,441 参数的 checkpoint，hflip 后每图 6 次 forward；正式单模型结果待重评。
 
 model:
   type: ccigpt

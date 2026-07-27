@@ -5,7 +5,7 @@
 ## 0. 2026-07-27 执行口径（优先级高于后文历史备忘）
 
 1. **当前主线不换模型、不改训练损失**：CC-iGPT 继续使用 `CE_coarse + CE_fine`。这是一种双流平衡训练目标，不等同于严格按真实码长加权；本轮代码修正不要求重训，也不使现有 checkpoint 失效。
-2. **当前正式结果待重评**：CIFAR-10 `2.8296` 与 ImageNet64 `3.4800` 都是有效的历史实验结果，但其协议是三成员 ensemble + hflip TTA，在新 evaluator 中归入 diagnostic，而不是正式单模型主表。单个 CC-iGPT v2 是 `82,949,441` 参数；三成员 ensemble 的有效参数量约 `248.85M`，hflip 后每张图共 6 次 forward。正式主表必须用现有预训练 best checkpoint 做 single-checkpoint/no-TTA 重评，不需要重训，并保存新逐图 evaluator 的 schema v5 manifest。
+2. **当前正式结果待重评**：CIFAR-10 `2.8296` 与 ImageNet64 `3.4800` 都是有效的历史实验结果，但其协议是三成员 ensemble + hflip TTA，在新 evaluator 中归入 diagnostic，而不是正式单模型主表。每个 CC-iGPT v2 checkpoint 是 `82,949,441` 参数；该协议加载 best/SWA/EMA 三组权重（K=3），而不是一个 248.85M 参数架构，hflip 后每张图共 6 次 forward。正式主表必须用现有预训练 best checkpoint 做 single-checkpoint/no-TTA 重评，不需要重训，并保存新逐图 evaluator 的 schema v5 manifest。
 3. **Phase E 是并行研究分支，不替换 AR 无损主线**：目标是研究 Masked Diffusion Language Model (MDLM) / grouped ARDM 的 `实际码率 vs forward calls`，不是先承诺更低 bpd 或实时加速。Phase E 需要新的训练；现有 AR checkpoint 最多用于初始化兼容权重，不能直接当作 masked model 结果。
 4. **codec-first**：在任何大规模训练前，先用 tiny CIFAR/合成图完成真实 `encode -> file -> decode` 闭环。没有固定 schedule、可解码概率因式分解、量化 CDF 协议和逐像素一致测试，就不把 masked CE/NELBO 称为压缩率。
 5. **六层指标分开报告**：训练 masked CE/NELBO、固定 schedule 的理想模型 NLL、量化 CDF NLL、算术 payload bpd、字节 padding 后的 packed payload bpd、完整文件 bpd。另报 fine/total forward calls、wall-clock、峰值显存和硬件环境。

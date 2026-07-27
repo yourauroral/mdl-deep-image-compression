@@ -7,7 +7,7 @@
 - **Phase A (完成)**: iGPT token-level 自回归压缩 + 6 个进入训练栈的手写 Triton primitive；RoPE→FlashAttention 是两个 kernel 的 pipeline，`fused_linear_ce` 是 V=256 下的负收益反面案例
 - **Phase B (历史实验完成)**: CC-iGPT（Coarse-Conditioned iGPT）双尺度条件自回归 — 浅层 coarse iGPT (R-only 配置 8×8×1, 64 token) 独立编码进 bitstream，UP + 量化后通过 additive embedding（可学习标量 α）注入 fine iGPT (32×32×3, 3072 token)。v1 的 **2.9035 bpd** 是 TTA 诊断协议下的历史实验结果，已被 v2 架构替代
 - **Phase C (完成)**: Demo 前端可视化系统 (FastAPI + Chart.js, 7 个展示面板，含交互式无损 codec 图像⇄.bin 真实可解性验证 + 图像补全 AR inpainting 实时面板)
-- **Phase D (历史实验完成, 2026-05-27)**: fine N=24/d=512 → N=32/d=448，单模型 `82,949,441` 参数，训练 200 epoch，并产出 best/SWA/EMA。`2.8296` 是三成员 probability-mixture ensemble + hflip TTA 协议下的历史实验结果：需同时保存约 248.85M 参数并对每张图执行 6 次 forward；在新 evaluator 中归类为诊断协议，旧 `±0.0854` 统计口径已作废
+- **Phase D (历史实验完成, 2026-05-27)**: fine N=24/d=512 → N=32/d=448；每个 checkpoint 对应同一套 `82,949,441` 参数架构，训练 200 epoch 后产出 best/SWA/EMA 三组权重。`2.8296` 是三成员 probability-mixture ensemble + hflip TTA 协议下的历史实验结果：评测时加载 3 个 checkpoint，并对每张图执行 6 次 forward；在新 evaluator 中归类为诊断协议，旧 `±0.0854` 统计口径已作废
 - **ImageNet64 benchmark (历史实验完成, 2026-06-07)**: `3.4800 bpd` 同样是三成员 ensemble + hflip TTA 协议下的历史实验结果，旧 `±0.1161` 是 batch-level std。正式结论待使用单 checkpoint、no-TTA、逐图 evaluator 和 manifest 重评；当前 `.npy` 的实际样本数与 SHA-256 直接进入 manifest
 
 ## 当前进度
@@ -31,7 +31,7 @@
 | Image Transformer | Autoregressive | ≈40M | 2.90 | RGB-bit-exact | Parmar et al., ICML 2018 |
 | PixelSNAIL | Autoregressive | ≈91M | 2.85 | RGB-bit-exact | Chen et al., ICML 2018 |
 | Sparse Transformer | Autoregressive | 59M | 2.80 | RGB-bit-exact | Child et al., 2019 (128 层 strided sparse attention) |
-| CC-iGPT v2 (Ours, historical experiment; diagnostic protocol) | Autoregressive ensemble | 3×82.95M | 2.8296 | RGB-bit-exact | best/SWA/EMA probability mixture + hflip TTA；6 forwards/image；非正式单模型主表 |
+| CC-iGPT v2 (Ours, historical experiment; diagnostic protocol) | Autoregressive ensemble | 82.95M/member (K=3) | 2.8296 | RGB-bit-exact | best/SWA/EMA probability mixture + hflip TTA；6 forwards/image；非正式单模型主表 |
 | **CC-iGPT v2 (Ours, formal protocol)** | Autoregressive | 82.95M | **待重评** | RGB-bit-exact | 单 checkpoint、no-TTA、逐图统计与 manifest |
 | PNG | Classical codec | — | 5.87 | RGB-bit-exact | 本项目全量 CIFAR-10 test 实测；Pillow PNG `optimize=True` |
 | WebP (lossless) | Classical codec | — | 4.61 | RGB-bit-exact | 本项目全量 CIFAR-10 test 实测；Pillow WebP `lossless=True` |
@@ -40,7 +40,7 @@
 
 > **传统 codec 复核（2026-07-26）**：CIFAR-10 test 10,000 张、分母 `32×32×3`。Pillow 12.2.0 / zlib 1.3 下 PNG `optimize=True` 为 `5.866397656 bpd`；Pillow 12.2.0 / libwebp 1.6.0 下 WebP `lossless=True` 为 `4.606462500 bpd`。两者解码后均为 0 张像素不一致；完整协议与数据哈希见 [`demo/data/traditional_codecs.json`](demo/data/traditional_codecs.json)。
 
-`2.8296` 是可以引用的实验结果，但必须连同“3 checkpoint probability mixture + hflip TTA、6 forwards/image”的协议一起引用。它与单模型基线的参数存储和推理成本不同，也不是当前 MDLC codec 的实际文件码率，因此不能放进正式单模型主表或据此宣称单模型超越。正式比较等待用现有预训练权重做 single-checkpoint/no-TTA 重评；不需要重新训练。
+`82.95M` 是一个 checkpoint 内去除 tied embedding/head 重复引用后的可训练参数量。best/SWA/EMA 是同一架构、同一训练轨迹导出的三组权重，不应表述成一个“248.85M 参数模型”；但复现 `2.8296` 时仍需加载三个完整 checkpoint，并执行 3 members × 2 flips = 6 次 forward。该结果可以引用，但必须连同 probability-mixture ensemble + hflip TTA 协议一起引用。它不是单模型结果，也不是当前 MDLC codec 的实际文件码率。正式比较等待用现有预训练 best checkpoint 做 single-checkpoint/no-TTA 重评，不需要重新训练。
 
 ### ImageNet 64×64 对比
 
@@ -49,7 +49,7 @@
 | PixelCNN | Autoregressive | — | 3.57 | RGB-bit-exact | van den Oord et al., 2016 |
 | SPN (Subscale Pixel Network) | Autoregressive | — | 3.52 | RGB-bit-exact | Menick & Kalchbrenner, ICLR 2019 |
 | Sparse Transformer | Autoregressive | 152M | 3.44 | RGB-bit-exact | Child et al., 2019 (strided sparse attention) |
-| CC-iGPT (Ours, historical experiment; diagnostic protocol) | Autoregressive ensemble | 3×82.95M | 3.4800 | RGB-bit-exact | best/SWA/EMA + hflip TTA；旧 batch-level std 作废 |
+| CC-iGPT (Ours, historical experiment; diagnostic protocol) | Autoregressive ensemble | 82.95M/member (K=3) | 3.4800 | RGB-bit-exact | best/SWA/EMA + hflip TTA；6 forwards/image；旧 batch-level std 作废 |
 | **CC-iGPT (Ours, formal protocol)** | Autoregressive | 82.95M | **待重评** | RGB-bit-exact | 单 checkpoint、no-TTA、逐图统计与数据文件 manifest |
 
 历史 `3.4800` 是该 ensemble+TTA 配置的实验结果；它对应诊断 NLL，不等于单模型结果或实际 bitstream bpd。正式比较等待用预训练 best checkpoint 重评，并随结果保存实际 ImageNet64 文件 hash。
@@ -62,59 +62,53 @@
 
 ## 快速开始
 
+以下命令均从仓库根目录执行。WSL 用于开发和 CPU 验证；训练、正式评测与
+CUDA/Triton profiling 放在 AutoDL 执行。
+
 ### 安装
 
 ```bash
-# WSL / 本地开发
-pip install -e ".[dev]"
+# WSL：核心依赖与测试工具
+python3 -m pip install -e '.[dev]'
 
-# AutoDL 训练、CUDA kernel 测试与 profiling
-pip install -e ".[cuda,dev]"
+# AutoDL：增加 Triton 与 ImageNet64 parquet 预处理依赖
+python3 -m pip install -e '.[cuda,dev,imagenet-prep]'
 
-# Demo 与 ImageNet64 预处理工具
-pip install -e ".[demo,imagenet-prep]"
+# 需要运行 Demo 时再安装
+python3 -m pip install -e '.[demo]'
 ```
 
-### 本地验证
+### 验证
 
 ```bash
-python3 -m pytest -m cpu -q
-python3 scripts/verify_lossless.py --self_test
-python3 -m compileall -q scripts demo src/mdlic
+# WSL：CUDA 用例会自动 skip，其余测试全部执行
+python3 -m pytest -q
+python3 -O scripts/verify_lossless.py --self_test
+python3 -m compileall -q src scripts demo tests
 git diff --check
 ```
 
-CUDA 相关测试只在 AutoDL 上跑：
+AutoDL 上再执行 CUDA 用例和 profiling：
 
 ```bash
 python3 -m pytest -m cuda -q
 python3 scripts/profile_kernels.py --roofline
 ```
 
-### CIFAR-10 v2 评测
+### 正式评测
 
 ```bash
-# 历史实验（diagnostic protocol）：probability-mixture ensemble + TTA hflip（非正式主表）
-python3 scripts/evaluate.py --config configs/ccigpt_cifar10_s_rgb_ronly_v2.yaml \
-    --ensemble experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/best.pth,\
-experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/swa.pth,\
-experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/ema.pth \
-    --tta_hflip
-
-# WSL：只检查将要在 AutoDL 执行的命令，不加载 checkpoint
-python3 scripts/run_formal_evaluations.py --dry_run
+# WSL：预览命令，不加载 checkpoint 或数据
+python3 scripts/run_formal_evaluations.py cifar10 \
+    --verify_cifar_images 2 --dry_run
+python3 scripts/run_formal_evaluations.py imagenet64 \
+    --nproc_per_node 4 --dry_run
 
 # AutoDL：用已有 best.pth 重评 CIFAR-10；不需要重训
-# --verify_cifar_images 2 先生成真实 arithmetic roundtrip 子集证明，再附到正式结果
 python3 scripts/run_formal_evaluations.py cifar10 --verify_cifar_images 2
 
-# AutoDL：ImageNet64 full-set teacher-forced 正式评测；按机器调整进程数
+# AutoDL：ImageNet64 full-set teacher-forced；按可用 GPU 数调整 4
 python3 scripts/run_formal_evaluations.py imagenet64 --nproc_per_node 4
-
-# per-image bpd 统计与导出
-python3 scripts/evaluate.py --config configs/ccigpt_cifar10_s_rgb_ronly_v2.yaml \
-    --checkpoint experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/best.pth \
-    --per_image_stats --per_image_json experiments/per_image_bpd.json
 ```
 
 正式结果写入 `results/formal/<dataset>/teacher_forced.json`。schema v5 把三件事分开记录：
@@ -126,6 +120,16 @@ python3 scripts/evaluate.py --config configs/ccigpt_cifar10_s_rgb_ronly_v2.yaml 
 manifest 的 `evaluation_execution` 另存 DDP world size、collective backend、无 padding stride 分片、每 rank batch size 与 DataLoader worker 数；多卡启动信息不会因 worker 进程只看到 `evaluate.py` 参数而丢失。
 
 ImageNet64 的逐 token roundtrip 在无 KV-cache 下非常昂贵，可先只生成 full-set teacher-forced manifest；没有实际运行就保持 `sequential_roundtrip.status=not_run`，不能补写或推断该证明。生成产物说明见 [`results/formal/README.md`](results/formal/README.md)。
+
+历史 `2.8296` 诊断协议只在需要复核时运行：
+
+```bash
+CIFAR_RUN=experiments/ccigpt_cifar10_s_rgb_ronly_v2
+python3 scripts/evaluate.py \
+    --config configs/ccigpt_cifar10_s_rgb_ronly_v2.yaml \
+    --ensemble "$CIFAR_RUN/checkpoints/best.pth,$CIFAR_RUN/checkpoints/swa.pth,$CIFAR_RUN/checkpoints/ema.pth" \
+    --tta_hflip --per_image_stats
+```
 
 ### Linear Probe
 
@@ -148,26 +152,19 @@ python3 scripts/linear_probe.py \
 ### 补全与无损验证
 
 ```bash
-# 无需 GPU 的 arithmetic coder 预检
-python3 scripts/verify_lossless.py --self_test
-
 # 图像补全
 python3 scripts/complete_image.py --config configs/ccigpt_cifar10_s_rgb_ronly_v2.yaml \
     --checkpoint experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/best.pth \
     --num_images 4 --keep_frac 0.5 --temperature 1.0 --top_k 100 \
     --out experiments/completion_grid.png
 
-# 真实可解性 roundtrip，并写出可附加的证明 manifest
+# 单独调试 codec：执行真实 roundtrip，并检查生成的 MDLC v2 容器
 python3 scripts/verify_lossless.py --config configs/ccigpt_cifar10_s_rgb_ronly_v2.yaml \
     --checkpoint experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/best.pth \
-    --num_images 2 --dump_dir results/formal/cifar10/bitstreams \
+    --num_images 1 --dump_dir results/formal/cifar10/bitstreams \
     --result_json results/formal/cifar10/sequential_roundtrip.json
-
-# 落盘模型绑定的 MDLC v2，再只读检查结构/identity/完整性
-python3 scripts/verify_lossless.py --config configs/ccigpt_cifar10_s_rgb_ronly_v2.yaml \
-    --checkpoint experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/best.pth \
-    --num_images 2 --dump_dir experiments/bitstreams
-python3 scripts/verify_lossless.py --inspect experiments/bitstreams/img0.bin
+python3 scripts/verify_lossless.py \
+    --inspect results/formal/cifar10/bitstreams/img0.bin
 ```
 
 MDLC v2 使用 32B fixed header、canonical JSON metadata、coarse/fine payload
@@ -180,46 +177,52 @@ capability、TF32/SDP/determinism 等数值 runtime，并保存预处理后 RGB 
 
 ### ImageNet64
 
+以下两条预处理路径二选一，输出都会包含实际 shape、文件 hash 与工具版本的
+`dataset_manifest.json`：
+
 ```bash
-# PNG 或 parquet 预处理完成后会生成 dataset_manifest.json（实际 shape/hash/tool versions）
+# 已有 64×64 PNG
 python3 scripts/prepare_imagenet64_png.py \
     --train_dir experiments/train_64x64 --val_dir experiments/valid_64x64 \
     --out_dir /root/autodl-tmp/imagenet64_png --workers 16
 
-# 磁盘受限的 shard 流程；只有 durable state 提交后才删除 parquet
+# 原始 parquet shard；默认保留已处理文件，便于审计和恢复
 python3 scripts/prepare_imagenet64_streaming.py \
-    --raw_dir datasets/imagenet64_hf/raw --out_dir datasets/imagenet64_hf \
-    --train_count 1281149 --val_count 49999 --delete_processed
+    --raw_dir datasets/imagenet64_hf/raw \
+    --out_dir /root/autodl-tmp/imagenet64_png
 
 # 传统 codec baseline（PNG/WebP lossless bpd，默认抽样 2000 张）
-python3 scripts/traditional_codec_bpd.py /root/autodl-tmp/imagenet64_png/val.npy --limit 2000
-
-# 训练（AutoDL；按机器 GPU 数调整 --nproc_per_node）
-NCCL_P2P_DISABLE=1 NCCL_IB_DISABLE=1 \
-nohup torchrun --nproc_per_node=<num_gpus> scripts/train.py \
-    --config configs/ccigpt_imagenet64_v1.yaml --export_csv \
-  > experiments/ccigpt_imagenet64_v1_train.log 2>&1 &
-
-# 查看进度
-tail -f experiments/ccigpt_imagenet64_v1_train.log
-
-# 精确续训：只接受当前代码生成的完整 training-state；config/seed/world_size 必须一致
-NCCL_P2P_DISABLE=1 NCCL_IB_DISABLE=1 \
-torchrun --nproc_per_node=<num_gpus> scripts/train.py \
-    --config configs/ccigpt_imagenet64_v1.yaml --export_csv \
-    --resume experiments/ccigpt_imagenet64_v1/checkpoints/epoch_<N>.pth
-
-# 权重初始化/迁移：裸 best.pth、旧 checkpoint 或修改过配置时使用；从 epoch 1 新开优化状态
-torchrun --nproc_per_node=<num_gpus> scripts/train.py \
-    --config configs/<new_experiment>.yaml \
-    --init_from experiments/<source>/checkpoints/best.pth
+python3 scripts/traditional_codec_bpd.py \
+    /root/autodl-tmp/imagenet64_png/val.npy --limit 2000
 ```
 
-`--resume` 与 `--init_from` 互斥。新 v3 `--resume` 会严格恢复模型、optimizer、scheduler、
-scaler、SWA/EMA、每个 rank 的 RNG、epoch 和 best metric，并验证执行源码、runtime 与
-train/validation 数据指纹。缺少这些 provenance 的 v2 完整训练状态只有在显式传入
-`--allow_legacy_resume` 后才能续训；裸 state dict 和跨结构初始化继续使用 `--init_from`。
-DDP 验证使用无 padding 分片，因此每个验证样本恰好统计一次。
+磁盘确实受限且已有其他原始数据副本时，可显式增加 `--delete_processed`。脚本只会在
+输出 fsync、回读验证和 state 提交完成后删除对应 shard，但该选项仍不可恢复。
+
+### 训练新实验
+
+先复制一个配置、修改 `exp_name`，再设置下面两个变量。不要用历史实验的 `exp_name`
+直接启动新训练，以免把产物写进已有目录。
+
+```bash
+cp -i configs/ccigpt_imagenet64_v1.yaml configs/my_experiment.yaml
+```
+
+编辑 `configs/my_experiment.yaml`，为 `exp_name` 和实验设置赋新值。确认后再启动：
+
+```bash
+CONFIG_PATH=configs/my_experiment.yaml
+NUM_GPUS=4
+torchrun --standalone --nproc_per_node="$NUM_GPUS" scripts/train.py \
+    --config "$CONFIG_PATH" --export_csv
+```
+
+`--resume` 用于同一 config、seed、world size 下的完整 training-state 精确续训；
+`--init_from` 用于裸权重、旧 checkpoint 或修改过结构的初始化，两者互斥。`--resume`
+会恢复模型、optimizer、scheduler、scaler、SWA/EMA、每个 rank 的 RNG、epoch 与 best
+metric，并验证源码、runtime 和 train/validation 数据指纹。DDP 验证采用无 padding
+分片，每个验证样本恰好统计一次。NCCL 环境变量应按 AutoDL 实例拓扑设置，不在通用
+命令中硬编码。
 
 ### Demo 前端
 
@@ -227,14 +230,12 @@ DDP 验证使用无 padding 分片，因此每个验证样本恰好统计一次�
 模型请求固定串行，后端只缓存当前数据集的一份模型；CIFAR/ImageNet64 切换时先释放旧模型再加载新模型，避免两份权重同时常驻 GPU。
 
 ```bash
-pip install -e ".[demo]"
-
 # 本地 / WSL
 uvicorn demo.server:app --reload --port 8000
 
 # AutoDL / 公网映射：不要启用 --reload；API key 从服务环境注入
-MDLIC_DEMO_API_KEY="<random-secret>" \
-MDLIC_DEMO_RATE_LIMIT=6 \
+export MDLIC_DEMO_API_KEY="$(openssl rand -hex 32)"
+export MDLIC_DEMO_RATE_LIMIT=6
 uvicorn demo.server:app --host 0.0.0.0 --port 6006
 ```
 
@@ -242,38 +243,17 @@ uvicorn demo.server:app --host 0.0.0.0 --port 6006
 单进程内生效；只有确认反向代理会覆盖而不是追加客户端提供的
 `X-Forwarded-For` 时，才设置 `MDLIC_DEMO_TRUST_PROXY=1`。CORS 白名单不是访问控制。
 
-## AutoDL 同步与训练
+## WSL 与 AutoDL 同步
 
 本地 WSL 只做开发和 CPU 验证，训练一律在 AutoDL GPU 实例上执行。`git pull` 不会影响已经启动的 Python 训练进程；它只影响后续新启动的命令。
 
 ```bash
-# 本地：提交并推送
-git status --short
-git add -A
-git commit -m "update formal evaluation and repository cleanup"
+# WSL：完成提交后推送
 git push origin dev
 
 # AutoDL：同步代码
 cd /root/autodl-tmp/mdl-deep-image-compression
-git fetch origin
 git pull --ff-only origin dev
-```
-
-`future.md` 是项目路线文档，应正常纳入提交；`CLAUDE.md` 与本地 `plan.md` 保持 ignored。需要强制提交 `CLAUDE.md` 时：
-
-```bash
-git add -f CLAUDE.md
-```
-
-回收 checkpoint：
-
-```bash
-scp -P <port> root@<autodl-host>:/root/autodl-tmp/mdl-deep-image-compression/experiments/<exp>/checkpoints/best.pth \
-    ./experiments/<exp>/checkpoints/
-scp -P <port> root@<autodl-host>:/root/autodl-tmp/mdl-deep-image-compression/experiments/<exp>/checkpoints/swa.pth \
-    ./experiments/<exp>/checkpoints/
-scp -P <port> root@<autodl-host>:/root/autodl-tmp/mdl-deep-image-compression/experiments/<exp>/checkpoints/ema.pth \
-    ./experiments/<exp>/checkpoints/
 ```
 
 ## 架构
@@ -446,7 +426,7 @@ src/mdlic/
 ├── completion.py, model_factory.py, eval_metrics.py, masking_scheduler.py, rate.py
 ├── provenance.py, request_limits.py
 ├── ops/       6 类训练 primitive + 1 组合 pipeline + 1 反面案例
-├── data/      evaluation.py, imagenet64_npy.py (mmap-backed Dataset)
+├── data/      evaluation.py, imagenet64_npy.py (mmap-backed Dataset), manifest.py
 └── utils/     seed, bpd, clean_state_dict
 scripts/       train.py, evaluate.py, run_formal_evaluations.py, linear_probe.py,
                complete_image.py, verify_lossless.py, profile_kernels.py,
