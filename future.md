@@ -5,11 +5,11 @@
 ## 0. 2026-07-27 执行口径（优先级高于后文历史备忘）
 
 1. **当前主线不换模型、不改训练损失**：CC-iGPT 继续使用 `CE_coarse + CE_fine`。这是一种双流平衡训练目标，不等同于严格按真实码长加权；本轮代码修正不要求重训，也不使现有 checkpoint 失效。
-2. **正式结果分阶段更新**：CIFAR-10 `2.8296` 与 ImageNet64 `3.4800` 都是有效的历史实验结果，但其协议是三成员 ensemble + hflip TTA，在新 evaluator 中归入 diagnostic，而不是正式单模型主表。每个 CC-iGPT v2 checkpoint 是 `82,949,441` 参数；该协议加载 best/SWA/EMA 三组权重（K=3），而不是一个 248.85M 参数架构，hflip 后每张图共 6 次 forward。ImageNet64 已用现有 `best.pth` 完成 single-checkpoint/no-TTA teacher-forced 重评：`3.4812 bpd`（49,999 张，schema v5 manifest，逐图 std 0.9040，95% bootstrap CI `[3.4734, 3.4898]`）。CIFAR-10 仍需同协议重评；两者都不需要重训。
+2. **正式结果已完成**：CIFAR-10 `2.8296` 与 ImageNet64 `3.4800` 都是有效的历史实验结果，但其协议是三成员 ensemble + hflip TTA，在新 evaluator 中归入 diagnostic，而不是正式单模型主表。每个 CC-iGPT v2 checkpoint 是 `82,949,441` 参数；该协议加载 best/SWA/EMA 三组权重（K=3），而不是一个 248.85M 参数架构，hflip 后每张图共 6 次 forward。现有 `best.pth` 已完成两个数据集的 single-checkpoint/no-TTA teacher-forced 重评：CIFAR-10 **2.8328 bpd**（10,000 张，逐图 std 0.6719，95% bootstrap CI `[2.8201, 2.8456]`），ImageNet64 **3.4812 bpd**（49,999 张，逐图 std 0.9040，95% bootstrap CI `[3.4734, 3.4898]`）。CIFAR-10 另有 2 张 `verified_on_subset` sequential roundtrip，均 pixel-exact；两者都不需要重训。
 3. **Phase E 是并行研究分支，不替换 AR 无损主线**：目标是研究 Masked Diffusion Language Model (MDLM) / grouped ARDM 的 `实际码率 vs forward calls`，不是先承诺更低 bpd 或实时加速。Phase E 需要新的训练；现有 AR checkpoint 最多用于初始化兼容权重，不能直接当作 masked model 结果。
 4. **codec-first**：在任何大规模训练前，先用 tiny CIFAR/合成图完成真实 `encode -> file -> decode` 闭环。没有固定 schedule、可解码概率因式分解、量化 CDF 协议和逐像素一致测试，就不把 masked CE/NELBO 称为压缩率。
 5. **六层指标分开报告**：训练 masked CE/NELBO、固定 schedule 的理想模型 NLL、量化 CDF NLL、算术 payload bpd、字节 padding 后的 packed payload bpd、完整文件 bpd。另报 fine/total forward calls、wall-clock、峰值显存和硬件环境。
-6. **执行环境分工**：WSL 负责代码、CPU 测试和 `run_formal_evaluations.py --dry_run`；CIFAR-10 正式重评及 ImageNet64 的额外 codec roundtrip 在持有数据与 checkpoint 的 AutoDL 上运行。ImageNet64 teacher-forced manifest 已完成；无泄漏 probe/matched controls 和 CUDA backend matrix/profiling 暂缓，未执行前保持 pending，不阻塞本轮 evaluator/manifest 修复，也不据此推进 CC-MDLM 正式训练。
+6. **执行环境分工**：WSL 负责代码、CPU 测试和 `run_formal_evaluations.py --dry_run`；两个数据集的正式评测及 codec roundtrip 在持有数据与 checkpoint 的 AutoDL 上运行。CIFAR-10/ImageNet64 teacher-forced manifest 已完成；无泄漏 probe/matched controls 和 CUDA backend matrix/profiling 暂缓，未执行前保持 pending，不阻塞本轮 evaluator/manifest 修复，也不据此推进 CC-MDLM 正式训练。
 
 ### Phase E 的最小概率协议
 
@@ -39,9 +39,10 @@ q_theta(x_fine | x_coarse)
 
 ---
 
-## 1. 当前状态（截至 2026-08-03；Phase D 完成 2026-05-27，下游任务 + 前端无损面板 2026-05-29，IN64 训练完成 2026-06-07，正式 teacher-forced 重评完成 2026-08-03）
+## 1. 当前状态（截至 2026-08-04；Phase D 完成 2026-05-27，下游任务 + 前端无损面板 2026-05-29，IN64 训练完成 2026-06-07，CIFAR/IN64 正式 teacher-forced 重评完成 2026-08-04）
 
-- **CC-iGPT v2 历史实验结果（Phase D 完成，diagnostic protocol）**：ensemble (best+SWA+EMA) + TTA hflip = **2.8296 bpd**；旧 `±0.0854` 口径不作为新逐图 std。CIFAR-10 正式单模型/no-TTA 数字仍待重评（详 §0）
+- **CC-iGPT v2 历史实验结果（Phase D 完成，diagnostic protocol）**：ensemble (best+SWA+EMA) + TTA hflip = **2.8296 bpd**；旧 `±0.0854` 口径不作为新逐图 std。CIFAR-10 正式单模型/no-TTA 数字现为 **2.8328 bpd**（详 §0）
+- **CIFAR-10 正式 teacher-forced 结果（2026-08-04）**：single `best.pth` + no TTA = **2.8328 bpd**；10,000 张，逐图 std 0.6719，95% bootstrap CI `[2.8201, 2.8456]`。同一 codec identity 的 2 张 sequential roundtrip 已 `verified_on_subset`，均 pixel-exact；子集 mean payload `2.7074 bpd`、packed payload `2.7109 bpd`、完整 file `8.0703 bpd`，不外推到全量测试集。
 - **ImageNet64 正式 teacher-forced 结果（2026-08-03）**：single `best.pth` + no TTA = **3.4812 bpd**；49,999 张，逐图 std 0.9040，95% bootstrap CI `[3.4734, 3.4898]`，manifest 见 `results/formal/imagenet64/teacher_forced.json`。sequential roundtrip 尚未执行。
 - v1 历史 TTA 诊断：CC-iGPT R-only 100ep best+TTA 2.9035；旧 std 口径仅留作日志，不进入新协议比较
 - Linear probe 历史曲线 best L19 = **79.33%**；旧脚本曾用 test 选层，需按“训练集分层 validation 选层、完整 train 重训、selected layer test、多 seeds”协议重跑后再作为正式结果
@@ -57,7 +58,7 @@ q_theta(x_fine | x_coarse)
 | A — iGPT raster-scan AR + 6 个训练 primitive + 1 组合 pipeline + 1 反面案例 | ✅ | `src/mdlic/ops/` |
 | B — CC-iGPT v1 双尺度条件式 AR (100ep, R-only) | ✅ | best+TTA 2.9035 |
 | C — Demo 前端可视化 (FastAPI + Chart.js, 7 面板，含交互式无损 codec 图像⇄.bin 真实可解性验证) | ✅ | `demo/` |
-| D — 深窄 (N=32/d=448, 200ep) + 历史 ensemble/TTA 实验 | ✅ | diagnostic protocol 下 2.8296；ImageNet64 formal teacher-forced 3.4812；CIFAR-10 正式单模型仍待重评 |
+| D — 深窄 (N=32/d=448, 200ep) + 历史 ensemble/TTA 实验 | ✅ | diagnostic protocol 下 2.8296；CIFAR-10 formal 2.8328；ImageNet64 formal 3.4812 |
 | E — Masked diffusion / grouped ARDM codec | CPU 协议地基完成，训练 gated | 先复核 tiny roundtrip，再训练 CIFAR toy |
 
 详细组件、Triton kernel 列表、架构图见 README。
@@ -190,7 +191,7 @@ coarse_tokens  [B, 64]                       ← R-only int 0-255
 
 **Lever 2 — 多 checkpoint 概率 mixture**：`scripts/evaluate.py --ensemble best,swa,ema` 先对各成员 logits 做 `log_softmax`，再用 `logsumexp - log(K)` 得到逐 token 的算术平均概率。三档是同一训练轨迹的三种平滑（best=val 最优瞬点 / EMA=指数 / SWA=均匀），各自捕获不同 loss-landscape 邻域。
 
-**历史实验日志**：in-training best ep196 = 2.8312；ensemble + TTA hflip = 2.8296。数字可作为对应旧协议的实验观测引用，但不能替代 single-checkpoint/no-TTA 正式主表；正式数字由新 evaluator 使用预训练权重重跑产生。
+**历史实验日志**：in-training best ep196 = 2.8312；ensemble + TTA hflip = 2.8296。数字可作为对应旧协议的实验观测引用，但不能替代 single-checkpoint/no-TTA 正式主表；正式 CIFAR-10 数字现为 2.8328 bpd，完整统计和 roundtrip 证据以新 evaluator manifest 为准。
 
 ---
 
@@ -240,10 +241,10 @@ MSPA / YCbCr 色彩前端 / logit soft-capping / Gaussian label smoothing / slid
 
 - **代码**：`src/mdlic/codec/arithmetic.py`（手写 32-bit WNC 算术编码器，纯 Python，`pack_bits`/`unpack_bits` 字节打包逆操作）+ `tests/test_arithmetic_codec.py` + `src/mdlic/codec/container.py` + `tests/test_mdlc_container.py` + `scripts/verify_lossless.py`（roundtrip 主脚本）
 - **关键设计**：模型无 KV-cache → decode 每步跑完整 forward（前缀真实 token + 0 后缀，causal mask 保证不泄漏）；encode/decode 都走 per-step 同一函数 → logits 逐位相同 → 保证可逆；全程 fp32；token 0 用均匀先验；双尺度先解 coarse 独立 bitstream 重建 ctx 再解 fine
-- **范围**：CIFAR v2 已做真实 roundtrip；IN64 checkpoint 已存在，但 12288-token 逐步 codec 成本很高，未完成真实文件 roundtrip，不据此宣称可用速度
+- **范围**：CIFAR v2 已完成当前 identity-v2/schema v5 manifest 的 2/2 GPU roundtrip；IN64 checkpoint 已存在，但 12288-token 逐步 codec 成本很高，未完成真实文件 roundtrip，不据此宣称可用速度
 - **实测（2026-05-30，AutoDL，865s）**：**2/2 图 bit-identical**。img0 achieved 3.0931 bpd（NLL 3.0896，overhead 0.11%）/ img1 2.3216（NLL 2.3161，overhead 0.24%）。逐图 bpd 随图像复杂度变，关键是 **overhead vs NLL 仅 0.1–0.2%**（小正数）→ 报的 bpd = 真实可逆码长，算术编码近最优
 - **bitstream 落盘（MDLC v2，2026-07-26；identity-v2 于 2026-07-27）**：新编码默认写 32B fixed header + canonical JSON metadata + coarse/fine payload + 32B SHA-256。identity 绑定 checkpoint、model config、CDF、AR schedule、实现源码 fingerprint，以及 Python/PyTorch/Triton/CUDA/设备与 backend 数值 runtime；metadata 另存预处理 RGB SHA-256，解码结束强制核对。header/metadata/payload/checksum 任一区域位翻转，或 checkpoint/config/protocol/schedule/source/runtime 不同，均会拒绝。
-- **验证边界**：历史 2/2 AutoDL 真实图 roundtrip 使用 v1 容器；当前 MDLC v2 + identity-v2 已通过 CPU tiny-model、legacy inspect 和协议破坏测试。正式 evaluator schema v5 只在 config/checkpoint、数据 fingerprint、源码和 runtime 全匹配时附加 `verify_lossless --result_json` 的子集证明；仍需在 AutoDL 重跑后才能把 GPU 实测标签迁移到当前协议。
+- **验证边界**：历史 2/2 AutoDL 真实图 roundtrip 使用 v1 容器；当前 MDLC v2 + identity-v2 已通过 CPU tiny-model、legacy inspect、协议破坏测试，并在 CIFAR-10 上完成 2/2 GPU 子集验证。正式 evaluator schema v5 只在 config/checkpoint、数据 fingerprint、源码和 runtime 全匹配时附加 `verify_lossless --result_json` 的子集证明；ImageNet64 的 GPU roundtrip 仍未执行。
 
 ### 6.4 前端下游任务面板（codec / 补全，✅ 实现 2026-05-29~31 + AutoDL 已冒烟）
 
@@ -603,7 +604,7 @@ metrics: bpp, PSNR, MS-SSIM, LPIPS, FID
 
 #### E3.3 代码改造清单
 
-> **实现状态（2026-07-27）**：CPU 协议地基已完成。现有代码包含可序列化/哈希的 `MaskSchedule.raster_chunks`、独立 `MaskedIGPT.forward_masked`、`CCMDLM` fixed-group objective、组内概率冻结的 arithmetic codec，以及 100 个合成样本和 tiny 模型的文件级 roundtrip/NLL 对账。AR schema v5 evaluator、identity-v2 roundtrip manifest 和 AutoDL 正式重评 runner 已就绪，但正式 JSON 尚未在 AutoDL 生成；无泄漏 probe 与 CUDA backend/profiling 也保持 pending。因此没有 CC-MDLM bpd/速度结论，也未启动 E3 训练。
+> **实现状态（2026-08-04）**：CPU 协议地基已完成。现有代码包含可序列化/哈希的 `MaskSchedule.raster_chunks`、独立 `MaskedIGPT.forward_masked`、`CCMDLM` fixed-group objective、组内概率冻结的 arithmetic codec，以及 100 个合成样本和 tiny 模型的文件级 roundtrip/NLL 对账。AR schema v5 evaluator、identity-v2 roundtrip manifest 和 AutoDL 正式重评 runner 已就绪；CIFAR-10/ImageNet64 teacher-forced 评测已完成，CIFAR-10 2 张 GPU sequential roundtrip 已 `verified_on_subset`，ImageNet64 roundtrip 仍未执行。无泄漏 probe 与 CUDA backend/profiling 仍保持 pending。因此没有 CC-MDLM bpd/速度结论，也未启动 E3 训练。
 
 仅在 CIFAR-10 上，按低风险顺序：
 
@@ -634,7 +635,7 @@ metrics: bpp, PSNR, MS-SSIM, LPIPS, FID
 只有 E0–E4 的真实实验通过后，论文才可以采用以下叙事：
 
 1. **从“极致压缩”到“帕累托最优”**
-    *   **旧结果**：`2.8296` 是 ensemble+TTA 诊断协议下的历史实验结果，可以按该协议引用，但不能与单模型 codec 成本混写。
+    *   **旧结果**：`2.8296` 是 ensemble+TTA 诊断协议下的历史实验结果，可以按该协议引用，但不能与单模型 codec 成本混写；当前 CIFAR-10 single/no-TTA teacher-forced 结果为 `2.8328 bpd`。
     *   **候选新叙事**：报告离散图像无损压缩的 **`完整文件 bpd / 总 forward calls / 实测延迟`** 前沿，并逐点给出真实 roundtrip。只有测得的 rate gap 和 speedup 才能进入摘要。
 2. **MDL 理论的泛化**
     *   展示显式 grouped factorization 如何把 masked prediction 转成可解码的离散 code；NELBO 与实际文件码长的差异本身也是结果。
@@ -663,7 +664,7 @@ metrics: bpp, PSNR, MS-SSIM, LPIPS, FID
 
 ### 10.1 三个可让不同方向眼前一亮的卖点
 
-1. **diffusion / 生成模型方向** → 当前可诚实表述为："已有可解码 AR 无损基线，ImageNet64 已有 3.4812 bpd 的正式 teacher-forced 单模型 manifest；下一阶段研究显式 grouped masked factorization，先验证 NELBO、schedule NLL 与实际文件 bpd 的差异，再画 rate/calls/time 前沿。" `2.8296/3.4800` 作为明确标注协议的历史 ensemble+TTA 实验结果，不冒充单模型或 MDLM 实测；`3.4812` 也不冒充实际 arithmetic file bpd。
+1. **diffusion / 生成模型方向** → 当前可诚实表述为："已有可解码 AR 无损基线，CIFAR-10 与 ImageNet64 分别有 2.8328/3.4812 bpd 的正式 teacher-forced 单模型 manifest；下一阶段研究显式 grouped masked factorization，先验证 NELBO、schedule NLL 与实际文件 bpd 的差异，再画 rate/calls/time 前沿。" `2.8296/3.4800` 作为明确标注协议的历史 ensemble+TTA 实验结果，不冒充单模型或 MDLM 实测；`2.8328/3.4812` 也不冒充实际 arithmetic file bpd。
 2. **高效系统 / 编译 / 量化方向** → “训练栈含 6 个手写 Triton kernel；RoPE→FlashAttention 是两个 kernel 的 pipeline，不冒充额外 fusion；`fused_linear_ce` 是独立反面案例。基准 harness 已修正，旧 H800 数字待重跑后再作性能结论。”
 3. **信息论 / 编码方向** → "项目名源于 MDL；当前指标是预共享模型下的条件码长。手写 WNC 算术编解码做到 **bit-exact roundtrip**，并显式计入首 token、CDF 量化、padding 与容器开销。"
 

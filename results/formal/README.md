@@ -53,3 +53,17 @@ The result uses fp32 logits and fp64 softmax, with one model member and one
 forward per image. `sequential_roundtrip.status` remains `not_run`; the score is
 therefore an ideal-model teacher-forced NLL, not a measured arithmetic payload
 or complete-file rate.
+
+The completed AutoDL CIFAR-10 run reports the following formal score:
+
+| Protocol | Samples | bpd | Per-image std | Bootstrap 95% CI |
+|---|---:|---:|---:|---:|
+| single `best.pth`, no TTA, teacher-forced | 10,000 | **2.8328** | 0.6719 | [2.8201, 2.8456] |
+
+This score uses the same fp32-logit/fp64-softmax teacher-forced protocol. The
+tracked `cifar10/sequential_roundtrip.json` reports `verified_on_subset` for
+sample indices 0 and 1: both images are pixel-exact, integrity-verified, and
+RGB-checksum-verified under the same codec identity. On this two-image subset,
+mean payload bpd is 2.7074, packed payload bpd is 2.7109, and complete-file bpd
+is 8.0703. These payload/file rates are subset measurements, not the full-set
+teacher-forced score.

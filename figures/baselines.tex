@@ -9,6 +9,8 @@
 %   Sparse Transformer  59M   2.80    Child et al., 2019 (128 层 strided)
 %   CC-iGPT v2 (historical experiment; diagnostic protocol) 82.95M/member (K=3) 2.8296
 %     R-only ensemble (best+SWA+EMA) + TTA hflip, 6 forwards/image；非正式单模型主表
+%   CC-iGPT v2 (formal protocol) 82.95M 2.8328
+%     single best.pth + no TTA + teacher-forced；10,000 张
 \documentclass[tikz,border=8pt]{standalone}
 \usepackage{tikz}
 \usepackage{pgfplots}
@@ -26,10 +28,9 @@
     ytick={2.70,2.75,2.80,2.82,2.85,2.90,2.95},
     ylabel={\textbf{bits/dim}\ },
     ylabel near ticks,
-    % 修复：明确指定所有5个x轴刻度，不再依赖xtick=data
-    xtick={SparseTrans, PixelSNAIL, ImgTrans, PixelCNNpp, Ours},
-    symbolic x coords={SparseTrans, PixelSNAIL, ImgTrans, PixelCNNpp, Ours},
-    xticklabels={Sparse Trans., PixelSNAIL, Img Trans., PixelCNN++, CC-iGPT(hist.)},
+    xtick={SparseTrans, PixelSNAIL, ImgTrans, PixelCNNpp, OursHist, OursFormal},
+    symbolic x coords={SparseTrans, PixelSNAIL, ImgTrans, PixelCNNpp, OursHist, OursFormal},
+    xticklabels={Sparse Trans., PixelSNAIL, Img Trans., PixelCNN++, CC-iGPT(hist.), CC-iGPT(formal)},
     xticklabel style={font=\scriptsize, yshift=-1pt},
     yticklabel style={font=\scriptsize},
     axis line style={gray!55},
@@ -48,9 +49,14 @@
     (PixelCNNpp,  2.92)
 };
 
-% 第5个柔和橘黄色柱子（单独绘制，完全独立，不会被覆盖）
+% 历史 ensemble+TTA 诊断柱
 \addplot[draw=orange!70!black, fill=orange!30!yellow!80, bar shift=0pt] coordinates {
-    (Ours, 2.8296)
+    (OursHist, 2.8296)
+};
+
+% 正式 single-checkpoint/no-TTA teacher-forced 柱
+\addplot[draw=teal!65!black, fill=teal!24, bar shift=0pt] coordinates {
+    (OursFormal, 2.8328)
 };
 
 % --- 参考线 1：PixelSNAIL 2.85；Ours 为不同成本、diagnostic protocol 下的历史实验，不作胜负结论 ---
@@ -72,13 +78,14 @@
 \node[font=\scriptsize, align=center, yshift=4pt] at (axis cs:PixelSNAIL, 2.85) {2.85 $\approx$91M};
 \node[font=\scriptsize, align=center, yshift=4pt] at (axis cs:ImgTrans, 2.90) {2.90 $\approx$40M};
 \node[font=\scriptsize, align=center, yshift=4pt] at (axis cs:PixelCNNpp, 2.92) {2.92 $\approx$53.5M};
-\node[font=\scriptsize, align=center, orange!70!black, yshift=4pt] at (axis cs:Ours, 2.8296) {2.8296\\82.95M/member, K=3};
+\node[font=\scriptsize, align=center, orange!70!black, yshift=4pt] at (axis cs:OursHist, 2.8296) {2.8296\\82.95M/member, K=3};
+\node[font=\scriptsize, align=center, teal!65!black, yshift=4pt] at (axis cs:OursFormal, 2.8328) {2.8328\\82.95M};
 
 \end{axis}
 
 % --- 标题 ---
 \node[font=\footnotesize\bfseries, anchor=south, yshift=3pt]
-    at (current bounding box.north) {CIFAR-10 RGB-bit-exact (historical ensemble+TTA diagnostic)};
+    at (current bounding box.north) {CIFAR-10 RGB-bit-exact (formal + historical protocols)};
 
 \end{tikzpicture}
 \end{document}

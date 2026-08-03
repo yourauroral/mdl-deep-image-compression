@@ -29,7 +29,7 @@ fine 架构：N=32 层，d=448，h=7，SwiGLU FFN，RoPE base=500000，QK-Norm�
 
 | 数据集     | 设置                                   | bpd        | 位次                                                          |
 |------------|----------------------------------------|------------|---------------------------------------------------------------|
-| CIFAR-10   | ensemble(best+SWA+EMA) + TTA hflip     | 2.8296 | 三成员、6 forwards/image；正式单 checkpoint/no-TTA 结果待重评 |
+| CIFAR-10   | ensemble(best+SWA+EMA) + TTA hflip     | 2.8296 | 三成员、6 forwards/image；正式 teacher-forced 结果见下表 |
 | ImageNet64 | ensemble(best+SWA+EMA) + TTA hflip     | 3.4800 | 三成员、旧 batch-level std 作废；正式 teacher-forced 结果见下表 |
 
 **正式 evaluator 结果（schema v5 manifest）：**
@@ -37,10 +37,13 @@ fine 架构：N=32 层，d=448，h=7，SwiGLU FFN，RoPE base=500000，QK-Norm�
 | 数据集 | 设置 | bpd | 统计与边界 |
 |------------|-----------------------------------------------|------------:|--------------------------------------------------------------|
 | ImageNet64 | single `best.pth` + no TTA + teacher-forced | **3.4812** | 49,999 张；逐图 std 0.9040；bootstrap 95% CI [3.4734, 3.4898] |
+| CIFAR-10 | single `best.pth` + no TTA + teacher-forced | **2.8328** | 10,000 张；逐图 std 0.6719；bootstrap 95% CI [2.8201, 2.8456] |
 
-该分数是理想模型 teacher-forced NLL（fp32 logits/fp64 softmax），不是实际
-arithmetic payload/file bpd；同一 manifest 中的 sequential roundtrip 状态为
-`not_run`。CIFAR-10 的正式单模型结果仍待重评。
+这些分数是理想模型 teacher-forced NLL（fp32 logits/fp64 softmax），不是实际
+arithmetic payload/file bpd。ImageNet64 manifest 的 `sequential_roundtrip.status`
+为 `not_run`；CIFAR-10 manifest 已记录 `verified_on_subset` 的 2 张 sequential
+roundtrip，均 pixel-exact、完整性和 RGB checksum 校验通过。该子集证据不能把
+全量 teacher-forced 分数改称完整文件码率。
 
 **下游研究项**：线性探针、图像补全（AR inpainting）、真实无损算术编解码 roundtrip（bit-identical）。旧 probe 曲线曾使用 test 选层，只作为探索性证据；正式结果需按 validation 选层协议重跑。
 

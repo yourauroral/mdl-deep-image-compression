@@ -8,6 +8,7 @@
 %   landmark v2: ep1 train=12.07, ep10 val=3.34, ep90 val=2.879, ep170 SWA start, ep200 val=2.8322,
 %                ep196 best val=2.8312 (in-training, 无 TTA/SWA/EMA/ensemble)
 %   历史实验 v2（diagnostic protocol）：ensemble (best+SWA+EMA) + TTA hflip = 2.8296；旧 ±0.0854 口径已作废
+%   正式单模型/no-TTA teacher-forced 重评：2.8328 bpd（10,000 张）
 
 \documentclass[tikz,border=8pt]{standalone}
 \usepackage{tikz}
@@ -88,7 +89,7 @@
 % --- 副标题（实验配置） ---
 \node[font=\scriptsize, gray!50!black, anchor=north, yshift=-2pt]
     at (current bounding box.south)
-    {\textit{N=32/d=448 (82.95M) $\cdot$ warmup 5ep $\cdot$ EMA 0.9998 $\cdot$ SWA last 31 ckpts (start ep 170) $\cdot$ historical ensemble+TTA $=$ 2.8296; CIFAR-10 formal single-model result pending}};
+    {\textit{N=32/d=448 (82.95M) $\cdot$ warmup 5ep $\cdot$ EMA 0.9998 $\cdot$ SWA last 31 ckpts (start ep 170) $\cdot$ formal single/no-TTA teacher-forced $=$ 2.8328 $\cdot$ historical ensemble+TTA $=$ 2.8296}};
 
 \end{tikzpicture}
 \end{document}

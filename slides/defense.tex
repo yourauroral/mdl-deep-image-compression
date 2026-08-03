@@ -159,7 +159,7 @@ p_\theta(x) \;=\; \prod_t p_\theta(x_t \mid x_{<t}),
 \end{frame}
 
 % ============================== 3. 历史结果与正式协议 ==============================
-\begin{frame}{历史实验：CIFAR-10 diagnostic protocol}
+\begin{frame}{CIFAR-10：历史诊断与正式评测}
 \begin{center}
 \includegraphics[width=0.92\linewidth]{baseline.png}
 \end{center}
@@ -171,7 +171,11 @@ p_\theta(x) \;=\; \prod_t p_\theta(x_t \mid x_{<t}),
 (82.95\,M/member, $K=3$ checkpoints, 200 ep, ensemble + TTA hflip, 6 forwards/image)
 
 \smallskip
-{\scriptsize 该协议下的历史实验结果，不作为单模型正式主表；CIFAR-10 正式结果待 single checkpoint / no-TTA / per-image manifest 重评。}
+\textbf{正式 single checkpoint / no-TTA}: \textcolor{ours}{\textbf{2.8328}} bpd
+(10,000 张，teacher-forced，bootstrap 95\% CI [2.8201, 2.8456])
+
+\smallskip
+{\scriptsize 2.8296 仅按 ensemble+TTA 诊断协议引用；2.8328 是正式单模型 teacher-forced NLL，二者都不等同于完整 arithmetic file bpd。}
 \end{frame}
 
 % ============================== 3b. ImageNet64 第二轨道（训练 2026-06-07；正式评测 2026-08-03） ==============================
@@ -407,7 +411,7 @@ $\to$ \texttt{re-tokenize} $\to$ \texttt{fine.token\_embed} $\to$ \texttt{AR shi
 \end{columns}
 
 \medskip
-{\centering\footnotesize\color{muted}图中与文中 ensemble+TTA 数字均为 diagnostic protocol 下的历史实验结果，不进入正式单模型主表。\par}
+{\centering\footnotesize\color{muted}图中同时标出正式 single/no-TTA 结果与 ensemble+TTA 历史诊断结果；二者协议和成本不同，不混作同一主表数字。\par}
 \end{frame}
 
 % ============================== 9. Triton Kernel (图) ==============================
@@ -596,7 +600,7 @@ representation 血脉承 iGPT，density 血脉承 Sparse Transformer（纯生成
 \textbf{Codec 证据边界}
 \begin{itemize}\setlength{\itemsep}{2pt}
   \item CPU：算术 coder、MDLC v2 容器、grouped codec 与 tiny-model roundtrip 已由测试覆盖
-  \item 真实 checkpoint 的 GPU roundtrip、文件 overhead 与跨环境复现仍待重跑
+  \item CIFAR-10 当前 identity-v2 manifest 已完成 2/2 GPU roundtrip；ImageNet64 仍待执行
   \item 历史 ensemble/TTA NLL 不是当前 codec 的文件码长
 \end{itemize}
 
@@ -604,7 +608,7 @@ representation 血脉承 iGPT，density 血脉承 Sparse Transformer（纯生成
 \textbf{结果}
 \begin{itemize}\setlength{\itemsep}{2pt}
   \item 当前可确认：CPU 单测覆盖的符号流与 tiny model 可 bit-identical roundtrip
-  \item 历史 2/2 图和 0.1--0.2\% overhead 尚无当前 schema v2 manifest，\alert{不作为正式结果}
+  \item CIFAR-10 当前 schema v5 附件验证 2/2 图 pixel-exact，并记录 payload / packed / file overhead
   \item {\scriptsize 正式回填需记录 checkpoint/config/CDF/runtime hash，并同时报告 payload bpd 与 file bpd。}
 \end{itemize}
 \end{column}
@@ -628,7 +632,7 @@ representation 血脉承 iGPT，density 血脉承 Sparse Transformer（纯生成
 
 \smallskip
 \textbf{3 分析} —— RGB-bit-exact 评估与 codec 对账 \\
-{\scriptsize 2.8296 / 3.4800 为三成员 ensemble+TTA 诊断协议下的历史实验结果；ImageNet64 正式 teacher-forced 单模型结果为 3.4812 bpd；CIFAR-10 正式主表、probe 与 GPU profiling 仍待按新协议回填。}
+{\scriptsize 2.8296 / 3.4800 为三成员 ensemble+TTA 诊断协议下的历史实验结果；CIFAR-10 / ImageNet64 正式 teacher-forced 单模型结果分别为 2.8328 / 3.4812 bpd；probe 与 GPU profiling 仍待按新协议回填。}
 \end{column}
 \begin{column}{0.50\textwidth}
 \small

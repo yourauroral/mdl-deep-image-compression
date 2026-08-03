@@ -20,6 +20,7 @@ def _method_label(name: str) -> str:
         "Sparse Transformer": "Sparse\nTransformer",
         "Image Transformer": "Image\nTransformer",
         "CC-iGPT R-only v2 (Ours)": "CC-iGPT v2\n(hist. ens.+TTA)",
+        "CC-iGPT R-only v2 formal (Ours)": "CC-iGPT v2\n(formal)",
     }
     return replacements.get(name, name.replace(" (Ours)", ""))
 
@@ -36,6 +37,7 @@ def render_cifar_baselines() -> None:
     labels = [_method_label(method["name"]) for method in methods]
     values = [method["bpd"] for method in methods]
     colors = [
+        "#2a9d8f" if method.get("primary") else
         "#f2b134" if "(Ours)" in method["name"] else "#b9c0e8"
         for method in methods
     ]
@@ -52,7 +54,7 @@ def render_cifar_baselines() -> None:
         params = method.get("params", "not reported")
         bpd = (
             f'{method["bpd"]:.4f}'
-            if method["name"] == "CC-iGPT R-only v2 (Ours)"
+            if "CC-iGPT" in method["name"]
             else f'{method["bpd"]:.2f}'
         )
         axis.text(
@@ -67,8 +69,8 @@ def render_cifar_baselines() -> None:
     fig.text(
         0.5,
         0.02,
-        "CC-iGPT 2.8296 is a historical 3-checkpoint probability mixture + hflip "
-        "(6 forwards/image), not the pending formal single-model result.",
+        "Formal single-checkpoint/no-TTA result: 2.8328 bpd; historical 2.8296 is a "
+        "3-checkpoint probability mixture + hflip diagnostic (6 forwards/image).",
         ha="center",
         fontsize=9,
         color="#9a5d00",
@@ -136,7 +138,7 @@ def render_cifar_training_curve() -> None:
     fig.text(
         0.5,
         0.015,
-        "In-training metrics only. CIFAR-10 formal single-checkpoint/no-TTA evaluation is pending; "
+        "In-training metrics only. CIFAR-10 formal single-checkpoint/no-TTA result is 2.8328 bpd; "
         "the historical ensemble+TTA diagnostic is not plotted as a training metric.",
         ha="center",
         fontsize=9,
