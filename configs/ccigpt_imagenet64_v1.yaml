@@ -22,7 +22,8 @@ exp_name: "ccigpt_imagenet64_v1"
 # 架构：fine N=32/d=448/h=7 (d_k=64), coarse 4.81M (256d×6L) — 与 v2 完全一致
 #       (控制变量：纯换数据集；如 OOM 再考虑降 N/d 或 sparse-attn)
 #
-# 历史目标：bpd_total < 3.44；正式比较按单模型重评并记录实际数据文件 SHA-256。
+# 历史目标：bpd_total < 3.44；正式 single-checkpoint/no-TTA teacher-forced
+# 重评为 3.4812 bpd（49,999 张，schema v5 manifest）；sequential roundtrip 未执行。
 #
 # 风险：seq_len=12288 在 fp32 attention 下 batch=12 仍可能 OOM；
 #       fallback: (a) batch 6 + accum 24 (b) activation_checkpointing 已开

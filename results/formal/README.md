@@ -13,10 +13,10 @@ python3 scripts/run_formal_evaluations.py --dry_run
 python3 scripts/run_formal_evaluations.py cifar10 \
     --verify_cifar_images 2
 
-# ImageNet64: full formal score on four GPUs. Sequential verification is optional
+# ImageNet64: full formal score on one H800. Sequential verification is optional
 # because the 12,288-token no-KV-cache codec is extremely expensive.
 python3 scripts/run_formal_evaluations.py imagenet64 \
-    --nproc_per_node 4
+    --nproc_per_node 1 --imagenet64_batch_size 2
 ```
 
 These commands reuse the existing pretrained `best.pth` files; they do not
@@ -42,3 +42,14 @@ because a file is present in the output directory; reuse requires the explicit
 `--cifar_verification_json` or `--imagenet64_verification_json` option.
 Generated `.bin` payloads are intentionally ignored because the JSON records
 their checksums and rate accounting.
+
+The committed ImageNet64 manifest currently reports:
+
+| Protocol | Samples | bpd | Per-image std | Bootstrap 95% CI |
+|---|---:|---:|---:|---:|
+| single `best.pth`, no TTA, teacher-forced | 49,999 | **3.4812** | 0.9040 | [3.4734, 3.4898] |
+
+The result uses fp32 logits and fp64 softmax, with one model member and one
+forward per image. `sequential_roundtrip.status` remains `not_run`; the score is
+therefore an ideal-model teacher-forced NLL, not a measured arithmetic payload
+or complete-file rate.

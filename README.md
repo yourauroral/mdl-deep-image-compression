@@ -8,7 +8,7 @@
 - **Phase B (历史实验完成)**: CC-iGPT（Coarse-Conditioned iGPT）双尺度条件自回归 — 浅层 coarse iGPT (R-only 配置 8×8×1, 64 token) 独立编码进 bitstream，UP + 量化后通过 additive embedding（可学习标量 α）注入 fine iGPT (32×32×3, 3072 token)。v1 的 **2.9035 bpd** 是 TTA 诊断协议下的历史实验结果，已被 v2 架构替代
 - **Phase C (完成)**: Demo 前端可视化系统 (FastAPI + Chart.js, 7 个展示面板，含交互式无损 codec 图像⇄.bin 真实可解性验证 + 图像补全 AR inpainting 实时面板)
 - **Phase D (历史实验完成, 2026-05-27)**: fine N=24/d=512 → N=32/d=448；每个 checkpoint 对应同一套 `82,949,441` 参数架构，训练 200 epoch 后产出 best/SWA/EMA 三组权重。`2.8296` 是三成员 probability-mixture ensemble + hflip TTA 协议下的历史实验结果：评测时加载 3 个 checkpoint，并对每张图执行 6 次 forward；在新 evaluator 中归类为诊断协议，旧 `±0.0854` 统计口径已作废
-- **ImageNet64 benchmark (历史实验完成, 2026-06-07)**: `3.4800 bpd` 同样是三成员 ensemble + hflip TTA 协议下的历史实验结果，旧 `±0.1161` 是 batch-level std。正式结论待使用单 checkpoint、no-TTA、逐图 evaluator 和 manifest 重评；当前 `.npy` 的实际样本数与 SHA-256 直接进入 manifest
+- **ImageNet64 benchmark (正式 teacher-forced 评测完成, 2026-08-03)**: 历史 `3.4800 bpd` 仍是三成员 ensemble + hflip TTA 诊断结果；现有 `best.pth` 的单 checkpoint、no-TTA 正式结果为 **3.4812 bpd**（49,999 张，逐图 std `0.9040`，bootstrap 95% CI `[3.4734, 3.4898]`）。schema v5 manifest 记录实际 `.npy` 样本数、数据文件 SHA-256 和运行环境；sequential roundtrip 尚未执行
 
 ## 当前进度
 
@@ -18,7 +18,7 @@
 | Linear probe | 待重跑 | 旧 `79.33%/73.19%` 曲线曾用 test 选层；新脚本改为 validation 选层、多 classifier seeds、完整 train 重训、最终单层 test |
 | Demo 前端 | 完成 | 7 面板；保留 upload / metrics / probe / kernels / scales / completion / codec |
 | 辅助实验 | CLI 已收敛 | 保留 `linear_probe.py`、`complete_image.py`、`verify_lossless.py`；直接调用脚本，不再维护批量包装层 |
-| ImageNet64 正式主表 | 待重评 | ensemble+TTA 历史实验结果为 **3.4800 bpd**（诊断协议）；新评测记录当前数据文件 SHA-256 |
+| ImageNet64 正式主表 | 已重评（teacher-forced） | 单 `best.pth`、no-TTA：**3.4812 bpd**；49,999 张，95% bootstrap CI `[3.4734, 3.4898]`；真实 sequential roundtrip 仍 pending |
 | CC-MDLM 研究线 | 协议地基完成 | deterministic `MaskSchedule`、独立双向 `forward_masked`、group-frozen arithmetic codec 与 tiny CPU roundtrip；尚未训练、无 bpd 结论 |
 | 表征理论 | 文档完成 | [theory.md](theory.md)：linear probe 为何有效（MDL + LRH + MDL probing 三段论），含阅读清单与实验菜单 |
 | 本地验证 | 通过 | 当前工作树：`pytest -q` 186 passed, 8 CUDA tests skipped；`compileall`、coder self-test 与 `git diff --check` 通过；CUDA/Triton 待 GPU 环境验证 |
@@ -40,7 +40,7 @@
 
 > **传统 codec 复核（2026-07-26）**：CIFAR-10 test 10,000 张、分母 `32×32×3`。Pillow 12.2.0 / zlib 1.3 下 PNG `optimize=True` 为 `5.866397656 bpd`；Pillow 12.2.0 / libwebp 1.6.0 下 WebP `lossless=True` 为 `4.606462500 bpd`。两者解码后均为 0 张像素不一致；完整协议与数据哈希见 [`demo/data/traditional_codecs.json`](demo/data/traditional_codecs.json)。
 
-`82.95M` 是一个 checkpoint 内去除 tied embedding/head 重复引用后的可训练参数量。best/SWA/EMA 是同一架构、同一训练轨迹导出的三组权重，不应表述成一个“248.85M 参数模型”；但复现 `2.8296` 时仍需加载三个完整 checkpoint，并执行 3 members × 2 flips = 6 次 forward。该结果可以引用，但必须连同 probability-mixture ensemble + hflip TTA 协议一起引用。它不是单模型结果，也不是当前 MDLC codec 的实际文件码率。正式比较等待用现有预训练 best checkpoint 做 single-checkpoint/no-TTA 重评，不需要重新训练。
+`82.95M` 是一个 checkpoint 内去除 tied embedding/head 重复引用后的可训练参数量。best/SWA/EMA 是同一架构、同一训练轨迹导出的三组权重，不应表述成一个“248.85M 参数模型”；但复现 `2.8296` 时仍需加载三个完整 checkpoint，并执行 3 members × 2 flips = 6 次 forward。该结果可以引用，但必须连同 probability-mixture ensemble + hflip TTA 协议一起引用。它不是单模型结果，也不是当前 MDLC codec 的实际文件码率。CIFAR-10 正式比较仍等待用现有预训练 best checkpoint 做 single-checkpoint/no-TTA 重评，不需要重新训练；ImageNet64 正式结果已见下表。
 
 ### ImageNet 64×64 对比
 
@@ -50,9 +50,9 @@
 | SPN (Subscale Pixel Network) | Autoregressive | — | 3.52 | RGB-bit-exact | Menick & Kalchbrenner, ICLR 2019 |
 | Sparse Transformer | Autoregressive | 152M | 3.44 | RGB-bit-exact | Child et al., 2019 (strided sparse attention) |
 | CC-iGPT (Ours, historical experiment; diagnostic protocol) | Autoregressive ensemble | 82.95M/member (K=3) | 3.4800 | RGB-bit-exact | best/SWA/EMA + hflip TTA；6 forwards/image；旧 batch-level std 作废 |
-| **CC-iGPT (Ours, formal protocol)** | Autoregressive | 82.95M | **待重评** | RGB-bit-exact | 单 checkpoint、no-TTA、逐图统计与数据文件 manifest |
+| **CC-iGPT (Ours, formal protocol)** | Autoregressive | 82.95M | **3.4812** | RGB-bit-exact | 单 `best.pth`、no-TTA、49,999 张；schema v5 manifest；teacher-forced ideal-model NLL |
 
-历史 `3.4800` 是该 ensemble+TTA 配置的实验结果；它对应诊断 NLL，不等于单模型结果或实际 bitstream bpd。正式比较等待用预训练 best checkpoint 重评，并随结果保存实际 ImageNet64 文件 hash。
+历史 `3.4800` 是该 ensemble+TTA 配置的诊断 NLL，不等于单模型结果或实际 bitstream bpd。正式单模型 teacher-forced 结果现为 `3.4812 bpd`，完整 manifest 见 [`results/formal/imagenet64/teacher_forced.json`](results/formal/imagenet64/teacher_forced.json)。该 manifest 的 `sequential_roundtrip.status` 为 `not_run`，因此不能把 `3.4812` 表述为已实测 arithmetic payload/file bpd。
 
 ### 创新点定位
 
@@ -107,8 +107,9 @@ python3 scripts/run_formal_evaluations.py imagenet64 \
 # AutoDL：用已有 best.pth 重评 CIFAR-10；不需要重训
 python3 scripts/run_formal_evaluations.py cifar10 --verify_cifar_images 2
 
-# AutoDL：ImageNet64 full-set teacher-forced；按可用 GPU 数调整 4
-python3 scripts/run_formal_evaluations.py imagenet64 --nproc_per_node 4
+# AutoDL：ImageNet64 full-set teacher-forced；单 H800 示例
+python3 scripts/run_formal_evaluations.py imagenet64 \
+    --nproc_per_node 1 --imagenet64_batch_size 2
 ```
 
 正式结果写入 `results/formal/<dataset>/teacher_forced.json`。schema v5 把三件事分开记录：
@@ -435,7 +436,7 @@ scripts/       train.py, evaluate.py, run_formal_evaluations.py, linear_probe.py
 configs/       igpt_cifar10_s_rgb,
                ccigpt_cifar10_s_rgb_ronly      (R-only v1 历史实验/diagnostic protocol, 100ep, 已被 v2 替代),
                ccigpt_cifar10_s_rgb_ronly_v2   (深窄 N=32/d=448 + 200ep；正式单模型结果待重评),
-               ccigpt_imagenet64_v1            (ImageNet64 12ep；正式单模型结果待重评并记录数据 hash)
+               ccigpt_imagenet64_v1            (ImageNet64 12ep；formal 3.4812 bpd，roundtrip pending)
 tests/         单元测试（含 test_ccigpt_smoke / test_arithmetic_codec）
 demo/
 ├── server.py          FastAPI 后端 (predict / encode / inspect / decode / complete / metrics / probe / kernels / scales)

@@ -171,11 +171,11 @@ p_\theta(x) \;=\; \prod_t p_\theta(x_t \mid x_{<t}),
 (82.95\,M/member, $K=3$ checkpoints, 200 ep, ensemble + TTA hflip, 6 forwards/image)
 
 \smallskip
-{\scriptsize 该协议下的历史实验结果，不作为单模型正式主表；正式结果待 single checkpoint / no-TTA / per-image manifest 重评。}
+{\scriptsize 该协议下的历史实验结果，不作为单模型正式主表；CIFAR-10 正式结果待 single checkpoint / no-TTA / per-image manifest 重评。}
 \end{frame}
 
-% ============================== 3b. ImageNet64 第二轨道（完成 2026-06-07） ==============================
-\begin{frame}{第二轨道：ImageNet 64$\times$64（历史实验，diagnostic protocol）}
+% ============================== 3b. ImageNet64 第二轨道（训练 2026-06-07；正式评测 2026-08-03） ==============================
+\begin{frame}{第二轨道：ImageNet 64$\times$64（历史 + 正式评测）}
 \centering
 \begin{tabular}{lcc}
 \toprule
@@ -186,12 +186,12 @@ SPN & -- & 3.52 \\
 Gated PixelCNN & -- & 3.57 \\
 PixelRNN & -- & 3.63 \\
 \textcolor{ours}{CC-iGPT 历史 ensemble+TTA} & 82.95M/member ($K=3$) & \textcolor{ours}{3.4800} \\
-\textbf{CC-iGPT 正式单模型} & 82.95M & \textbf{待重评} \\
+\textbf{CC-iGPT 正式单模型} & 82.95M & \textbf{3.4812} \\
 \bottomrule
 \end{tabular}
 
 \medskip
-{\small 3.4800 只描述三成员、6-forward/image 历史配置；正式比较需单模型重评并记录实际数据 hash。}
+{\small 3.4800 只描述三成员、6-forward/image 历史配置；3.4812 是 49,999 张上的 single best/no-TTA teacher-forced 结果，schema v5 manifest 已记录数据 hash；sequential roundtrip 未执行。}
 \end{frame}
 
 % ============================== 4. 模型架构总览（图） ==============================
@@ -401,7 +401,7 @@ $\to$ \texttt{re-tokenize} $\to$ \texttt{fine.token\_embed} $\to$ \texttt{AR shi
   \item val: 3.6624 $\to$ 3.4810
   \item train: 4.3969 $\to$ 3.4124
   \item best / EMA / SWA 末点接近
-  \item 正式 single/no-TTA 待重评
+  \item 正式 single/no-TTA teacher-forced = 3.4812 bpd
 \end{itemize}
 \end{column}
 \end{columns}
@@ -628,7 +628,7 @@ representation 血脉承 iGPT，density 血脉承 Sparse Transformer（纯生成
 
 \smallskip
 \textbf{3 分析} —— RGB-bit-exact 评估与 codec 对账 \\
-{\scriptsize 2.8296 / 3.4800 为三成员 ensemble+TTA 诊断协议下的历史实验结果；正式单模型主表、probe 与 GPU profiling 待按新协议回填。}
+{\scriptsize 2.8296 / 3.4800 为三成员 ensemble+TTA 诊断协议下的历史实验结果；ImageNet64 正式 teacher-forced 单模型结果为 3.4812 bpd；CIFAR-10 正式主表、probe 与 GPU profiling 仍待按新协议回填。}
 \end{column}
 \begin{column}{0.50\textwidth}
 \small

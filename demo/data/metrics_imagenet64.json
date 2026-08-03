@@ -5,6 +5,6 @@
     {"name": "SPN (Subscale)",      "category": "Autoregressive density models", "params": "—",          "bpd": 3.52,   "std": null, "note": "Menick & Kalchbrenner, ICLR 2019；coarse-to-fine 最近邻"},
     {"name": "Sparse Transformer",  "category": "Autoregressive density models", "params": "152M",       "bpd": 3.44,   "std": null, "note": "Child 2019；strided sparse attention，参数量为原论文自报"},
     {"name": "CC-iGPT R-only (Ours)", "category": "Autoregressive density models", "params": "82.95M/member (K=3)", "bpd": 3.4800, "std": null, "primary": false, "note": "历史实验结果（diagnostic protocol）：best+SWA+EMA 三成员 probability mixture + hflip TTA；旧 batch-level std 已作废"},
-    {"name": "CC-iGPT R-only formal (Ours)", "category": "Autoregressive density models", "params": "82.95M", "bpd": null, "std": null, "primary": false, "note": "待按单 checkpoint、no-TTA、新逐图 evaluator 和 manifest 重评；数据协议仍需核对"}
+    {"name": "CC-iGPT R-only formal (Ours)", "category": "Autoregressive density models", "params": "82.95M", "bpd": 3.4812, "std": 0.9039588571, "primary": true, "note": "正式 teacher-forced 结果：single best.pth + no TTA；49,999 张；逐图 std 0.9040；95% bootstrap CI [3.4734, 3.4898]；schema v5 manifest；sequential roundtrip 未执行"}
   ]
 }

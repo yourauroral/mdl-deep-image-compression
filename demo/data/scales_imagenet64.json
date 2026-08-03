@@ -2,14 +2,17 @@
   "model": "CC-iGPT (R-only) ImageNet64 v1",
   "image_size": 64,
   "scales": [
-    {"scale": "Coarse (R-only)", "resolution": "16x16x1",   "tokens": 256,   "role": "灰度先验，独立编码进 bitstream",                                       "ce_nats": 3.8960, "bpd_share": 0.1173, "share_pct": 3.4},
-    {"scale": "Fine",            "resolution": "64x64x3", "tokens": 12288, "role": "条件 fine NTP（注入 α·coarse_ctx）+ pixel-first AR 自学 G/B 偏色", "ce_nats": 2.3310, "bpd_share": 3.3633, "share_pct": 96.6}
+    {"scale": "Coarse (R-only)", "resolution": "16x16x1",   "tokens": 256,   "role": "灰度先验，独立编码进 bitstream",                                       "ce_nats": 3.8961, "bpd_share": 0.1173, "share_pct": 3.4},
+    {"scale": "Fine",            "resolution": "64x64x3", "tokens": 12288, "role": "条件 fine NTP（注入 α·coarse_ctx）+ pixel-first AR 自学 G/B 偏色", "ce_nats": 2.3314, "bpd_share": 3.3639, "share_pct": 96.6}
   ],
   "total_tokens": 12544,
-  "bpd_total": 3.4806,
-  "derived_from_rounded_ce": true,
+  "bpd_total": 3.4812,
+  "derived_from_rounded_ce": false,
+  "protocol": "formal single-checkpoint/no-TTA teacher-forced evaluator",
+  "sample_count": 49999,
+  "bootstrap_ci95": [3.4734, 3.4898],
   "historical_reported_bpd": 3.4800,
   "historical_reported_std": 0.1161,
-  "ctx_alpha": 0.1991,
-  "note": "历史实验的诊断分解；bpd_total 按两个 8-bit 首 token + CE*(N-1) 从已四舍五入 CE 近似重算；旧 std 为 batch-level 口径，非正式单 checkpoint/no-TTA 结果。"
+  "ctx_alpha": 0.1981,
+  "note": "正式 teacher-forced 分解来自 schema v5 manifest；3.4800 与旧 0.1161 仅保留为历史 ensemble+TTA diagnostic 记录，sequential roundtrip 未执行。"
 }

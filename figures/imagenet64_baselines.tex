@@ -8,10 +8,11 @@
 %   SPN (Subscale)      3.52   Menick & Kalchbrenner, ICLR 2019 (coarse-to-fine 最近邻)
 %   Sparse Transformer  3.44   Child et al., 2019  ← 目标线
 %   CC-iGPT (historical) 3.4800 本工作，IN64 v1 12ep，ensemble(best+SWA+EMA)+TTA hflip（4卡实测 2026-06-07）
+%   CC-iGPT (formal)    3.4812 本工作，单 best.pth/no-TTA teacher-forced，49,999 张，schema v5 manifest（2026-08-03）
 %
 % 历史实验结果 3.4800（diagnostic protocol：ensemble best/SWA/EMA + TTA hflip；单 ckpt best+TTA=3.4810）。
 %   数值位于 SPN 3.52 与 Sparse Transformer 3.44 之间，但协议不同，不作正式优劣声明。
-%   旧 ±0.1161 是 batch-level std，已作废；正式结果等待单 checkpoint/no-TTA 逐图重评。
+%   正式 3.4812 仍是 ideal-model teacher-forced NLL，不是 arithmetic payload/file bpd；sequential roundtrip 未执行。
 \documentclass[tikz,border=8pt]{standalone}
 \usepackage{tikz}
 \usepackage{pgfplots}
@@ -50,9 +51,9 @@
     (PixelRNN,    3.63)
 };
 
-% 第5个橘黄柱子（Ours，历史 ensemble+TTA 3.4800）
+% 第5个橘黄柱子（Ours，正式 single checkpoint/no-TTA 3.4812）
 \addplot[draw=orange!70!black, fill=orange!30!yellow!80, bar shift=0pt] coordinates {
-    (Ours, 3.4800)
+    (Ours, 3.4812)
 };
 
 % --- 参考线 1：SPN 3.52（coarse-to-fine 最近邻）---
@@ -74,7 +75,7 @@
 \node[font=\scriptsize, align=center, yshift=4pt] at (axis cs:SPN, 3.52) {3.52};
 \node[font=\scriptsize, align=center, yshift=4pt] at (axis cs:GatedPCNN, 3.57) {3.57};
 \node[font=\scriptsize, align=center, yshift=4pt] at (axis cs:PixelRNN, 3.63) {3.63};
-\node[font=\scriptsize, align=center, orange!70!black, yshift=4pt] at (axis cs:Ours, 3.4800) {\textbf{3.48}};
+\node[font=\scriptsize, align=center, orange!70!black, yshift=4pt] at (axis cs:Ours, 3.4812) {\textbf{3.4812}};
 
 \end{axis}
 
@@ -85,7 +86,7 @@
 % --- 占位脚注 (ASCII only, pdflatex 可编译) ---
 \node[font=\scriptsize\itshape, gray!50!black, anchor=north, yshift=-2pt]
     at (current bounding box.south)
-    {Historical diagnostic: 3-member ensemble+TTA = 3.4800 bpd; formal single-model result pending};
+    {Formal single model/no-TTA teacher-forced = 3.4812 bpd; historical 3-member ensemble+TTA = 3.4800};
 
 \end{tikzpicture}
 \end{document}

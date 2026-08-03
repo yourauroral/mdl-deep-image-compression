@@ -19,7 +19,8 @@
 %
 % 末 epoch 三变体 in-training 验证（无 TTA/ensemble）：raw(best) 3.4810 / EMA0.9998 3.4807 / SWA(2ckpt) 3.4811。
 % raw-val 已趋平（ep10->11->12 -0.0022/-0.0036，cosine LR 到底），单 ckpt best+TTA=3.4810。
-% 历史 ensemble(best+SWA+EMA)+TTA hflip = 3.4800（4卡实测 2026-06-07）；协议不同，不作正式基线优劣声明。
+% 历史 ensemble(best+SWA+EMA)+TTA hflip = 3.4800（4卡实测 2026-06-07）；
+% 正式 single best/no-TTA teacher-forced = 3.4812（49,999 张，schema v5 manifest）；sequential roundtrip 未执行。
 \documentclass[tikz,border=8pt]{standalone}
 \usepackage{tikz}
 \usepackage{pgfplots}

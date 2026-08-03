@@ -203,7 +203,7 @@ async function renderMetrics(dataset) {
   };
   const colors = neural.map(colorFor);
 
-  // 副标题明确区分正式主结果与仍待新 evaluator 重跑的历史实验数字（diagnostic protocol）。
+  // 副标题区分正式单模型主结果与历史 ensemble+TTA diagnostic 数字。
   const panel = document.getElementById("panel-metrics");
   const chartCt = panel.querySelector(".chart-container");
   let desc = panel.querySelector(".panel-desc");
@@ -222,7 +222,7 @@ async function renderMetrics(dataset) {
     primary.append(value, document.createTextNode(" bits/dim"));
     desc.appendChild(primary);
   } else {
-    desc.append(document.createTextNode(" 当前 Ours 数字均为历史 ensemble+TTA 诊断结果，正式单模型结果待重评。"));
+    desc.append(document.createTextNode(" 当前数据集暂无正式单模型结果；已落地 Ours 数字均为历史 ensemble+TTA 诊断结果。"));
   }
 
   // Lollipop: 细线 + 末端粗点。横轴范围按数据自适应（留 ±0.1 余量并对齐 0.05）

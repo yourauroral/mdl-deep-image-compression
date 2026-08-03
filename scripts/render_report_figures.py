@@ -136,7 +136,7 @@ def render_cifar_training_curve() -> None:
     fig.text(
         0.5,
         0.015,
-        "In-training metrics only. Formal single-checkpoint/no-TTA evaluation is pending; "
+        "In-training metrics only. CIFAR-10 formal single-checkpoint/no-TTA evaluation is pending; "
         "the historical ensemble+TTA diagnostic is not plotted as a training metric.",
         ha="center",
         fontsize=9,
