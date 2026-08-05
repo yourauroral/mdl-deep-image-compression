@@ -44,6 +44,7 @@ q_theta(x_fine | x_coarse)
 - **CC-iGPT v2 历史实验结果（Phase D 完成，diagnostic protocol）**：ensemble (best+SWA+EMA) + TTA hflip = **2.8296 bpd**；旧 `±0.0854` 口径不作为新逐图 std。CIFAR-10 正式单模型/no-TTA 数字现为 **2.8328 bpd**（详 §0）
 - **CIFAR-10 正式 teacher-forced 结果（2026-08-04）**：single `best.pth` + no TTA = **2.8328 bpd**；10,000 张，逐图 std 0.6719，95% bootstrap CI `[2.8201, 2.8456]`。同一 codec identity 的 2 张 sequential roundtrip 已 `verified_on_subset`，均 pixel-exact；子集 mean payload `2.7074 bpd`、packed payload `2.7109 bpd`、完整 file `8.0703 bpd`，不外推到全量测试集。
 - **ImageNet64 正式 teacher-forced 结果（2026-08-03）**：single `best.pth` + no TTA = **3.4812 bpd**；49,999 张，逐图 std 0.9040，95% bootstrap CI `[3.4734, 3.4898]`，manifest 见 `results/formal/imagenet64/teacher_forced.json`。sequential roundtrip 尚未执行。
+- **ImageNet64 传统 codec 诊断（2026-08-05）**：验证集前 2,000 张 PNG = **5.718 bpd**、WebP lossless = **4.640 bpd**；这是固定前缀抽样，完整 49,999 张基线仍待 `--limit 0` 重跑后再进入正式比较。
 - v1 历史 TTA 诊断：CC-iGPT R-only 100ep best+TTA 2.9035；旧 std 口径仅留作日志，不进入新协议比较
 - Linear probe 历史曲线 best L19 = **79.33%**；旧脚本曾用 test 选层，需按“训练集分层 validation 选层、完整 train 重训、selected layer test、多 seeds”协议重跑后再作为正式结果
 - 总参数量 **82.95M**（fine 78.14M + coarse 4.81M）

@@ -55,6 +55,8 @@
 
 历史 `3.4800` 是该 ensemble+TTA 配置的诊断 NLL，不等于单模型结果或实际 bitstream bpd。正式单模型 teacher-forced 结果现为 `3.4812 bpd`，完整 manifest 见 [`results/formal/imagenet64/teacher_forced.json`](results/formal/imagenet64/teacher_forced.json)。该 manifest 的 `sequential_roundtrip.status` 为 `not_run`，因此不能把 `3.4812` 表述为已实测 arithmetic payload/file bpd。
 
+> **ImageNet64 传统 codec 诊断（2026-08-05）**：AutoDL 上验证集前 2,000 张的 PNG `optimize=True` 为 **5.718 bpd**，WebP `lossless=True` 为 **4.640 bpd**（Pillow 10.3.0 / zlib 1.2.13 / libwebp 1.3.2）。这是固定前缀抽样，不是 49,999 张正式全量基线；完整比较需执行上面的 `--limit 0`，并记录输出的运行时版本与数据 fingerprint。
+
 ### 创新点定位
 
 1. **方法 — 单标量参数的双尺度条件注入**：coarse iGPT 量化 token 经 bit-exact 反量化/上采样/重 tokenize 后，复用 `fine.token_embed` 得到 `coarse_ctx`，再以可学习标量 α 做 additive 注入。整个 ctx 通路只引入 1 个标量参数；encoder/decoder 共用同一函数，bitstream 真实可解码。历史 checkpoint 使用双流等权目标 `loss_coarse + loss_fine`；它不是严格码长加权，本轮不改变该目标。
@@ -186,7 +188,8 @@ capability、TF32/SDP/determinism 等数值 runtime，并保存预处理后 RGB 
 ```bash
 # 已有 64×64 PNG
 python3 scripts/prepare_imagenet64_png.py \
-    --train_dir experiments/train_64x64 --val_dir experiments/valid_64x64 \
+    --train_dir /root/autodl-tmp/imagenet64/train_64x64 \
+    --val_dir /root/autodl-tmp/imagenet64/valid_64x64 \
     --out_dir /root/autodl-tmp/imagenet64_png --workers 16
 
 # 原始 parquet shard；默认保留已处理文件，便于审计和恢复
@@ -194,9 +197,15 @@ python3 scripts/prepare_imagenet64_streaming.py \
     --raw_dir datasets/imagenet64_hf/raw \
     --out_dir /root/autodl-tmp/imagenet64_png
 
-# 传统 codec baseline（PNG/WebP lossless bpd，默认抽样 2000 张）
-python3 scripts/traditional_codec_bpd.py \
-    /root/autodl-tmp/imagenet64_png/val.npy --limit 2000
+# 传统 codec baseline 诊断抽样（PNG/WebP lossless bpd，前 2000 张）
+OMP_NUM_THREADS=1 python3 scripts/traditional_codec_bpd.py \
+    /root/autodl-tmp/imagenet64_png/val.npy --limit 2000 \
+    --result_json results/formal/imagenet64/traditional_codecs_val_prefix2000.json
+
+# 正式 ImageNet64 传统 codec 基线（完整 49,999 张验证集，运行较慢）
+OMP_NUM_THREADS=1 python3 scripts/traditional_codec_bpd.py \
+    /root/autodl-tmp/imagenet64_png/val.npy --limit 0 \
+    --result_json results/formal/imagenet64/traditional_codecs_val_full.json
 ```
 
 磁盘确实受限且已有其他原始数据副本时，可显式增加 `--delete_processed`。脚本只会在

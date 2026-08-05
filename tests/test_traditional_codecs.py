@@ -12,6 +12,7 @@ from mdlic.traditional_codecs import (
     get_codec_spec,
 )
 from scripts.evaluate import compute_traditional_bpd
+from scripts.traditional_codec_bpd import compute_bpd as compute_imagenet_traditional_bpd
 
 
 def test_codec_specs_pin_reported_cifar_options():
@@ -48,6 +49,28 @@ def test_compute_traditional_bpd_reports_protocol_metadata():
     assert details["std_per_image"] >= 0
     assert details["compressed_bytes_total"] > 0
     assert details["pillow_version"] == codec_metadata("png")["pillow_version"]
+
+
+def test_imagenet_traditional_manifest_records_dataset_and_rates(tmp_path):
+    path = tmp_path / "val.npy"
+    data = np.zeros((2, 64, 64, 3), dtype=np.uint8)
+    data[1, ::2, ::2, 0] = 255
+    np.save(path, data)
+
+    manifest = compute_imagenet_traditional_bpd(path, limit=None)
+
+    assert manifest["schema_version"] == 1
+    assert manifest["protocol"] == "traditional_lossless_codec_bpd"
+    assert manifest["dataset"]["sample_count"] == 2
+    assert manifest["dataset"]["total_samples"] == 2
+    assert manifest["dataset"]["file"]["sha256"]
+    assert manifest["rate_accounting"]["includes_file_headers"] is True
+    for method in ("png", "webp"):
+        result = manifest["results"][method]
+        assert result["sample_count"] == 2
+        assert result["mean_bpd"] > 0
+        assert result["std_per_image"] >= 0
+        assert result["compressed_bytes_total"] > 0
 
 
 def test_encode_rejects_non_rgb_uint8_input():
