@@ -99,6 +99,8 @@ git diff --check
 AutoDL 上再执行 CUDA 用例和 profiling：
 
 ```bash
+mkdir -p results/formal/profiling
+
 # backend matrix（已通过，可用于复核）
 OMP_NUM_THREADS=1 python3 -m pytest tests/test_backend_matrix.py -m cuda -q
 OMP_NUM_THREADS=1 python3 -m pytest -m cuda -q
