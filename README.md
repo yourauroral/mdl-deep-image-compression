@@ -10,6 +10,7 @@
 - **Phase D (历史实验完成, 2026-05-27)**: fine N=24/d=512 → N=32/d=448；每个 checkpoint 对应同一套 `82,949,441` 参数架构，训练 200 epoch 后产出 best/SWA/EMA 三组权重。`2.8296` 是三成员 probability-mixture ensemble + hflip TTA 协议下的历史实验结果：评测时加载 3 个 checkpoint，并对每张图执行 6 次 forward；在新 evaluator 中归类为诊断协议，旧 `±0.0854` 统计口径已作废
 - **CIFAR-10 formal benchmark (正式 teacher-forced 评测完成, 2026-08-04)**: 现有 `best.pth` 的单 checkpoint、no-TTA 正式结果为 **2.8328 bpd**（10,000 张，逐图 std `0.6719`，bootstrap 95% CI `[2.8201, 2.8456]`）。同一 codec identity 下的 2 张 sequential roundtrip 已 `verified_on_subset`：两张均 pixel-exact，manifest 已保存于 `results/formal/cifar10/`
 - **ImageNet64 benchmark (正式 teacher-forced 评测完成, 2026-08-03)**: 历史 `3.4800 bpd` 仍是三成员 ensemble + hflip TTA 诊断结果；现有 `best.pth` 的单 checkpoint、no-TTA 正式结果为 **3.4812 bpd**（49,999 张，逐图 std `0.9040`，bootstrap 95% CI `[3.4734, 3.4898]`）。schema v5 manifest 记录实际 `.npy` 样本数、数据文件 SHA-256 和运行环境；sequential roundtrip 尚未执行
+- **ImageNet64 传统 codec baseline (完整复核完成, 2026-08-06)**: 验证集完整 49,999 张的 PNG `optimize=True` 为 **5.7063 bpd**，WebP `lossless=True` 为 **4.6365 bpd**（均为包含文件头的 complete-file bpd）；运行时为 Pillow 10.3.0 / zlib 1.2.13 / libwebp 1.3.2，manifest 见 [`results/formal/imagenet64/traditional_codecs_val_full.json`](results/formal/imagenet64/traditional_codecs_val_full.json)
 
 ## 当前进度
 
@@ -20,9 +21,10 @@
 | Demo 前端 | 完成 | 7 面板；保留 upload / metrics / probe / kernels / scales / completion / codec |
 | 辅助实验 | CLI 已收敛 | 保留 `linear_probe.py`、`complete_image.py`、`verify_lossless.py`；直接调用脚本，不再维护批量包装层 |
 | ImageNet64 正式主表 | 已重评（teacher-forced） | 单 `best.pth`、no-TTA：**3.4812 bpd**；49,999 张，95% bootstrap CI `[3.4734, 3.4898]`；真实 sequential roundtrip 仍 pending |
+| ImageNet64 传统 codec baseline | 已完成（完整验证集） | PNG **5.7063 bpd**；WebP lossless **4.6365 bpd**；49,999 张；complete-file bpd |
 | CC-MDLM 研究线 | 协议地基完成 | deterministic `MaskSchedule`、独立双向 `forward_masked`、group-frozen arithmetic codec 与 tiny CPU roundtrip；尚未训练、无 bpd 结论 |
 | 表征理论 | 文档完成 | [theory.md](theory.md)：linear probe 为何有效（MDL + LRH + MDL probing 三段论），含阅读清单与实验菜单 |
-| 本地验证 | 通过 | 当前工作树：`pytest -q` 186 passed, 8 CUDA tests skipped；`compileall`、coder self-test 与 `git diff --check` 通过；CUDA/Triton 待 GPU 环境验证 |
+| 本地验证 | 通过 | CPU 回归、`compileall`、coder self-test 与 `git diff --check` 通过；CUDA/Triton 仍待 GPU 环境验证 |
 
 ## Baseline 对比
 
@@ -52,10 +54,12 @@
 | Sparse Transformer | Autoregressive | 152M | 3.44 | RGB-bit-exact | Child et al., 2019 (strided sparse attention) |
 | CC-iGPT (Ours, historical experiment; diagnostic protocol) | Autoregressive ensemble | 82.95M/member (K=3) | 3.4800 | RGB-bit-exact | best/SWA/EMA + hflip TTA；6 forwards/image；旧 batch-level std 作废 |
 | **CC-iGPT (Ours, formal protocol)** | Autoregressive | 82.95M | **3.4812** | RGB-bit-exact | 单 `best.pth`、no-TTA、49,999 张；schema v5 manifest；teacher-forced ideal-model NLL |
+| PNG | Classical codec | — | 5.7063 | RGB-bit-exact | 本项目 ImageNet64 val 49,999 张实测；完整文件 bpd；Pillow PNG `optimize=True` |
+| WebP (lossless) | Classical codec | — | 4.6365 | RGB-bit-exact | 本项目 ImageNet64 val 49,999 张实测；完整文件 bpd；Pillow WebP `lossless=True` |
 
 历史 `3.4800` 是该 ensemble+TTA 配置的诊断 NLL，不等于单模型结果或实际 bitstream bpd。正式单模型 teacher-forced 结果现为 `3.4812 bpd`，完整 manifest 见 [`results/formal/imagenet64/teacher_forced.json`](results/formal/imagenet64/teacher_forced.json)。该 manifest 的 `sequential_roundtrip.status` 为 `not_run`，因此不能把 `3.4812` 表述为已实测 arithmetic payload/file bpd。
 
-> **ImageNet64 传统 codec 诊断（2026-08-05）**：AutoDL 上验证集前 2,000 张的 PNG `optimize=True` 为 **5.718 bpd**，WebP `lossless=True` 为 **4.640 bpd**（Pillow 10.3.0 / zlib 1.2.13 / libwebp 1.3.2）。这是固定前缀抽样，不是 49,999 张正式全量基线；完整比较需执行上面的 `--limit 0`，并记录输出的运行时版本与数据 fingerprint。
+> **ImageNet64 传统 codec baseline（2026-08-06）**：AutoDL 上验证集完整 49,999 张的 PNG `optimize=True` 为 **5.7063 bpd**，WebP `lossless=True` 为 **4.6365 bpd**（Pillow 10.3.0 / zlib 1.2.13 / libwebp 1.3.2）。指标分母为 `64×64×3`，包含 PNG/WebP 文件头；完整 manifest 见 [`results/formal/imagenet64/traditional_codecs_val_full.json`](results/formal/imagenet64/traditional_codecs_val_full.json)。此前 2,000 张前缀诊断值 PNG `5.718` / WebP `4.640` 仍保留作抽样记录。传统 codec 的 complete-file bpd 与 CC-iGPT 的 teacher-forced ideal-model NLL 分属不同码率口径，不能将 `3.4812` 表述为已实测 arithmetic payload/file bpd。
 
 ### 创新点定位
 

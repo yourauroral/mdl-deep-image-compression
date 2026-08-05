@@ -31,7 +31,7 @@ Expected tracked files:
 - `cifar10/sequential_roundtrip.json` when calibration was run
 - `imagenet64/teacher_forced.json`
 - `imagenet64/sequential_roundtrip.json` only when actually run
-- `imagenet64/traditional_codecs_val_full.json` after the complete classical baseline run
+- `imagenet64/traditional_codecs_val_full.json` for the completed classical baseline run
 
 The `teacher_forced.json` manifest reports model NLL and never claims that its
 full test-set score came from arithmetic coding. An attached roundtrip manifest
@@ -69,11 +69,20 @@ mean payload bpd is 2.7074, packed payload bpd is 2.7109, and complete-file bpd
 is 8.0703. These payload/file rates are subset measurements, not the full-set
 teacher-forced score.
 
-Traditional PNG/WebP baselines are separate from the model manifests. A first
-2,000-image ImageNet64 validation-prefix diagnostic on AutoDL (2026-08-05)
-measured PNG `optimize=True` at 5.718 bpd and WebP `lossless=True` at 4.640
-bpd with Pillow 10.3.0, zlib 1.2.13, and libwebp 1.3.2. Do not place these
-prefix measurements in the formal ImageNet64 table; run
-`scripts/traditional_codec_bpd.py --limit 0 --result_json \
-results/formal/imagenet64/traditional_codecs_val_full.json` for the complete
-49,999-image comparison and preserve its runtime/data fingerprint.
+Traditional PNG/WebP baselines are separate from the model manifests. The
+completed ImageNet64 validation-set run (49,999 images, AutoDL, 2026-08-06)
+reports:
+
+| Codec | Samples | Complete-file bpd | Per-image std |
+|---|---:|---:|---:|
+| PNG (`optimize=True`) | 49,999 | **5.7063** | 0.9151 |
+| WebP (`lossless=True`) | 49,999 | **4.6365** | 0.9448 |
+
+The manifest is
+[`imagenet64/traditional_codecs_val_full.json`](imagenet64/traditional_codecs_val_full.json).
+The denominator is `H*W*C` and encoded file headers are included. Runtime
+versions are Pillow 10.3.0, zlib 1.2.13, and libwebp 1.3.2. The earlier
+2,000-image prefix diagnostic (PNG 5.718 bpd / WebP 4.640 bpd) remains a
+separate exploratory record. These complete-file rates must not be conflated
+with the CC-iGPT teacher-forced ideal-model NLL, which is not a measured
+arithmetic payload or complete-file rate.

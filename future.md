@@ -39,12 +39,12 @@ q_theta(x_fine | x_coarse)
 
 ---
 
-## 1. 当前状态（截至 2026-08-04；Phase D 完成 2026-05-27，下游任务 + 前端无损面板 2026-05-29，IN64 训练完成 2026-06-07，CIFAR/IN64 正式 teacher-forced 重评完成 2026-08-04）
+## 1. 当前状态（截至 2026-08-06；Phase D 完成 2026-05-27，下游任务 + 前端无损面板 2026-05-29，IN64 训练完成 2026-06-07，CIFAR/IN64 正式 teacher-forced 重评完成 2026-08-04，ImageNet64 传统 codec baseline 完成 2026-08-06）
 
 - **CC-iGPT v2 历史实验结果（Phase D 完成，diagnostic protocol）**：ensemble (best+SWA+EMA) + TTA hflip = **2.8296 bpd**；旧 `±0.0854` 口径不作为新逐图 std。CIFAR-10 正式单模型/no-TTA 数字现为 **2.8328 bpd**（详 §0）
 - **CIFAR-10 正式 teacher-forced 结果（2026-08-04）**：single `best.pth` + no TTA = **2.8328 bpd**；10,000 张，逐图 std 0.6719，95% bootstrap CI `[2.8201, 2.8456]`。同一 codec identity 的 2 张 sequential roundtrip 已 `verified_on_subset`，均 pixel-exact；子集 mean payload `2.7074 bpd`、packed payload `2.7109 bpd`、完整 file `8.0703 bpd`，不外推到全量测试集。
 - **ImageNet64 正式 teacher-forced 结果（2026-08-03）**：single `best.pth` + no TTA = **3.4812 bpd**；49,999 张，逐图 std 0.9040，95% bootstrap CI `[3.4734, 3.4898]`，manifest 见 `results/formal/imagenet64/teacher_forced.json`。sequential roundtrip 尚未执行。
-- **ImageNet64 传统 codec 诊断（2026-08-05）**：验证集前 2,000 张 PNG = **5.718 bpd**、WebP lossless = **4.640 bpd**；这是固定前缀抽样，完整 49,999 张基线仍待 `--limit 0` 重跑后再进入正式比较。
+- **ImageNet64 传统 codec baseline（2026-08-06）**：验证集完整 49,999 张 PNG = **5.7063 bpd**、WebP lossless = **4.6365 bpd**；这是包含文件头的 complete-file bpd，运行时为 Pillow 10.3.0 / zlib 1.2.13 / libwebp 1.3.2，manifest 为 `results/formal/imagenet64/traditional_codecs_val_full.json`。此前前 2,000 张固定前缀诊断值 PNG `5.718` / WebP `4.640` 仍保留作抽样记录；传统 complete-file bpd 不等于 CC-iGPT teacher-forced NLL。
 - v1 历史 TTA 诊断：CC-iGPT R-only 100ep best+TTA 2.9035；旧 std 口径仅留作日志，不进入新协议比较
 - Linear probe 历史曲线 best L19 = **79.33%**；旧脚本曾用 test 选层，需按“训练集分层 validation 选层、完整 train 重训、selected layer test、多 seeds”协议重跑后再作为正式结果
 - 总参数量 **82.95M**（fine 78.14M + coarse 4.81M）
@@ -220,11 +220,11 @@ MSPA / YCbCr 色彩前端 / logit soft-capping / Gaussian label smoothing / slid
 
 | # | 任务 | 验证的 MDL 命题 | 状态 | 成本 | 抢 GPU |
 |---|---|---|---|---|---|
-| 1 | Linear probe | 压得越好 -> 表征越好 | ✅ 已有 (+IN64->CIFAR transfer 已实现) | `scripts/linear_probe.py` | 否 |
+| 1 | Linear probe | 压得越好 -> 表征越好 | 实现完成，正式无泄漏结果待重跑 | `scripts/linear_probe.py` | 否 |
 | 2 | 图像补全 (image completion) | AR 条件生成能力，Sparse Trans 同款定性展示 | ✅ 已实测 + 前端实时版 | `scripts/complete_image.py` / `POST /api/complete` | 轻微 |
 | 3 | 真实可解性 demo | 严格无损 + bitstream 真实可解 | ✅ 已实测 2/2 bit-identical + 落盘 .bin + 前端 codec 面板 | `scripts/verify_lossless.py` | 轻微 |
 
-### 6.1 Linear probe（已完成 + transfer probe 已实现）
+### 6.1 Linear probe（实现完成，正式结果待补）
 
 旧脚本日志为 with α·coarse_ctx 的 L19 `79.33%`，但该层由 test curve 选择，只能视为探索性结果。新脚本使用 validation 选层、多 seeds，并仅对选定层做最终 test；重跑后再与 iGPT-S 比较。
 
@@ -605,7 +605,7 @@ metrics: bpp, PSNR, MS-SSIM, LPIPS, FID
 
 #### E3.3 代码改造清单
 
-> **实现状态（2026-08-04）**：CPU 协议地基已完成。现有代码包含可序列化/哈希的 `MaskSchedule.raster_chunks`、独立 `MaskedIGPT.forward_masked`、`CCMDLM` fixed-group objective、组内概率冻结的 arithmetic codec，以及 100 个合成样本和 tiny 模型的文件级 roundtrip/NLL 对账。AR schema v5 evaluator、identity-v2 roundtrip manifest 和 AutoDL 正式重评 runner 已就绪；CIFAR-10/ImageNet64 teacher-forced 评测已完成，CIFAR-10 2 张 GPU sequential roundtrip 已 `verified_on_subset`，ImageNet64 roundtrip 仍未执行。无泄漏 probe 与 CUDA backend/profiling 仍保持 pending。因此没有 CC-MDLM bpd/速度结论，也未启动 E3 训练。
+> **实现状态（2026-08-06）**：CPU 协议地基已完成。现有代码包含可序列化/哈希的 `MaskSchedule.raster_chunks`、独立 `MaskedIGPT.forward_masked`、`CCMDLM` fixed-group objective、组内概率冻结的 arithmetic codec，以及 100 个合成样本和 tiny 模型的文件级 roundtrip/NLL 对账。AR schema v5 evaluator、identity-v2 roundtrip manifest 和 AutoDL 正式重评 runner 已就绪；CIFAR-10/ImageNet64 teacher-forced 评测已完成，CIFAR-10 2 张 GPU sequential roundtrip 已 `verified_on_subset`，ImageNet64 roundtrip 仍未执行。无泄漏 probe 与 CUDA backend/profiling 仍保持 pending。因此没有 CC-MDLM bpd/速度结论，也未启动 E3 训练。
 
 仅在 CIFAR-10 上，按低风险顺序：
 
