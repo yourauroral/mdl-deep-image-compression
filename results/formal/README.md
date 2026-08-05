@@ -29,8 +29,11 @@ Expected tracked files:
 
 - `cifar10/teacher_forced.json`
 - `cifar10/sequential_roundtrip.json` when calibration was run
+- `cifar10/linear_probe_v3_no_coarse_ctx.{json,csv}`
+- `cifar10/linear_probe_v3_with_ctx.{json,csv}`
 - `imagenet64/teacher_forced.json`
 - `imagenet64/sequential_roundtrip.json` only when actually run
+- `imagenet64/linear_probe_transfer_v3.csv`
 - `imagenet64/traditional_codecs_val_full.json` for the completed classical baseline run
 
 The `teacher_forced.json` manifest reports model NLL and never claims that its
@@ -44,16 +47,19 @@ because a file is present in the output directory; reuse requires the explicit
 Generated `.bin` payloads are intentionally ignored because the JSON records
 their checksums and rate accounting.
 
-The committed ImageNet64 manifest currently reports:
+The committed ImageNet64 teacher-forced manifest currently reports:
 
 | Protocol | Samples | bpd | Per-image std | Bootstrap 95% CI |
 |---|---:|---:|---:|---:|
 | single `best.pth`, no TTA, teacher-forced | 49,999 | **3.4812** | 0.9040 | [3.4734, 3.4898] |
 
 The result uses fp32 logits and fp64 softmax, with one model member and one
-forward per image. `sequential_roundtrip.status` remains `not_run`; the score is
-therefore an ideal-model teacher-forced NLL, not a measured arithmetic payload
-or complete-file rate.
+forward per image. Its `sequential_roundtrip.status` remains `not_run` because
+the later verification was generated as a separate manifest. The independent
+`imagenet64/sequential_roundtrip.json` verifies sample index 0 with pixel-exact
+decode and reports payload `3.1597 bpd`, packed payload `3.1602 bpd`, and
+complete-file `4.5000 bpd`. This is one-image evidence only; the 3.4812 score is
+still an ideal-model teacher-forced NLL, not a full-set arithmetic/file rate.
 
 The completed AutoDL CIFAR-10 run reports the following formal score:
 
@@ -68,6 +74,20 @@ RGB-checksum-verified under the same codec identity. On this two-image subset,
 mean payload bpd is 2.7074, packed payload bpd is 2.7109, and complete-file bpd
 is 8.0703. These payload/file rates are subset measurements, not the full-set
 teacher-forced score.
+
+The v3 linear-probe artifacts use a stratified validation split for layer
+selection, five classifier seeds, and a final retrain on the full training set.
+The CIFAR-10 native probe reaches 78.558% with context (layer 18; 95% bootstrap
+CI [77.7278%, 79.3700%]) and 70.010% without context (layer 15; CI
+[69.1315%, 70.8866%]). The ImageNet64-to-CIFAR-10 transfer probe reaches
+72.656% (layer 18; CI [71.8059%, 73.4800%]).
+
+The probe and ImageNet64 roundtrip manifests record execution commit `74f945`
+with a dirty worktree and a source fingerprint from before the later Triton
+small-head fallback commit. The evaluated production configurations use
+`d_k=64`, so that fallback is not selected; nevertheless, rerun on a clean
+current revision before treating these artifacts as clean-commit release
+evidence.
 
 Traditional PNG/WebP baselines are separate from the model manifests. The
 completed ImageNet64 validation-set run (49,999 images, AutoDL, 2026-08-06)
