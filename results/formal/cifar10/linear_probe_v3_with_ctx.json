@@ -1,0 +1,974 @@
+{
+  "protocol": {
+    "schema": "mdlic-linear-probe-v3",
+    "selection_split": "stratified validation subset of training data",
+    "test_policy": "selected layer only; retrained on full training set",
+    "val_fraction": 0.1,
+    "split_seed": 0,
+    "classifier_seeds": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "classifier_seed_variation": "sample standard deviation across linear-head seeds; descriptive, not a CI",
+    "sample_bootstrap_ci": "95% percentile bootstrap over final-test samples after averaging per-sample correctness across the fixed classifier seeds",
+    "bootstrap_samples": 2000,
+    "bootstrap_seed": 0
+  },
+  "run": {
+    "config": "configs/ccigpt_cifar10_s_rgb_ronly_v2.yaml",
+    "checkpoint": "experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/best.pth",
+    "model_type": "ccigpt",
+    "probe_dataset": "cifar10",
+    "num_classes": 10,
+    "N_layers": 32,
+    "d_model": 448,
+    "model_image_size": 32,
+    "coarse_ctx": "with",
+    "epochs": 100,
+    "lr": 0.1,
+    "batch_size": 256
+  },
+  "artifacts": {
+    "config": {
+      "path": "/root/work/mdl-deep-image-compression/configs/ccigpt_cifar10_s_rgb_ronly_v2.yaml",
+      "size_bytes": 3445,
+      "sha256": "5d2cf6e0448020cda88390b85713cef50487be456d4f796a63b0c87c172a6d23"
+    },
+    "checkpoint": {
+      "path": "/root/work/mdl-deep-image-compression/experiments/ccigpt_cifar10_s_rgb_ronly_v2/checkpoints/best.pth",
+      "size_bytes": 331968143,
+      "sha256": "fa92bda989cef47b67c3b17ef76d99a8809859e1f0642dd93cda993424252f57"
+    }
+  },
+  "git": {
+    "commit": "74f945b1473796746d88745552136037ab7c3b92",
+    "dirty": true,
+    "execution_source_sha256": "6e1f2cc34225a6d9ec9c6ae86c4a810898eceb52da66e976d7078b4f9328adf6",
+    "execution_source_file_count": 49,
+    "execution_source": {
+      "schema": "mdlic-execution-source-v1",
+      "files": [
+        {
+          "path": "pyproject.toml",
+          "size_bytes": 1099,
+          "sha256": "48f1815debf085ffe5fddca5363ce465e2e6334756b497cc1b90a898e76fc399"
+        },
+        {
+          "path": "scripts/complete_image.py",
+          "size_bytes": 6203,
+          "sha256": "56b7d9c395fb9c7fa58abcd781be09f48611a95ce7ac83e9e1f9b8b0cb12b9ec"
+        },
+        {
+          "path": "scripts/evaluate.py",
+          "size_bytes": 52883,
+          "sha256": "2f2c6d6c59fd32384fe53fc8873112a893b9559e7f8618bc44a8ccfd6aa000d9"
+        },
+        {
+          "path": "scripts/linear_probe.py",
+          "size_bytes": 37544,
+          "sha256": "b49b634a86da8c05a474eeeb316359feaa36118ab3d478c548c6a7f917b391af"
+        },
+        {
+          "path": "scripts/pixelsnail_paramcount.py",
+          "size_bytes": 5502,
+          "sha256": "f5081fb1d825b1fb0a4022e8068314ef7e6a8c66ae14875b029f3ee8a5232282"
+        },
+        {
+          "path": "scripts/prepare_imagenet64_png.py",
+          "size_bytes": 4221,
+          "sha256": "24e1ef7d21117dd3160d148bad496aa3bc89ce7619bfd8694a74db301b2887c8"
+        },
+        {
+          "path": "scripts/prepare_imagenet64_streaming.py",
+          "size_bytes": 12674,
+          "sha256": "ae2604d9269c536d6f903a331bd7d77b6a028a1ea85b57f2574323fcc0d1c50d"
+        },
+        {
+          "path": "scripts/profile_kernels.py",
+          "size_bytes": 25024,
+          "sha256": "7885043f6c7abd4a21ea83e1bb0f6ae0227f7496d55b1c3055cbf42e697ad747"
+        },
+        {
+          "path": "scripts/render_report_figures.py",
+          "size_bytes": 5297,
+          "sha256": "eed8192b8125f6cef12cfe70a9b4b7c56ee4bcec82a4127f340609ad3d55b4fe"
+        },
+        {
+          "path": "scripts/run_formal_evaluations.py",
+          "size_bytes": 6858,
+          "sha256": "7447ea44d79238afa6e8de23d6884bcd771e523519fdc7e2ca291e5ecc67261f"
+        },
+        {
+          "path": "scripts/traditional_codec_bpd.py",
+          "size_bytes": 5356,
+          "sha256": "faca4191677267584da462fb569f8102708dfd7a268043682932320a4f0138d7"
+        },
+        {
+          "path": "scripts/train.py",
+          "size_bytes": 68756,
+          "sha256": "4a877facf7b4e42d2e98f68cebf601c1c5ea3bc6af121cbc0a1883af24c40764"
+        },
+        {
+          "path": "scripts/verify_lossless.py",
+          "size_bytes": 18806,
+          "sha256": "4ed8e08cac344ca3b90f5f53f16deff599269d2c1c533e22507e65fb2f0759a7"
+        },
+        {
+          "path": "src/mdlic/__init__.py",
+          "size_bytes": 143,
+          "sha256": "999f121bb89a0f321b675e1e31ec9cca642da8886f9e919a6445d00d1e71b31f"
+        },
+        {
+          "path": "src/mdlic/codec/__init__.py",
+          "size_bytes": 849,
+          "sha256": "c2b5c99ca94a227c6254c819a58bda57443e37d0c58a3f2333732e2a6246d2c0"
+        },
+        {
+          "path": "src/mdlic/codec/arithmetic.py",
+          "size_bytes": 10594,
+          "sha256": "62f68feb21f89544025b5f09f7c19c212244b03df9d553e0b00e957c0ca57bc1"
+        },
+        {
+          "path": "src/mdlic/codec/container.py",
+          "size_bytes": 23596,
+          "sha256": "24b8a0154a059a4724a9a53842a80688c52c25976b18074b963b3ebb34e2d73f"
+        },
+        {
+          "path": "src/mdlic/codec/grouped.py",
+          "size_bytes": 11996,
+          "sha256": "9db7e16d351e20401bff23d5522575c8c8cd183319efa94edfac87fba70ea3b8"
+        },
+        {
+          "path": "src/mdlic/codec/probability.py",
+          "size_bytes": 3756,
+          "sha256": "4ea088caa55971a38a5f4050cc38e2a0a015946458d8d5da12a35e0993cf45ec"
+        },
+        {
+          "path": "src/mdlic/codec/sequential.py",
+          "size_bytes": 4889,
+          "sha256": "1edf2a82b7ee4827f77a10d5875b808eb9ff37f06e6516119d638aef91049aaa"
+        },
+        {
+          "path": "src/mdlic/codec/verification.py",
+          "size_bytes": 9759,
+          "sha256": "1457c8f86fad79db2de7289874786f43a2afa8c44c77ea4046f6b8d6521bc237"
+        },
+        {
+          "path": "src/mdlic/completion.py",
+          "size_bytes": 3934,
+          "sha256": "28652483a222eca6223677e0271e603a7f526682786d989f92d61b3083642b34"
+        },
+        {
+          "path": "src/mdlic/data/__init__.py",
+          "size_bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "path": "src/mdlic/data/evaluation.py",
+          "size_bytes": 2208,
+          "sha256": "2f1e8a5c84f43395699dc396bf93dc9972bab97ab9dbd1010cbe227d2db9b01c"
+        },
+        {
+          "path": "src/mdlic/data/imagenet64_npy.py",
+          "size_bytes": 1335,
+          "sha256": "ea4d5f17e7870a96cf6d7e7894e225e216cd23e3eae8c5fcd6ed85466df1a8a7"
+        },
+        {
+          "path": "src/mdlic/data/manifest.py",
+          "size_bytes": 4126,
+          "sha256": "b5a8d970c26bbe994017a31f285ccc6ec9791de7d7f3bc45f5a971b25acdbd69"
+        },
+        {
+          "path": "src/mdlic/eval_metrics.py",
+          "size_bytes": 2468,
+          "sha256": "feeb5c9dba2831c68bc20819e63d10e27790b2bd31274120451d5feaffbba6cf"
+        },
+        {
+          "path": "src/mdlic/masking_scheduler.py",
+          "size_bytes": 6548,
+          "sha256": "5b0c95266511c2f38e3ab5287f8c73615e9ba5f8932b6303ef185372dc075e9c"
+        },
+        {
+          "path": "src/mdlic/model_factory.py",
+          "size_bytes": 2340,
+          "sha256": "c225fd9db450b538e2431bfc64ecda55b2a6401f24917bb0c91347b25e7ba11b"
+        },
+        {
+          "path": "src/mdlic/models/__init__.py",
+          "size_bytes": 115,
+          "sha256": "b6b2a0b77423ccc83a524556e9f6d26bc2c4d85108cde7095a7c700d08abac08"
+        },
+        {
+          "path": "src/mdlic/models/cc_igpt.py",
+          "size_bytes": 10606,
+          "sha256": "991cd524b57dfb0e72aa251e3e84029c456ef6da208af4c37530021aa579f87e"
+        },
+        {
+          "path": "src/mdlic/models/cc_mdlm.py",
+          "size_bytes": 4883,
+          "sha256": "a527190b01af65f486102c52a1541046260341d1bc9986633af8c39d462ac9d9"
+        },
+        {
+          "path": "src/mdlic/models/igpt.py",
+          "size_bytes": 9161,
+          "sha256": "a9e9b2df156c2598cd1f2af336a72960a3514b632b8461890a7462cf013ebd2b"
+        },
+        {
+          "path": "src/mdlic/models/layers.py",
+          "size_bytes": 19745,
+          "sha256": "2d077582cb1f43eb365c2baa7c4b2b52b3a7ffb7add54a5738cb7135dff37f56"
+        },
+        {
+          "path": "src/mdlic/models/masked_igpt.py",
+          "size_bytes": 7205,
+          "sha256": "ab51423669f14d64b36c8ae83d5df0396325b5e383ee5d23ad3cd23b7f531807"
+        },
+        {
+          "path": "src/mdlic/ops/__init__.py",
+          "size_bytes": 1256,
+          "sha256": "23ed232cf899ad8c678b4c7b624109924250594c4dd5a0b1e2d9f107a25a027a"
+        },
+        {
+          "path": "src/mdlic/ops/flash_attn.py",
+          "size_bytes": 36630,
+          "sha256": "c9a38d4bdce349a657c08a74541bf0b24716ca1a879f627b0896b4f5bbcfa441"
+        },
+        {
+          "path": "src/mdlic/ops/fused_add_rms_norm.py",
+          "size_bytes": 8041,
+          "sha256": "84a6652a973860612d91adf7179f7952fda11a42f9351fceffd417d784d226e2"
+        },
+        {
+          "path": "src/mdlic/ops/fused_attn_rope.py",
+          "size_bytes": 2352,
+          "sha256": "04aa3e88ac7a56a27ac08a453d02538de64fbc8fbd13c0642aa78fe24e6ccf66"
+        },
+        {
+          "path": "src/mdlic/ops/fused_ce_zloss.py",
+          "size_bytes": 10966,
+          "sha256": "74f1dccdbf8a98f79c1161de7d84dbcf7e316e2a223c7d71b82e7041121545f2"
+        },
+        {
+          "path": "src/mdlic/ops/fused_linear_ce.py",
+          "size_bytes": 17017,
+          "sha256": "2661b9bc650ec52ab374d6dcb46df5d28caf76ae4057d2534e7cf0f3dad56209"
+        },
+        {
+          "path": "src/mdlic/ops/fused_rms_norm.py",
+          "size_bytes": 8445,
+          "sha256": "11767112afedfc4d0eb788b09540fb3d57b003752985d9a5753826fc41062ad8"
+        },
+        {
+          "path": "src/mdlic/ops/fused_rope.py",
+          "size_bytes": 5460,
+          "sha256": "2517250dc5bae307d17ee32a7535b1db2ce5c5a4833f5febb83f78fa9a9387ba"
+        },
+        {
+          "path": "src/mdlic/ops/fused_swiglu.py",
+          "size_bytes": 6866,
+          "sha256": "89fb126966d4f9ce4295a20ae57e06a3dfea3792fb96fa3ca0a71753f5390d64"
+        },
+        {
+          "path": "src/mdlic/provenance.py",
+          "size_bytes": 9912,
+          "sha256": "9a78fc40cd4e71d617b47674fd62aa76ce0fbc3bea21a46863ba0927e75b925d"
+        },
+        {
+          "path": "src/mdlic/rate.py",
+          "size_bytes": 2735,
+          "sha256": "f4d9093ecc72d6947822e8538060ed47843408efe815f93d4127ea7af23ccb95"
+        },
+        {
+          "path": "src/mdlic/request_limits.py",
+          "size_bytes": 2068,
+          "sha256": "9c56c0932d9d8bde83d5c82ffb729e3a713d0e665fe0a1ff52fc0e68749cacb0"
+        },
+        {
+          "path": "src/mdlic/traditional_codecs.py",
+          "size_bytes": 2229,
+          "sha256": "2c96bafe347329c555a5dc3d42751b1fd4c1750a62fb2b79e8c90c48c6676ed0"
+        },
+        {
+          "path": "src/mdlic/utils/__init__.py",
+          "size_bytes": 3345,
+          "sha256": "1dfa40f60e40ca1b7ead8ea1f2f2e131e69c6dfa57df8fa73b71292e63914106"
+        }
+      ],
+      "file_count": 49,
+      "fingerprint_sha256": "6e1f2cc34225a6d9ec9c6ae86c4a810898eceb52da66e976d7078b4f9328adf6"
+    }
+  },
+  "runtime": {
+    "python": "3.12.3",
+    "platform": "Linux-5.15.0-124-generic-x86_64-with-glibc2.35",
+    "packages": {
+      "numpy": "1.26.4",
+      "pillow": "10.3.0",
+      "torch": "2.3.0+cu121",
+      "torchvision": "0.18.0+cu121",
+      "triton": "3.6.0"
+    },
+    "cuda_runtime": "12.1",
+    "cuda_driver": "565.57.01",
+    "cudnn": 8902,
+    "device": "cuda",
+    "device_type": "cuda",
+    "device_name": "NVIDIA H800 PCIe",
+    "device_capability": [
+      9,
+      0
+    ],
+    "numerics": {
+      "deterministic_algorithms": false,
+      "deterministic_warn_only": false,
+      "cudnn_benchmark": false,
+      "cudnn_deterministic": false,
+      "float32_matmul_precision": "highest",
+      "allow_tf32_matmul": false,
+      "allow_tf32_cudnn": true,
+      "flash_sdp_enabled": true,
+      "mem_efficient_sdp_enabled": true,
+      "math_sdp_enabled": true
+    },
+    "environment": {
+      "CUBLAS_WORKSPACE_CONFIG": null,
+      "NVIDIA_TF32_OVERRIDE": null
+    }
+  },
+  "datasets": {
+    "train": {
+      "name": "cifar10",
+      "split": "train",
+      "size": 50000,
+      "storage_shape": [
+        50000,
+        32,
+        32,
+        3
+      ],
+      "storage_dtype": "uint8",
+      "preprocessing": {
+        "schema": "mdlic-linear-probe-input-v1",
+        "steps": [
+          {
+            "op": "ToTensor",
+            "conversion": "uint8 HWC to float32 CHW in [0,1]"
+          }
+        ],
+        "augmentation": null
+      },
+      "sources": [
+        {
+          "name": "data_batch_1",
+          "size_bytes": 31035704,
+          "sha256": "54636561a3ce25bd3e19253c6b0d8538147b0ae398331ac4a2d86c6d987368cd"
+        },
+        {
+          "name": "data_batch_2",
+          "size_bytes": 31035320,
+          "sha256": "766b2cef9fbc745cf056b3152224f7cf77163b330ea9a15f9392beb8b89bc5a8"
+        },
+        {
+          "name": "data_batch_3",
+          "size_bytes": 31035999,
+          "sha256": "0f00d98ebfb30b3ec0ad19f9756dc2630b89003e10525f5e148445e82aa6a1f9"
+        },
+        {
+          "name": "data_batch_4",
+          "size_bytes": 31035696,
+          "sha256": "3f7bb240661948b8f4d53e36ec720d8306f5668bd0071dcb4e6c947f78e9682b"
+        },
+        {
+          "name": "data_batch_5",
+          "size_bytes": 31035623,
+          "sha256": "d91802434d8376bbaeeadf58a737e3a1b12ac839077e931237e0dcd43adcb154"
+        }
+      ],
+      "configured_path": "/root/work/mdl-deep-image-compression/datasets",
+      "source_files": [
+        {
+          "path": "/root/work/mdl-deep-image-compression/datasets/cifar-10-batches-py/data_batch_1",
+          "size_bytes": 31035704,
+          "sha256": "54636561a3ce25bd3e19253c6b0d8538147b0ae398331ac4a2d86c6d987368cd"
+        },
+        {
+          "path": "/root/work/mdl-deep-image-compression/datasets/cifar-10-batches-py/data_batch_2",
+          "size_bytes": 31035320,
+          "sha256": "766b2cef9fbc745cf056b3152224f7cf77163b330ea9a15f9392beb8b89bc5a8"
+        },
+        {
+          "path": "/root/work/mdl-deep-image-compression/datasets/cifar-10-batches-py/data_batch_3",
+          "size_bytes": 31035999,
+          "sha256": "0f00d98ebfb30b3ec0ad19f9756dc2630b89003e10525f5e148445e82aa6a1f9"
+        },
+        {
+          "path": "/root/work/mdl-deep-image-compression/datasets/cifar-10-batches-py/data_batch_4",
+          "size_bytes": 31035696,
+          "sha256": "3f7bb240661948b8f4d53e36ec720d8306f5668bd0071dcb4e6c947f78e9682b"
+        },
+        {
+          "path": "/root/work/mdl-deep-image-compression/datasets/cifar-10-batches-py/data_batch_5",
+          "size_bytes": 31035623,
+          "sha256": "d91802434d8376bbaeeadf58a737e3a1b12ac839077e931237e0dcd43adcb154"
+        }
+      ],
+      "fingerprint_sha256": "da5564b80e6cbae414eefd989582bef57a3ddd4856847769778d6b18931792f3"
+    },
+    "test": {
+      "name": "cifar10",
+      "split": "test",
+      "size": 10000,
+      "storage_shape": [
+        10000,
+        32,
+        32,
+        3
+      ],
+      "storage_dtype": "uint8",
+      "preprocessing": {
+        "schema": "mdlic-linear-probe-input-v1",
+        "steps": [
+          {
+            "op": "ToTensor",
+            "conversion": "uint8 HWC to float32 CHW in [0,1]"
+          }
+        ],
+        "augmentation": null
+      },
+      "sources": [
+        {
+          "name": "test_batch",
+          "size_bytes": 31035526,
+          "sha256": "f53d8d457504f7cff4ea9e021afcf0e0ad8e24a91f3fc42091b8adef61157831"
+        }
+      ],
+      "configured_path": "/root/work/mdl-deep-image-compression/datasets",
+      "source_files": [
+        {
+          "path": "/root/work/mdl-deep-image-compression/datasets/cifar-10-batches-py/test_batch",
+          "size_bytes": 31035526,
+          "sha256": "f53d8d457504f7cff4ea9e021afcf0e0ad8e24a91f3fc42091b8adef61157831"
+        }
+      ],
+      "fingerprint_sha256": "257d0d0364ab3999af1771e7f4f1ba6f7d204e47ee706f89dd75e6c232ab63ae"
+    }
+  },
+  "selection_split": {
+    "train_count": 45000,
+    "validation_count": 5000,
+    "train_indices_sha256": "7b0f454cd3ba39ec8bfa25d8620d5b54cd08986e9095b7ae01239f3e570797e8",
+    "validation_indices_sha256": "a3bb8ba45ead7400ee3b9b850632810e991a22762e5d8c35928f7fea8b61f17d"
+  },
+  "validation_curve": [
+    {
+      "layer": 0,
+      "classifier_seed_accuracies": {
+        "0": 42.1999990940094,
+        "1": 42.14000105857849,
+        "2": 42.340001463890076,
+        "3": 42.260000109672546,
+        "4": 42.080000042915344
+      },
+      "classifier_seed_mean": 42.20400035381317,
+      "classifier_seed_std": 0.1013906696542767,
+      "classifier_seed_min": 42.080000042915344,
+      "classifier_seed_max": 42.340001463890076,
+      "num_classifier_seeds": 5
+    },
+    {
+      "layer": 1,
+      "classifier_seed_accuracies": {
+        "0": 50.09999871253967,
+        "1": 50.13999938964844,
+        "2": 49.959999322891235,
+        "3": 50.22000074386597,
+        "4": 50.13999938964844
+      },
+      "classifier_seed_mean": 50.11199951171875,
+      "classifier_seed_std": 0.09549912179963811,
+      "classifier_seed_min": 49.959999322891235,
+      "classifier_seed_max": 50.22000074386597,
+      "num_classifier_seeds": 5
+    },
+    {
+      "layer": 2,
+      "classifier_seed_accuracies": {
+        "0": 53.97999882698059,
+        "1": 53.89999747276306,
+        "2": 53.83999943733215,
+        "3": 53.89999747276306,
+        "4": 53.88000011444092
+      },
+      "classifier_seed_mean": 53.89999866485596,
+      "classifier_seed_std": 0.050989889353100885,
+      "classifier_seed_min": 53.83999943733215,
+      "classifier_seed_max": 53.97999882698059,
+      "num_classifier_seeds": 5
+    },
+    {
+      "layer": 3,
+      "classifier_seed_accuracies": {
+        "0": 55.58000206947327,
+        "1": 55.58000206947327,
+        "2": 55.559998750686646,
+        "3": 55.62000274658203,
+        "4": 55.58000206947327
+      },
+      "classifier_seed_mean": 55.584001541137695,
+      "classifier_seed_std": 0.0219100893634987,
+      "classifier_seed_min": 55.559998750686646,
+      "classifier_seed_max": 55.62000274658203,
+      "num_classifier_seeds": 5
+    },
+    {
+      "layer": 4,
+      "classifier_seed_accuracies": {
+        "0": 56.300002336502075,
+        "1": 56.18000030517578,
+        "2": 56.220000982284546,
+        "3": 56.23999834060669,
+        "4": 56.31999969482422
+      },
+      "classifier_seed_mean": 56.25200033187866,
+      "classifier_seed_std": 0.0576196924302409,
+      "classifier_seed_min": 56.18000030517578,
+      "classifier_seed_max": 56.31999969482422,
+      "num_classifier_seeds": 5
+    },
+    {
+      "layer": 5,
+      "classifier_seed_accuracies": {
+        "0": 57.9800009727478,
+        "1": 58.079999685287476,
+        "2": 57.89999961853027,
+        "3": 57.94000029563904,
+        "4": 57.999998331069946
+      },
+      "classifier_seed_mean": 57.97999978065491,
+      "classifier_seed_std": 0.06782312969804095,
+      "classifier_seed_min": 57.89999961853027,
+      "classifier_seed_max": 58.079999685287476,
+      "num_classifier_seeds": 5
+    },
+    {
+      "layer": 6,
+      "classifier_seed_accuracies": {
+        "0": 59.2199981212616,
+        "1": 59.24000144004822,
+        "2": 59.32000279426575,
+        "3": 59.25999879837036,
+        "4": 59.28000211715698
+      },
+      "classifier_seed_mean": 59.26400065422058,
+      "classifier_seed_std": 0.0384723489784768,
+      "classifier_seed_min": 59.2199981212616,
+      "classifier_seed_max": 59.32000279426575,
+      "num_classifier_seeds": 5
+    },
+    {
+      "layer": 7,
+      "classifier_seed_accuracies": {
+        "0": 60.37999987602234,
+        "1": 60.21999716758728,
+        "2": 60.280001163482666,
+        "3": 60.339999198913574,
+        "4": 60.32000184059143
+      },
+      "classifier_seed_mean": 60.30799984931946,
+      "classifier_seed_std": 0.060992639750212636,
+      "classifier_seed_min": 60.21999716758728,
+      "classifier_seed_max": 60.37999987602234,
+      "num_classifier_seeds": 5
+    },
+    {
+      "layer": 8,
+      "classifier_seed_accuracies": {
+        "0": 62.139999866485596,
+        "1": 62.18000054359436,
+        "2": 62.26000189781189,
+        "3": 62.139999866485596,
+        "4": 62.12000250816345
+      },
+      "classifier_seed_mean": 62.16800093650818,
+      "classifier_seed_std": 0.05585726546164944,
+      "classifier_seed_min": 62.12000250816345,
+      "classifier_seed_max": 62.26000189781189,
+      "num_classifier_seeds": 5
+    },
+    {
+      "layer": 9,
+      "classifier_seed_accuracies": {
+        "0": 64.85999822616577,
+        "1": 64.819997549057,
+        "2": 64.96000289916992,
+        "3": 64.89999890327454,
+        "4": 64.89999890327454
+      },
+      "classifier_seed_mean": 64.88799929618835,
+      "classifier_seed_std": 0.0521555306705291,
+      "classifier_seed_min": 64.819997549057,
+      "classifier_seed_max": 64.96000289916992,
+      "num_classifier_seeds": 5
+    },
+    {
+      "layer": 10,
+      "classifier_seed_accuracies": {
+        "0": 67.94000267982483,
+        "1": 67.97999739646912,
+        "2": 68.09999942779541,
+        "3": 68.00000071525574,
+        "4": 67.97999739646912
+      },
+      "classifier_seed_mean": 67.99999952316284,
+      "classifier_seed_std": 0.05999952558773609,
+      "classifier_seed_min": 67.94000267982483,
+      "classifier_seed_max": 68.09999942779541,
+      "num_classifier_seeds": 5
+    },
+    {
+      "layer": 11,
+      "classifier_seed_accuracies": {
+        "0": 70.35999894142151,
+        "1": 70.26000022888184,
+        "2": 70.38000226020813,
+        "3": 70.34000158309937,
+        "4": 70.31999826431274
+      },
+      "classifier_seed_mean": 70.33200025558472,
+      "classifier_seed_std": 0.04604397826577945,
+      "classifier_seed_min": 70.26000022888184,
+      "classifier_seed_max": 70.38000226020813,
+      "num_classifier_seeds": 5
+    },
+    {
+      "layer": 12,
+      "classifier_seed_accuracies": {
+        "0": 72.10000157356262,
+        "1": 72.02000021934509,
+        "2": 71.97999954223633,
+        "3": 72.2000002861023,
+        "4": 72.079998254776
+      },
+      "classifier_seed_mean": 72.07599997520447,
+      "classifier_seed_std": 0.08414302682399767,
+      "classifier_seed_min": 71.97999954223633,
+      "classifier_seed_max": 72.2000002861023,
+      "num_classifier_seeds": 5
+    },
+    {
+      "layer": 13,
+      "classifier_seed_accuracies": {
+        "0": 73.65999817848206,
+        "1": 73.60000014305115,
+        "2": 73.60000014305115,
+        "3": 73.65999817848206,
+        "4": 73.68000149726868
+      },
+      "classifier_seed_mean": 73.63999962806702,
+      "classifier_seed_std": 0.037416410771551584,
+      "classifier_seed_min": 73.60000014305115,
+      "classifier_seed_max": 73.68000149726868,
+      "num_classifier_seeds": 5
+    },
+    {
+      "layer": 14,
+      "classifier_seed_accuracies": {
+        "0": 76.12000107765198,
+        "1": 76.13999843597412,
+        "2": 76.26000046730042,
+        "3": 76.2000024318695,
+        "4": 76.27999782562256
+      },
+      "classifier_seed_mean": 76.20000004768372,
+      "classifier_seed_std": 0.0707101892390776,
+      "classifier_seed_min": 76.12000107765198,
+      "classifier_seed_max": 76.27999782562256,
+      "num_classifier_seeds": 5
+    },
+    {
+      "layer": 15,
+      "classifier_seed_accuracies": {
+        "0": 77.78000235557556,
+        "1": 77.70000100135803,
+        "2": 77.85999774932861,
+        "3": 77.75999903678894,
+        "4": 77.7400016784668
+      },
+      "classifier_seed_mean": 77.76800036430359,
+      "classifier_seed_std": 0.05932838203069565,
+      "classifier_seed_min": 77.70000100135803,
+      "classifier_seed_max": 77.85999774932861,
+      "num_classifier_seeds": 5
+    },
+    {
+      "layer": 16,
+      "classifier_seed_accuracies": {
+        "0": 78.96000146865845,
+        "1": 78.93999814987183,
+        "2": 79.10000085830688,
+        "3": 79.04000282287598,
+        "4": 78.93999814987183
+      },
+      "classifier_seed_mean": 78.99600028991699,
+      "classifier_seed_std": 0.07127540887905988,
+      "classifier_seed_min": 78.93999814987183,
+      "classifier_seed_max": 79.10000085830688,
+      "num_classifier_seeds": 5
+    },
+    {
+      "layer": 17,
+      "classifier_seed_accuracies": {
+        "0": 79.61999773979187,
+        "1": 79.61999773979187,
+        "2": 79.60000038146973,
+        "3": 79.50000166893005,
+        "4": 79.64000105857849
+      },
+      "classifier_seed_mean": 79.5959997177124,
+      "classifier_seed_std": 0.05549675397260714,
+      "classifier_seed_min": 79.50000166893005,
+      "classifier_seed_max": 79.64000105857849,
+      "num_classifier_seeds": 5
+    },
+    {
+      "layer": 18,
+      "classifier_seed_accuracies": {
+        "0": 80.50000071525574,
+        "1": 80.44000267982483,
+        "2": 80.44000267982483,
+        "3": 80.40000200271606,
+        "4": 80.44000267982483
+      },
+      "classifier_seed_mean": 80.44400215148926,
+      "classifier_seed_std": 0.03577652706997747,
+      "classifier_seed_min": 80.40000200271606,
+      "classifier_seed_max": 80.50000071525574,
+      "num_classifier_seeds": 5
+    },
+    {
+      "layer": 19,
+      "classifier_seed_accuracies": {
+        "0": 80.15999794006348,
+        "1": 80.14000058174133,
+        "2": 80.22000193595886,
+        "3": 80.09999990463257,
+        "4": 80.19999861717224
+      },
+      "classifier_seed_mean": 80.1639997959137,
+      "classifier_seed_std": 0.0477496545452848,
+      "classifier_seed_min": 80.09999990463257,
+      "classifier_seed_max": 80.22000193595886,
+      "num_classifier_seeds": 5
+    },
+    {
+      "layer": 20,
+      "classifier_seed_accuracies": {
+        "0": 79.91999983787537,
+        "1": 79.83999848365784,
+        "2": 79.8799991607666,
+        "3": 79.91999983787537,
+        "4": 79.83999848365784
+      },
+      "classifier_seed_mean": 79.8799991607666,
+      "classifier_seed_std": 0.04000067710876465,
+      "classifier_seed_min": 79.83999848365784,
+      "classifier_seed_max": 79.91999983787537,
+      "num_classifier_seeds": 5
+    },
+    {
+      "layer": 21,
+      "classifier_seed_accuracies": {
+        "0": 79.83999848365784,
+        "1": 79.8200011253357,
+        "2": 79.86000180244446,
+        "3": 79.8799991607666,
+        "4": 79.75999712944031
+      },
+      "classifier_seed_mean": 79.83199954032898,
+      "classifier_seed_std": 0.04604449607784374,
+      "classifier_seed_min": 79.75999712944031,
+      "classifier_seed_max": 79.8799991607666,
+      "num_classifier_seeds": 5
+    },
+    {
+      "layer": 22,
+      "classifier_seed_accuracies": {
+        "0": 79.339998960495,
+        "1": 79.36000227928162,
+        "2": 79.32000160217285,
+        "3": 79.25999760627747,
+        "4": 79.339998960495
+      },
+      "classifier_seed_mean": 79.32399988174438,
+      "classifier_seed_std": 0.038472039114923536,
+      "classifier_seed_min": 79.25999760627747,
+      "classifier_seed_max": 79.36000227928162,
+      "num_classifier_seeds": 5
+    },
+    {
+      "layer": 23,
+      "classifier_seed_accuracies": {
+        "0": 79.40000295639038,
+        "1": 79.36000227928162,
+        "2": 79.32000160217285,
+        "3": 79.36000227928162,
+        "4": 79.29999828338623
+      },
+      "classifier_seed_mean": 79.34800148010254,
+      "classifier_seed_std": 0.03898875465134168,
+      "classifier_seed_min": 79.29999828338623,
+      "classifier_seed_max": 79.40000295639038,
+      "num_classifier_seeds": 5
+    },
+    {
+      "layer": 24,
+      "classifier_seed_accuracies": {
+        "0": 78.1000018119812,
+        "1": 78.1000018119812,
+        "2": 78.07999849319458,
+        "3": 78.07999849319458,
+        "4": 78.03999781608582
+      },
+      "classifier_seed_mean": 78.07999968528748,
+      "classifier_seed_std": 0.024496528769463427,
+      "classifier_seed_min": 78.03999781608582,
+      "classifier_seed_max": 78.1000018119812,
+      "num_classifier_seeds": 5
+    },
+    {
+      "layer": 25,
+      "classifier_seed_accuracies": {
+        "0": 78.39999794960022,
+        "1": 78.38000059127808,
+        "2": 78.43999862670898,
+        "3": 78.32000255584717,
+        "4": 78.35999727249146
+      },
+      "classifier_seed_mean": 78.37999939918518,
+      "classifier_seed_std": 0.04472011741480281,
+      "classifier_seed_min": 78.32000255584717,
+      "classifier_seed_max": 78.43999862670898,
+      "num_classifier_seeds": 5
+    },
+    {
+      "layer": 26,
+      "classifier_seed_accuracies": {
+        "0": 77.71999835968018,
+        "1": 77.7400016784668,
+        "2": 77.7400016784668,
+        "3": 77.78000235557556,
+        "4": 77.7999997138977
+      },
+      "classifier_seed_mean": 77.75600075721741,
+      "classifier_seed_std": 0.03286372842080686,
+      "classifier_seed_min": 77.71999835968018,
+      "classifier_seed_max": 77.7999997138977,
+      "num_classifier_seeds": 5
+    },
+    {
+      "layer": 27,
+      "classifier_seed_accuracies": {
+        "0": 77.7400016784668,
+        "1": 77.5600016117096,
+        "2": 77.67999768257141,
+        "3": 77.71999835968018,
+        "4": 77.66000032424927
+      },
+      "classifier_seed_mean": 77.67199993133545,
+      "classifier_seed_std": 0.07014211454352823,
+      "classifier_seed_min": 77.5600016117096,
+      "classifier_seed_max": 77.7400016784668,
+      "num_classifier_seeds": 5
+    },
+    {
+      "layer": 28,
+      "classifier_seed_accuracies": {
+        "0": 76.94000005722046,
+        "1": 76.98000073432922,
+        "2": 76.88000202178955,
+        "3": 76.98000073432922,
+        "4": 76.98000073432922
+      },
+      "classifier_seed_mean": 76.95200085639954,
+      "classifier_seed_std": 0.04381732208375121,
+      "classifier_seed_min": 76.88000202178955,
+      "classifier_seed_max": 76.98000073432922,
+      "num_classifier_seeds": 5
+    },
+    {
+      "layer": 29,
+      "classifier_seed_accuracies": {
+        "0": 76.52000188827515,
+        "1": 76.56000256538391,
+        "2": 76.53999924659729,
+        "3": 76.5999972820282,
+        "4": 76.67999863624573
+      },
+      "classifier_seed_mean": 76.57999992370605,
+      "classifier_seed_std": 0.06324426775220165,
+      "classifier_seed_min": 76.52000188827515,
+      "classifier_seed_max": 76.67999863624573,
+      "num_classifier_seeds": 5
+    },
+    {
+      "layer": 30,
+      "classifier_seed_accuracies": {
+        "0": 76.48000121116638,
+        "1": 76.39999985694885,
+        "2": 76.45999789237976,
+        "3": 76.52000188827515,
+        "4": 76.52000188827515
+      },
+      "classifier_seed_mean": 76.47600054740906,
+      "classifier_seed_std": 0.04980068078084184,
+      "classifier_seed_min": 76.39999985694885,
+      "classifier_seed_max": 76.52000188827515,
+      "num_classifier_seeds": 5
+    },
+    {
+      "layer": 31,
+      "classifier_seed_accuracies": {
+        "0": 76.44000053405762,
+        "1": 76.38000249862671,
+        "2": 76.45999789237976,
+        "3": 76.27999782562256,
+        "4": 76.35999917984009
+      },
+      "classifier_seed_mean": 76.38399958610535,
+      "classifier_seed_std": 0.07127448898599893,
+      "classifier_seed_min": 76.27999782562256,
+      "classifier_seed_max": 76.45999789237976,
+      "num_classifier_seeds": 5
+    }
+  ],
+  "selected_layer": 18,
+  "final_test": {
+    "layer": 18,
+    "classifier_seed_accuracies": {
+      "0": 78.58999967575073,
+      "1": 78.53000164031982,
+      "2": 78.57000231742859,
+      "3": 78.57000231742859,
+      "4": 78.53000164031982
+    },
+    "classifier_seed_mean": 78.55800151824951,
+    "classifier_seed_std": 0.026832381433171407,
+    "classifier_seed_min": 78.53000164031982,
+    "classifier_seed_max": 78.58999967575073,
+    "num_classifier_seeds": 5,
+    "sample_bootstrap": {
+      "accuracy": 78.558,
+      "num_eval_samples": 10000,
+      "bootstrap_samples": 2000,
+      "bootstrap_seed": 0,
+      "ci95": [
+        77.72775,
+        79.36999999999999
+      ],
+      "estimand": "accuracy averaged over the fixed classifier seeds"
+    }
+  }
+}

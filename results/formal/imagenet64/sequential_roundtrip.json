@@ -1,0 +1,490 @@
+{
+  "schema": "mdlic-sequential-codec-roundtrip-v1",
+  "protocol": {
+    "execution": "full-prefix-zero-suffix-per-token-v1",
+    "actual_arithmetic_coding": true,
+    "container_version": 2
+  },
+  "command": [
+    "/root/miniconda3/bin/python3",
+    "scripts/verify_lossless.py",
+    "--config",
+    "configs/ccigpt_imagenet64_v1.yaml",
+    "--checkpoint",
+    "experiments/ccigpt_imagenet64_v1/checkpoints/best.pth",
+    "--num_images",
+    "1",
+    "--log_every",
+    "1024",
+    "--dump_dir",
+    "results/formal/imagenet64/bitstreams",
+    "--result_json",
+    "results/formal/imagenet64/sequential_roundtrip.json"
+  ],
+  "git": {
+    "commit": "74f945b1473796746d88745552136037ab7c3b92",
+    "dirty": true,
+    "execution_source_sha256": "6e1f2cc34225a6d9ec9c6ae86c4a810898eceb52da66e976d7078b4f9328adf6",
+    "execution_source_file_count": 49,
+    "execution_source": {
+      "schema": "mdlic-execution-source-v1",
+      "files": [
+        {
+          "path": "pyproject.toml",
+          "size_bytes": 1099,
+          "sha256": "48f1815debf085ffe5fddca5363ce465e2e6334756b497cc1b90a898e76fc399"
+        },
+        {
+          "path": "scripts/complete_image.py",
+          "size_bytes": 6203,
+          "sha256": "56b7d9c395fb9c7fa58abcd781be09f48611a95ce7ac83e9e1f9b8b0cb12b9ec"
+        },
+        {
+          "path": "scripts/evaluate.py",
+          "size_bytes": 52883,
+          "sha256": "2f2c6d6c59fd32384fe53fc8873112a893b9559e7f8618bc44a8ccfd6aa000d9"
+        },
+        {
+          "path": "scripts/linear_probe.py",
+          "size_bytes": 37544,
+          "sha256": "b49b634a86da8c05a474eeeb316359feaa36118ab3d478c548c6a7f917b391af"
+        },
+        {
+          "path": "scripts/pixelsnail_paramcount.py",
+          "size_bytes": 5502,
+          "sha256": "f5081fb1d825b1fb0a4022e8068314ef7e6a8c66ae14875b029f3ee8a5232282"
+        },
+        {
+          "path": "scripts/prepare_imagenet64_png.py",
+          "size_bytes": 4221,
+          "sha256": "24e1ef7d21117dd3160d148bad496aa3bc89ce7619bfd8694a74db301b2887c8"
+        },
+        {
+          "path": "scripts/prepare_imagenet64_streaming.py",
+          "size_bytes": 12674,
+          "sha256": "ae2604d9269c536d6f903a331bd7d77b6a028a1ea85b57f2574323fcc0d1c50d"
+        },
+        {
+          "path": "scripts/profile_kernels.py",
+          "size_bytes": 25024,
+          "sha256": "7885043f6c7abd4a21ea83e1bb0f6ae0227f7496d55b1c3055cbf42e697ad747"
+        },
+        {
+          "path": "scripts/render_report_figures.py",
+          "size_bytes": 5297,
+          "sha256": "eed8192b8125f6cef12cfe70a9b4b7c56ee4bcec82a4127f340609ad3d55b4fe"
+        },
+        {
+          "path": "scripts/run_formal_evaluations.py",
+          "size_bytes": 6858,
+          "sha256": "7447ea44d79238afa6e8de23d6884bcd771e523519fdc7e2ca291e5ecc67261f"
+        },
+        {
+          "path": "scripts/traditional_codec_bpd.py",
+          "size_bytes": 5356,
+          "sha256": "faca4191677267584da462fb569f8102708dfd7a268043682932320a4f0138d7"
+        },
+        {
+          "path": "scripts/train.py",
+          "size_bytes": 68756,
+          "sha256": "4a877facf7b4e42d2e98f68cebf601c1c5ea3bc6af121cbc0a1883af24c40764"
+        },
+        {
+          "path": "scripts/verify_lossless.py",
+          "size_bytes": 18806,
+          "sha256": "4ed8e08cac344ca3b90f5f53f16deff599269d2c1c533e22507e65fb2f0759a7"
+        },
+        {
+          "path": "src/mdlic/__init__.py",
+          "size_bytes": 143,
+          "sha256": "999f121bb89a0f321b675e1e31ec9cca642da8886f9e919a6445d00d1e71b31f"
+        },
+        {
+          "path": "src/mdlic/codec/__init__.py",
+          "size_bytes": 849,
+          "sha256": "c2b5c99ca94a227c6254c819a58bda57443e37d0c58a3f2333732e2a6246d2c0"
+        },
+        {
+          "path": "src/mdlic/codec/arithmetic.py",
+          "size_bytes": 10594,
+          "sha256": "62f68feb21f89544025b5f09f7c19c212244b03df9d553e0b00e957c0ca57bc1"
+        },
+        {
+          "path": "src/mdlic/codec/container.py",
+          "size_bytes": 23596,
+          "sha256": "24b8a0154a059a4724a9a53842a80688c52c25976b18074b963b3ebb34e2d73f"
+        },
+        {
+          "path": "src/mdlic/codec/grouped.py",
+          "size_bytes": 11996,
+          "sha256": "9db7e16d351e20401bff23d5522575c8c8cd183319efa94edfac87fba70ea3b8"
+        },
+        {
+          "path": "src/mdlic/codec/probability.py",
+          "size_bytes": 3756,
+          "sha256": "4ea088caa55971a38a5f4050cc38e2a0a015946458d8d5da12a35e0993cf45ec"
+        },
+        {
+          "path": "src/mdlic/codec/sequential.py",
+          "size_bytes": 4889,
+          "sha256": "1edf2a82b7ee4827f77a10d5875b808eb9ff37f06e6516119d638aef91049aaa"
+        },
+        {
+          "path": "src/mdlic/codec/verification.py",
+          "size_bytes": 9759,
+          "sha256": "1457c8f86fad79db2de7289874786f43a2afa8c44c77ea4046f6b8d6521bc237"
+        },
+        {
+          "path": "src/mdlic/completion.py",
+          "size_bytes": 3934,
+          "sha256": "28652483a222eca6223677e0271e603a7f526682786d989f92d61b3083642b34"
+        },
+        {
+          "path": "src/mdlic/data/__init__.py",
+          "size_bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "path": "src/mdlic/data/evaluation.py",
+          "size_bytes": 2208,
+          "sha256": "2f1e8a5c84f43395699dc396bf93dc9972bab97ab9dbd1010cbe227d2db9b01c"
+        },
+        {
+          "path": "src/mdlic/data/imagenet64_npy.py",
+          "size_bytes": 1335,
+          "sha256": "ea4d5f17e7870a96cf6d7e7894e225e216cd23e3eae8c5fcd6ed85466df1a8a7"
+        },
+        {
+          "path": "src/mdlic/data/manifest.py",
+          "size_bytes": 4126,
+          "sha256": "b5a8d970c26bbe994017a31f285ccc6ec9791de7d7f3bc45f5a971b25acdbd69"
+        },
+        {
+          "path": "src/mdlic/eval_metrics.py",
+          "size_bytes": 2468,
+          "sha256": "feeb5c9dba2831c68bc20819e63d10e27790b2bd31274120451d5feaffbba6cf"
+        },
+        {
+          "path": "src/mdlic/masking_scheduler.py",
+          "size_bytes": 6548,
+          "sha256": "5b0c95266511c2f38e3ab5287f8c73615e9ba5f8932b6303ef185372dc075e9c"
+        },
+        {
+          "path": "src/mdlic/model_factory.py",
+          "size_bytes": 2340,
+          "sha256": "c225fd9db450b538e2431bfc64ecda55b2a6401f24917bb0c91347b25e7ba11b"
+        },
+        {
+          "path": "src/mdlic/models/__init__.py",
+          "size_bytes": 115,
+          "sha256": "b6b2a0b77423ccc83a524556e9f6d26bc2c4d85108cde7095a7c700d08abac08"
+        },
+        {
+          "path": "src/mdlic/models/cc_igpt.py",
+          "size_bytes": 10606,
+          "sha256": "991cd524b57dfb0e72aa251e3e84029c456ef6da208af4c37530021aa579f87e"
+        },
+        {
+          "path": "src/mdlic/models/cc_mdlm.py",
+          "size_bytes": 4883,
+          "sha256": "a527190b01af65f486102c52a1541046260341d1bc9986633af8c39d462ac9d9"
+        },
+        {
+          "path": "src/mdlic/models/igpt.py",
+          "size_bytes": 9161,
+          "sha256": "a9e9b2df156c2598cd1f2af336a72960a3514b632b8461890a7462cf013ebd2b"
+        },
+        {
+          "path": "src/mdlic/models/layers.py",
+          "size_bytes": 19745,
+          "sha256": "2d077582cb1f43eb365c2baa7c4b2b52b3a7ffb7add54a5738cb7135dff37f56"
+        },
+        {
+          "path": "src/mdlic/models/masked_igpt.py",
+          "size_bytes": 7205,
+          "sha256": "ab51423669f14d64b36c8ae83d5df0396325b5e383ee5d23ad3cd23b7f531807"
+        },
+        {
+          "path": "src/mdlic/ops/__init__.py",
+          "size_bytes": 1256,
+          "sha256": "23ed232cf899ad8c678b4c7b624109924250594c4dd5a0b1e2d9f107a25a027a"
+        },
+        {
+          "path": "src/mdlic/ops/flash_attn.py",
+          "size_bytes": 36630,
+          "sha256": "c9a38d4bdce349a657c08a74541bf0b24716ca1a879f627b0896b4f5bbcfa441"
+        },
+        {
+          "path": "src/mdlic/ops/fused_add_rms_norm.py",
+          "size_bytes": 8041,
+          "sha256": "84a6652a973860612d91adf7179f7952fda11a42f9351fceffd417d784d226e2"
+        },
+        {
+          "path": "src/mdlic/ops/fused_attn_rope.py",
+          "size_bytes": 2352,
+          "sha256": "04aa3e88ac7a56a27ac08a453d02538de64fbc8fbd13c0642aa78fe24e6ccf66"
+        },
+        {
+          "path": "src/mdlic/ops/fused_ce_zloss.py",
+          "size_bytes": 10966,
+          "sha256": "74f1dccdbf8a98f79c1161de7d84dbcf7e316e2a223c7d71b82e7041121545f2"
+        },
+        {
+          "path": "src/mdlic/ops/fused_linear_ce.py",
+          "size_bytes": 17017,
+          "sha256": "2661b9bc650ec52ab374d6dcb46df5d28caf76ae4057d2534e7cf0f3dad56209"
+        },
+        {
+          "path": "src/mdlic/ops/fused_rms_norm.py",
+          "size_bytes": 8445,
+          "sha256": "11767112afedfc4d0eb788b09540fb3d57b003752985d9a5753826fc41062ad8"
+        },
+        {
+          "path": "src/mdlic/ops/fused_rope.py",
+          "size_bytes": 5460,
+          "sha256": "2517250dc5bae307d17ee32a7535b1db2ce5c5a4833f5febb83f78fa9a9387ba"
+        },
+        {
+          "path": "src/mdlic/ops/fused_swiglu.py",
+          "size_bytes": 6866,
+          "sha256": "89fb126966d4f9ce4295a20ae57e06a3dfea3792fb96fa3ca0a71753f5390d64"
+        },
+        {
+          "path": "src/mdlic/provenance.py",
+          "size_bytes": 9912,
+          "sha256": "9a78fc40cd4e71d617b47674fd62aa76ce0fbc3bea21a46863ba0927e75b925d"
+        },
+        {
+          "path": "src/mdlic/rate.py",
+          "size_bytes": 2735,
+          "sha256": "f4d9093ecc72d6947822e8538060ed47843408efe815f93d4127ea7af23ccb95"
+        },
+        {
+          "path": "src/mdlic/request_limits.py",
+          "size_bytes": 2068,
+          "sha256": "9c56c0932d9d8bde83d5c82ffb729e3a713d0e665fe0a1ff52fc0e68749cacb0"
+        },
+        {
+          "path": "src/mdlic/traditional_codecs.py",
+          "size_bytes": 2229,
+          "sha256": "2c96bafe347329c555a5dc3d42751b1fd4c1750a62fb2b79e8c90c48c6676ed0"
+        },
+        {
+          "path": "src/mdlic/utils/__init__.py",
+          "size_bytes": 3345,
+          "sha256": "1dfa40f60e40ca1b7ead8ea1f2f2e131e69c6dfa57df8fa73b71292e63914106"
+        }
+      ],
+      "file_count": 49,
+      "fingerprint_sha256": "6e1f2cc34225a6d9ec9c6ae86c4a810898eceb52da66e976d7078b4f9328adf6"
+    }
+  },
+  "config": {
+    "path": "/root/work/mdl-deep-image-compression/configs/ccigpt_imagenet64_v1.yaml",
+    "size_bytes": 4289,
+    "sha256": "9a079b00cb4f68a9aaff315c6da7d89e15ff234615f3568f38a6aee357e53109"
+  },
+  "checkpoint": {
+    "path": "/root/work/mdl-deep-image-compression/experiments/ccigpt_imagenet64_v1/checkpoints/best.pth",
+    "size_bytes": 331968143,
+    "sha256": "3d5a403825f52c3cd286c0ed8424b2f6a2f5e53cc3e61025c2b7d625cfb22cee"
+  },
+  "model": {
+    "type": "ccigpt",
+    "codec_identity": {
+      "schema": "mdlic-codec-identity-v2",
+      "model_type": "ccigpt",
+      "checkpoint_sha256": "3d5a403825f52c3cd286c0ed8424b2f6a2f5e53cc3e61025c2b7d625cfb22cee",
+      "model_config_sha256": "c34316b25b020ffd21935500b1006f6dc2732eb0a9eb0719e2cf26bbd32c277f",
+      "codec_protocol": {
+        "name": "mdlic-wnc-arithmetic-v1",
+        "first_token_prior": "uniform-256",
+        "cdf": {
+          "total": 65536,
+          "quantizer": "min-one-largest-remainder-index-tiebreak-v1"
+        },
+        "probabilities": {
+          "logits_dtype": "float32",
+          "softmax_dtype": "float64"
+        },
+        "forward": "full-prefix-zero-suffix-per-token-v1"
+      },
+      "codec_protocol_sha256": "0da1995f85a13ffba2018746afb15934b9f4eef5961723aa9d5561963f9ce236",
+      "schedule": {
+        "name": "strict-raster-pixel-first-ar-v1",
+        "stream_order": "coarse-then-fine",
+        "within_stream": "left-to-right"
+      },
+      "schedule_sha256": "80fca7829cc0b2726269f260ca1543dbf215f65d2c5928d8ca571e65af9dba08",
+      "runtime": {
+        "schema": "mdlic-codec-runtime-v2",
+        "python": "3.12.3",
+        "platform": "Linux-5.15.0-124-generic-x86_64-with-glibc2.35",
+        "packages": {
+          "torch": "2.3.0+cu121",
+          "triton": "3.6.0"
+        },
+        "cuda_runtime": "12.1",
+        "cuda_driver": "565.57.01",
+        "cudnn": 8902,
+        "device_type": "cuda",
+        "device_name": "NVIDIA H800 PCIe",
+        "device_capability": [
+          9,
+          0
+        ],
+        "numerics": {
+          "deterministic_algorithms": false,
+          "deterministic_warn_only": false,
+          "cudnn_benchmark": false,
+          "cudnn_deterministic": false,
+          "float32_matmul_precision": "highest",
+          "allow_tf32_matmul": false,
+          "allow_tf32_cudnn": true,
+          "flash_sdp_enabled": true,
+          "mem_efficient_sdp_enabled": true,
+          "math_sdp_enabled": true
+        },
+        "environment": {
+          "CUBLAS_WORKSPACE_CONFIG": null,
+          "NVIDIA_TF32_OVERRIDE": null
+        }
+      },
+      "runtime_sha256": "e267cddb42e06111d71808d61fa9795f317cddfa8f150c65fb273fb19e27df2e",
+      "implementation": {
+        "schema": "mdlic-codec-implementation-v1",
+        "execution_source_sha256": "14726155a465ca3712bb6d7ba3b69479d355e8ce52f785f3d167a34e0e96564d",
+        "execution_source_file_count": 39
+      },
+      "implementation_sha256": "2d70d5f77d68f98aacace5e2b11973246bd7c5a9cb3b189b89a7b17a6b3bad19"
+    },
+    "codec_identity_sha256": "81b452de2155bea981f1694c78c80d598c6da9a56298d944896fa4e071406e53"
+  },
+  "dataset": {
+    "name": "imagenet64_npy",
+    "split": "val",
+    "size": 49999,
+    "storage_shape": [
+      49999,
+      64,
+      64,
+      3
+    ],
+    "storage_dtype": "uint8",
+    "preprocessing": {
+      "schema": "mdlic-rgb-preprocess-v1",
+      "steps": [
+        "read uint8 HWC sample from val.npy",
+        "transpose HWC to CHW",
+        "convert to float32 and divide by 255"
+      ],
+      "augmentation": null
+    },
+    "sources": [
+      {
+        "name": "val.npy",
+        "size_bytes": 614387840,
+        "sha256": "def0678a8ab91eca42e22ee1e24de0ecbaf3d15301b1e1e4a27b2894cc8f17e9"
+      }
+    ],
+    "configured_path": "/root/autodl-tmp/imagenet64_png",
+    "source_files": [
+      {
+        "path": "/root/autodl-tmp/imagenet64_png/val.npy",
+        "size_bytes": 614387840,
+        "sha256": "def0678a8ab91eca42e22ee1e24de0ecbaf3d15301b1e1e4a27b2894cc8f17e9"
+      }
+    ],
+    "fingerprint_sha256": "11536f25dc9a6fe6414ddd600806b69b7ecad2e63ddf929fea109050b6be5c55",
+    "preparation_manifest": {
+      "path": "/root/autodl-tmp/imagenet64_png/dataset_manifest.json",
+      "size_bytes": 2139,
+      "sha256": "a6f9e1e2b674ef91340bae2bb5d0bd9f394be288b6aa9efb7e58a964c27d636d"
+    }
+  },
+  "runtime": {
+    "python": "3.12.3",
+    "platform": "Linux-5.15.0-124-generic-x86_64-with-glibc2.35",
+    "packages": {
+      "numpy": "1.26.4",
+      "pillow": "10.3.0",
+      "torch": "2.3.0+cu121",
+      "torchvision": "0.18.0+cu121",
+      "triton": "3.6.0"
+    },
+    "cuda_runtime": "12.1",
+    "cuda_driver": "565.57.01",
+    "cudnn": 8902,
+    "device": "cuda",
+    "device_type": "cuda",
+    "device_name": "NVIDIA H800 PCIe",
+    "device_capability": [
+      9,
+      0
+    ],
+    "numerics": {
+      "deterministic_algorithms": false,
+      "deterministic_warn_only": false,
+      "cudnn_benchmark": false,
+      "cudnn_deterministic": false,
+      "float32_matmul_precision": "highest",
+      "allow_tf32_matmul": false,
+      "allow_tf32_cudnn": true,
+      "flash_sdp_enabled": true,
+      "mem_efficient_sdp_enabled": true,
+      "math_sdp_enabled": true
+    },
+    "environment": {
+      "CUBLAS_WORKSPACE_CONFIG": null,
+      "NVIDIA_TF32_OVERRIDE": null
+    }
+  },
+  "verification": {
+    "image_count": 1,
+    "sample_indices": [
+      0
+    ],
+    "all_pixel_exact": true,
+    "all_integrity_verified": true,
+    "all_rgb_checksums_verified": true,
+    "all_mdlc_v2": true
+  },
+  "summary": {
+    "mean_ideal_bpd": 3.154759867849933,
+    "mean_ref_bpd": 3.1547598838806152,
+    "mean_cdf_ideal_bpd": 3.1594547222375677,
+    "mean_payload_bpd": 3.15966796875,
+    "mean_packed_payload_bpd": 3.16015625,
+    "mean_file_bpd": 4.5,
+    "mean_cdf_quantization_delta_bpd": 0.004694854387634617,
+    "mean_coder_overhead_bpd": 0.00021324651243226356,
+    "max_abs_teacher_forced_vs_sequential_ideal_bpd": 1.6030682115086847e-08
+  },
+  "per_image": [
+    {
+      "sample_index": 0,
+      "pixel_exact": true,
+      "total_bits": 38826,
+      "achieved_bpd": 3.15966796875,
+      "payload_bpd": 3.15966796875,
+      "packed_payload_bpd": 3.16015625,
+      "file_bpd": 4.5,
+      "container_bytes": 6912,
+      "container_version": 2,
+      "integrity_verified": true,
+      "decoded_rgb_checksum_verified": true,
+      "source_rgb_sha256": "2f3720242e6a439d314a3391eff9e1dccc84ae1cf919d90575678d3eec6bbfe2",
+      "ideal_bpd": 3.154759867849933,
+      "cdf_ideal_bpd": 3.1594547222375677,
+      "coder_overhead_bpd": 0.00021324651243226356,
+      "cdf_quantization_delta_bpd": 0.004694854387634617,
+      "ref_bpd": 3.1547598838806152,
+      "N_f": 12288,
+      "coarse_bits": 1261,
+      "fine_bits": 37565,
+      "dump_path": "results/formal/imagenet64/bitstreams/img0.bin",
+      "file_bytes": 6912,
+      "file_roundtrip_ok": true
+    }
+  ]
+}
