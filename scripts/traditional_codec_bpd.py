@@ -4,6 +4,7 @@
 import argparse
 import os
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -14,7 +15,7 @@ from mdlic.data.manifest import atomic_write_json, npy_split_record
 from mdlic.traditional_codecs import codec_metadata, encode_rgb_array
 
 
-def compute_bpd(path: Path, limit: int | None) -> dict:
+def compute_bpd(path: Path, limit: int | None, *, progress_every: int = 1000) -> dict:
     data = np.load(path, mmap_mode="r")
     if data.ndim != 4 or data.shape[1:] != (64, 64, 3) or data.dtype != np.uint8:
         raise ValueError(
@@ -28,6 +29,12 @@ def compute_bpd(path: Path, limit: int | None) -> dict:
     dims = data.shape[1] * data.shape[2] * data.shape[3]
     bpd_values = {method: [] for method in ("png", "webp")}
     compressed_bytes = {method: 0 for method in bpd_values}
+    started = time.monotonic()
+    print(
+        f"[traditional] encoding {n}/{data.shape[0]} images on CPU "
+        f"(progress every {progress_every})",
+        flush=True,
+    )
 
     for i in range(n):
         image = np.asarray(data[i], dtype=np.uint8)
@@ -35,6 +42,15 @@ def compute_bpd(path: Path, limit: int | None) -> dict:
             encoded_size = len(encode_rgb_array(image, method))
             compressed_bytes[method] += encoded_size
             bpd_values[method].append(encoded_size * 8 / dims)
+        if progress_every and ((i + 1) % progress_every == 0 or i + 1 == n):
+            elapsed = time.monotonic() - started
+            rate = (i + 1) / elapsed if elapsed > 0 else 0.0
+            remaining = (n - i - 1) / rate if rate > 0 else 0.0
+            print(
+                f"[traditional] {i + 1}/{n} images; "
+                f"{rate:.1f} img/s; ETA {remaining / 60:.1f} min",
+                flush=True,
+            )
 
     results = {}
     for method, values in bpd_values.items():
@@ -47,7 +63,12 @@ def compute_bpd(path: Path, limit: int | None) -> dict:
             "compressed_bytes_total": compressed_bytes[method],
         }
 
+    print("[traditional] computing input .npy SHA-256...", flush=True)
     split = npy_split_record(path)
+    print(
+        f"[traditional] complete in {(time.monotonic() - started) / 60:.1f} min",
+        flush=True,
+    )
     return {
         "schema_version": 1,
         "protocol": "traditional_lossless_codec_bpd",
@@ -94,10 +115,25 @@ def main() -> None:
         default=None,
         help="Write a reproducible JSON manifest for this measurement.",
     )
+    parser.add_argument(
+        "--progress_every",
+        type=int,
+        default=1000,
+        help="Print CPU progress every N images; use 0 to disable.",
+    )
     args = parser.parse_args()
 
+    if args.limit < 0:
+        parser.error("--limit must be >= 0")
+    if args.progress_every < 0:
+        parser.error("--progress_every must be >= 0")
+
     limit = None if args.limit == 0 else args.limit
-    manifest = compute_bpd(args.path, limit)
+    manifest = compute_bpd(
+        args.path,
+        limit,
+        progress_every=args.progress_every,
+    )
     for method in ("png", "webp"):
         result = manifest["results"][method]
         print(f"{result['display_name']} bpd = {result['mean_bpd']:.3f}")
