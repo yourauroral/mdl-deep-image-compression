@@ -23,7 +23,7 @@ RoPE-then-FlashAttention pipeline — 两个 Triton kernel 的便捷包装。
 import math
 
 from .fused_rope import fused_apply_rotary_emb
-from .flash_attn import TritonAttention
+from .flash_attn import triton_attention
 
 
 def rope_then_flash_attn(q, k, v, cos, sin, causal=True, softmax_scale=None):
@@ -35,9 +35,10 @@ def rope_then_flash_attn(q, k, v, cos, sin, causal=True, softmax_scale=None):
 
     等价于:
       q, k = fused_apply_rotary_emb(q, k, cos, sin)
-      o = TritonAttention.apply(q, k, v, causal, scale)
+      o = triton_attention(q, k, v, causal, scale)
 
-    此包装不改变 kernel launch 数、autograd node 数或中间张量分配。
+    对 Triton 不支持的极小 head 维度，attention 会自动使用 PyTorch SDPA
+    fallback；生产配置的 d_k=64 仍走 Triton kernel。
 
     参数:
       q: (B, h, T, d_k) contiguous
@@ -57,7 +58,7 @@ def rope_then_flash_attn(q, k, v, cos, sin, causal=True, softmax_scale=None):
     # RoPE（autograd-aware，out-of-place）
     q, k = fused_apply_rotary_emb(q, k, cos, sin)
     # Flash Attention
-    o = TritonAttention.apply(q, k, v, causal, softmax_scale)
+    o = triton_attention(q, k, v, causal, softmax_scale)
     return o
 
 

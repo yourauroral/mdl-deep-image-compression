@@ -46,11 +46,11 @@ except ImportError:
 try:
     from ..ops.flash_attn import (
         BLOCK_MACRO as _TRITON_ATTN_ALIGNMENT,
-        TritonAttention as _TritonAttention,
+        triton_attention as _triton_attention,
     )
     _USE_TRITON_ATTN = True
 except ImportError:
-    _TritonAttention = None
+    _triton_attention = None
     _TRITON_ATTN_ALIGNMENT = 1
     _USE_TRITON_ATTN = False
 
@@ -374,7 +374,7 @@ class MultiHeadAttentionBlock(nn.Module):
     # 2. F.scaled_dot_product_attention（PyTorch 内置后端）
     if _USE_TRITON_ATTN and query.is_cuda and triton_shape_ok:
         softmax_scale = 1.0 / math.sqrt(self.d_k)
-        attn_output = _TritonAttention.apply(
+        attn_output = _triton_attention(
             query, key, value, is_causal, softmax_scale,
         )
     else:

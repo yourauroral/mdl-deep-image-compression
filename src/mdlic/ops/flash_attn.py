@@ -36,6 +36,7 @@ Flash Attention Triton Kernel — forward + backward with causal masking.
 """
 
 import torch
+import torch.nn.functional as F
 
 import triton
 import triton.language as tl
@@ -46,6 +47,10 @@ import triton.language as tl
 # Ref: [2] Section 3.3 — block size 选择需平衡 SRAM 占用与并行度。
 BLOCK_Q_DEFAULT = 64
 BLOCK_KV_DEFAULT = 64
+# NVIDIA Triton dot kernels require at least 16 elements in the reduction
+# dimension on the CUDA targets supported by this project.  Smaller head
+# dimensions use the PyTorch SDPA fallback exposed below.
+TRITON_MIN_DOT_K = 16
 # backward 使用较小的 micro block 和较大的 macro block
 BLOCK_MICRO = 32
 BLOCK_MACRO = 64
@@ -915,6 +920,28 @@ class TritonAttention(torch.autograd.Function):
             dV = dV[:, :, :SEQ_LEN_ORIG, :].contiguous()
 
         return dQ, dK, dV, None, None
+
+
+def triton_attention(Q, K, V, causal, softmax_scale):
+    """Run the Triton attention kernel when its dot shape is supported.
+
+    Triton rejects reductions with ``K < 16`` on SM90.  Keeping this guard at
+    the backend boundary lets small diagnostic models (for example, d_model=32
+    with four heads) use the numerically equivalent PyTorch implementation,
+    while production d_k=64 configurations still use the custom kernel.
+    """
+    if Q.shape[-1] < TRITON_MIN_DOT_K:
+        return F.scaled_dot_product_attention(
+            Q,
+            K,
+            V,
+            attn_mask=None,
+            dropout_p=0.0,
+            is_causal=causal,
+            scale=softmax_scale,
+        )
+    return TritonAttention.apply(Q, K, V, causal, softmax_scale)
+
 
 def _test_op(BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM, causal, dtype=torch.float16):
     """
