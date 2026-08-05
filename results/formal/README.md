@@ -106,3 +106,15 @@ versions are Pillow 10.3.0, zlib 1.2.13, and libwebp 1.3.2. The earlier
 separate exploratory record. These complete-file rates must not be conflated
 with the CC-iGPT teacher-forced ideal-model NLL, which is not a measured
 arithmetic payload or complete-file rate.
+
+The H800 profiling artifacts are [`profiling/h800_forward_roofline.txt`](profiling/h800_forward_roofline.txt)
+and [`profiling/h800_backward.txt`](profiling/h800_backward.txt). They use
+BF16 with `B=64`, `T=3072`, `d_model=128`, `d_ff=384`, `h=4`, and 50 timed
+repeats after 10 warmups. The forward arithmetic mean is 10.38x and the
+forward+backward arithmetic mean is 3.93x, but these are unweighted per-kernel
+means rather than end-to-end training speedups. Fused CE+z-loss is the largest
+gain (62.77x forward, 8.18x backward); the RoPE-to-FlashAttention pipeline is
+2.71x/1.44x. The diagnostic harness profiles causal attention and does not
+replace a production-shape or bidirectional CC-MDLM benchmark. `fused_linear_ce`
+is retained as a negative control: its backward speedup is 0.88x and peak
+memory is 110% higher, so it remains outside the training stack.

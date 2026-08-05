@@ -25,7 +25,7 @@
 | ImageNet64 传统 codec baseline | 已完成（完整验证集） | PNG **5.7063 bpd**；WebP lossless **4.6365 bpd**；49,999 张；complete-file bpd |
 | CC-MDLM 研究线 | 协议地基完成 | deterministic `MaskSchedule`、独立双向 `forward_masked`、group-frozen arithmetic codec 与 tiny CPU roundtrip；尚未训练、无 bpd 结论 |
 | 表征理论 | 文档完成 | [theory.md](theory.md)：linear probe 为何有效（MDL + LRH + MDL probing 三段论），含阅读清单与实验菜单 |
-| 本地/GPU 验证 | 通过（profiling 待补） | AutoDL H800：backend matrix 8/8 通过；完整 CUDA 标记测试 `368 passed, 45 skipped, 187 deselected`；kernel profiling 尚未记录 |
+| 本地/GPU 验证 | 通过（profiling 已记录） | AutoDL H800：backend matrix 8/8 通过；完整 CUDA 标记测试 `368 passed, 45 skipped, 187 deselected`；BF16 诊断 profile 已保存，训练栈 kernel 均前向 >1x，反向 attention pipeline 为 1.44x |
 
 ## Baseline 对比
 
@@ -65,7 +65,7 @@
 ### 创新点定位
 
 1. **方法 — 单标量参数的双尺度条件注入**：coarse iGPT 量化 token 经 bit-exact 反量化/上采样/重 tokenize 后，复用 `fine.token_embed` 得到 `coarse_ctx`，再以可学习标量 α 做 additive 注入。整个 ctx 通路只引入 1 个标量参数；encoder/decoder 共用同一函数，bitstream 真实可解码。历史 checkpoint 使用双流等权目标 `loss_coarse + loss_fine`；它不是严格码长加权，本轮不改变该目标。
-2. **工程 — 6 个训练用手写 Triton primitive + pipeline + 反面案例**：RoPE→FlashAttention 是两个 kernel 的组合 pipeline，不另计融合 primitive；`fused_linear_ce` 在 V=256 下保留作负收益案例。H800 backend matrix 已通过，定量 profiling 仍待执行。
+2. **工程 — 6 个训练用手写 Triton primitive + pipeline + 反面案例**：RoPE→FlashAttention 是两个 kernel 的组合 pipeline，不另计融合 primitive；`fused_linear_ce` 在 V=256 下保留作负收益案例。H800 BF16 诊断 profile（`B=64,T=3072,d_model=128,d_ff=384,h=4`）显示 fused CE+z-loss 前向/反向 `62.77x/8.18x`，RoPE→FlashAttention `2.71x/1.44x`；`fused_linear_ce` 反向 `0.88x` 且峰值显存增加约 `110%`，不进入训练栈。完整输出见 [`results/formal/profiling/`](results/formal/profiling/)。
 3. **分析 — RGB-bit-exact 评估与真实 codec 对账**：历史 ensemble/TTA 和 probe 曲线作为探索结果保留；正式产物要求单模型 manifest、逐图统计、真实 payload/file bpd 与无损 roundtrip。
 
 ## 快速开始
