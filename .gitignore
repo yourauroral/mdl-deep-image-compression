@@ -40,7 +40,6 @@ cv_template.tex
 # 论文 PDF/DOCX
 *.docx
 *.pdf
-*.txt
 *.log
 reading_plan.md
 plan.md
