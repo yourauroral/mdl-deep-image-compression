@@ -1,0 +1,33 @@
+================================================================================
+  Triton Kernel Profiling — forward+backward
+  B=64, T=3072, d_model=128, d_ff=384, h=4, V=256
+  dtype=bf16, warmup=10, repeats=50
+  GPU: NVIDIA H800 PCIe
+================================================================================
+
+Benchmarking fused_rms_norm... 8.87x
+Benchmarking fused_ce_zloss... 8.18x
+Benchmarking fused_swiglu... 1.40x
+Benchmarking fused_rope... 1.36x
+Benchmarking fused_add_rms_norm... 8.24x
+Benchmarking flash_attn... 1.07x
+Benchmarking rope_then_flash_attn... 1.44x
+Benchmarking fused_linear_ce... 0.88x
+
+================================================================================
+  性能对比表格 (forward+backward)
+================================================================================
+
+| Kernel | Shape | Custom/Triton (ms) | PyTorch (ms) | Speedup | Custom Peak Δ (MB) | PyTorch Peak Δ (MB) | Mem Save |
+|--------|-------|-----------|-------------|---------|---------------|-----------------|----------|
+| fused_rms_norm | (196608, 128) | 0.616 | 5.470 | **8.87x** | 354.8 | 738.8 | 52.0% |
+| fused_ce_zloss | (196608, 256) | 3.005 | 24.585 | **8.18x** | 192.0 | 961.5 | 80.0% |
+| fused_swiglu | (196608, 384) | 0.875 | 1.225 | **1.40x** | 576.0 | 576.0 | 0.0% |
+| fused_rope | (64, 4, 3072, 32) | 4.757 | 6.451 | **1.36x** | 288.2 | 576.8 | 50.0% |
+| fused_add_rms_norm | (196608, 128) | 0.662 | 5.459 | **8.24x** | 402.8 | 690.8 | 41.7% |
+| flash_attn | (64, 4, 3072, 32) | 6.290 | 6.699 | **1.07x** | 246.0 | 390.0 | 36.9% |
+| rope_then_flash_attn | (64, 4, 3072, 32) | 10.866 | 15.660 | **1.44x** | 342.0 | 672.8 | 49.2% |
+| fused_linear_ce | (196608, 128, 256) | 26.622 | 23.439 | **0.88x** | 1009.5 | 480.8 | -110.0% |
+
+平均加速比: 3.93x
+最大加速比: 8.87x (fused_rms_norm)

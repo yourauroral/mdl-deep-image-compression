@@ -1,0 +1,52 @@
+================================================================================
+  Triton Kernel Profiling — forward-only
+  B=64, T=3072, d_model=128, d_ff=384, h=4, V=256
+  dtype=bf16, warmup=10, repeats=50
+  GPU: NVIDIA H800 PCIe
+================================================================================
+
+Benchmarking fused_rms_norm... 5.60x
+Benchmarking fused_ce_zloss... 62.77x
+Benchmarking fused_swiglu... 1.69x
+Benchmarking fused_rope... 1.64x
+Benchmarking fused_add_rms_norm... 4.57x
+Benchmarking flash_attn... 1.13x
+Benchmarking rope_then_flash_attn... 2.71x
+Benchmarking fused_linear_ce... 2.93x
+
+================================================================================
+  性能对比表格 (forward-only)
+================================================================================
+
+| Kernel | Shape | Custom/Triton (ms) | PyTorch (ms) | Speedup | Custom Peak Δ (MB) | PyTorch Peak Δ (MB) | Mem Save |
+|--------|-------|-----------|-------------|---------|---------------|-----------------|----------|
+| fused_rms_norm | (196608, 128) | 0.136 | 0.763 | **5.60x** | 48.8 | 192.8 | 74.7% |
+| fused_ce_zloss | (196608, 256) | 0.236 | 14.798 | **62.77x** | 1.5 | 385.5 | 99.6% |
+| fused_swiglu | (196608, 384) | 0.244 | 0.412 | **1.69x** | 144.0 | 288.0 | 50.0% |
+| fused_rope | (64, 4, 3072, 32) | 1.027 | 1.685 | **1.64x** | 96.0 | 576.8 | 83.4% |
+| fused_add_rms_norm | (196608, 128) | 0.160 | 0.732 | **4.57x** | 48.8 | 288.8 | 83.1% |
+| flash_attn | (64, 4, 3072, 32) | 0.930 | 1.049 | **1.13x** | 51.0 | 51.0 | 0.0% |
+| rope_then_flash_attn | (64, 4, 3072, 32) | 1.944 | 5.276 | **2.71x** | 147.0 | 576.8 | 74.5% |
+| fused_linear_ce | (196608, 128, 256) | 4.910 | 14.384 | **2.93x** | 1.5 | 192.8 | 99.2% |
+
+平均加速比: 10.38x
+最大加速比: 62.77x (fused_ce_zloss)
+
+================================================================================
+  Roofline 分析
+================================================================================
+
+| Kernel | FLOPs | Bytes (R+W) | AI (FLOPs/B) | Actual TFLOPS | Bottleneck |
+|--------|-------|-------------|-------------|---------------|------------|
+| fused_rms_norm | 125.8M | 100.7M | 1.2 | 0.924 | **Memory** |
+| fused_ce_zloss | 151.0M | 101.4M | 1.5 | 0.641 | **Memory** |
+| fused_swiglu | 100.7M | 151.0M | 0.7 | 0.413 | **Memory** |
+| fused_rope | 302.0M | 201.7M | 1.5 | 0.294 | **Memory** |
+| fused_add_rms_norm | 151.0M | 151.0M | 1.0 | 0.942 | **Memory** |
+| flash_attn | 154.62G | 201.3M | 768.0 | 166.197 | **Compute** |
+| rope_then_flash_attn | 154.92G | 403.0M | 384.4 | 79.684 | **Compute** |
+| fused_linear_ce | 13.04G | 50.4M | 258.7 | 2.655 | **Compute** |
+
+判断标准: AI < 100 FLOPs/byte → Memory-bound（fusion 优化有效）
+          AI ≥ 100 FLOPs/byte → Compute-bound（算法优化更重要）
+
