@@ -105,7 +105,9 @@ def _attn_fwd_inner(
 
     # ─── Online Softmax 主循环 ───
     for start_kv in range(lo, hi, BLOCK_SIZE_KV):
-        start_kv = tl.multiple_of(start_kv, BLOCK_SIZE_KV)  # 编译器优化
+        # The fixed loop step already guarantees alignment.  Calling
+        # ``tl.multiple_of`` here breaks on Triton versions that treat this
+        # range value as a constexpr rather than a tensor.
 
         # 1. 加载 K 块并计算 QK^T
         K_block = tl.load(K_block_ptr)  # shape (HEAD_DIM, BLOCK_SIZE_KV)
