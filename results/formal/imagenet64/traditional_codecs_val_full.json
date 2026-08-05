@@ -1,0 +1,63 @@
+{
+  "dataset": {
+    "file": {
+      "dtype": "uint8",
+      "name": "val.npy",
+      "samples": 49999,
+      "sha256": "def0678a8ab91eca42e22ee1e24de0ecbaf3d15301b1e1e4a27b2894cc8f17e9",
+      "shape": [
+        49999,
+        64,
+        64,
+        3
+      ],
+      "size_bytes": 614387840
+    },
+    "name": "ImageNet64",
+    "path": "/root/autodl-tmp/imagenet64_png/val.npy",
+    "sample_count": 49999,
+    "selection": "prefix",
+    "split": "val",
+    "total_samples": 49999
+  },
+  "protocol": "traditional_lossless_codec_bpd",
+  "rate_accounting": {
+    "denominator": "H*W*C per image",
+    "includes_file_headers": true,
+    "metric": "complete_encoded_file_bpd",
+    "selection": "first N samples in dataset order"
+  },
+  "results": {
+    "png": {
+      "backend": "zlib",
+      "backend_version": "1.2.13",
+      "compressed_bytes_total": 438234898,
+      "display_name": "PNG (lossless)",
+      "mean_bpd": 5.706297693662207,
+      "method": "png",
+      "pil_format": "PNG",
+      "pillow_version": "10.3.0",
+      "sample_count": 49999,
+      "save_kwargs": {
+        "optimize": true
+      },
+      "std_per_image": 0.9151378166166495
+    },
+    "webp": {
+      "backend": "webp",
+      "backend_version": "1.3.2",
+      "compressed_bytes_total": 356074500,
+      "display_name": "WebP (lossless)",
+      "mean_bpd": 4.636479448338966,
+      "method": "webp",
+      "pil_format": "WEBP",
+      "pillow_version": "10.3.0",
+      "sample_count": 49999,
+      "save_kwargs": {
+        "lossless": true
+      },
+      "std_per_image": 0.9448145224726584
+    }
+  },
+  "schema_version": 1
+}
