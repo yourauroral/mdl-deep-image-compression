@@ -37,9 +37,9 @@
     "dataloader_workers_per_rank": 2
   },
   "git": {
-    "commit": "099b618c7c8157c838319219e128438da7cdee14",
-    "dirty": false,
-    "execution_source_sha256": "b87d117ccbb643a9d237f60210cab2256677d78cf6fcc5124ca4e55ded52fb61",
+    "commit": "d11347add8fb25f38ecdb1b5035041727dc23a72",
+    "dirty": true,
+    "execution_source_sha256": "f32c40aabcdf6d0461511d4d9d5d6a013db2caa32a0bf5ef3259cd2839a0d9b3",
     "execution_source_file_count": 49,
     "execution_source": {
       "schema": "mdlic-execution-source-v1",
@@ -86,8 +86,8 @@
         },
         {
           "path": "scripts/render_report_figures.py",
-          "size_bytes": 5180,
-          "sha256": "d25a31385922eee970a33e403471c00d495bef484923bfc94517cca99f6e7eb4"
+          "size_bytes": 5297,
+          "sha256": "eed8192b8125f6cef12cfe70a9b4b7c56ee4bcec82a4127f340609ad3d55b4fe"
         },
         {
           "path": "scripts/run_formal_evaluations.py",
@@ -96,8 +96,8 @@
         },
         {
           "path": "scripts/traditional_codec_bpd.py",
-          "size_bytes": 2160,
-          "sha256": "da35b24282661bdf2ef1f98915f650cd2f521dabe176cbedb2b20659d656788f"
+          "size_bytes": 5356,
+          "sha256": "faca4191677267584da462fb569f8102708dfd7a268043682932320a4f0138d7"
         },
         {
           "path": "scripts/train.py",
@@ -211,8 +211,8 @@
         },
         {
           "path": "src/mdlic/models/layers.py",
-          "size_bytes": 19745,
-          "sha256": "2d077582cb1f43eb365c2baa7c4b2b52b3a7ffb7add54a5738cb7135dff37f56"
+          "size_bytes": 19743,
+          "sha256": "a812f5ef81907cb7180b560dc946962bfbd02fc7f1cfe2c3db4c417d8149bc25"
         },
         {
           "path": "src/mdlic/models/masked_igpt.py",
@@ -226,8 +226,8 @@
         },
         {
           "path": "src/mdlic/ops/flash_attn.py",
-          "size_bytes": 36504,
-          "sha256": "3453f8934661143de7f38e004174e2ef68131d81f9f33330ec68d11044414b87"
+          "size_bytes": 37656,
+          "sha256": "36090538f30c94760237e4a11639c9a2d3bb6242738993dca36fd78c65108d6b"
         },
         {
           "path": "src/mdlic/ops/fused_add_rms_norm.py",
@@ -236,8 +236,8 @@
         },
         {
           "path": "src/mdlic/ops/fused_attn_rope.py",
-          "size_bytes": 2352,
-          "sha256": "04aa3e88ac7a56a27ac08a453d02538de64fbc8fbd13c0642aa78fe24e6ccf66"
+          "size_bytes": 2407,
+          "sha256": "d05ffa0993ad0be9b90546d2e174f8f3db63a863c8dea0f01fdfdce9daa1f91e"
         },
         {
           "path": "src/mdlic/ops/fused_ce_zloss.py",
@@ -291,12 +291,12 @@
         }
       ],
       "file_count": 49,
-      "fingerprint_sha256": "b87d117ccbb643a9d237f60210cab2256677d78cf6fcc5124ca4e55ded52fb61"
+      "fingerprint_sha256": "f32c40aabcdf6d0461511d4d9d5d6a013db2caa32a0bf5ef3259cd2839a0d9b3"
     }
   },
   "config": {
     "path": "/root/work/mdl-deep-image-compression/configs/ccigpt_imagenet64_v1.yaml",
-    "sha256": "755b2200c2acc65654a6ac5453ea03a61fdd24a6a83356df3fa9c6df0e16c246",
+    "sha256": "9a079b00cb4f68a9aaff315c6da7d89e15ff234615f3568f38a6aee357e53109",
     "model_type": "ccigpt"
   },
   "checkpoints": [
